@@ -1,0 +1,17 @@
+# Line endings and binary files.
+#
+# Why this file exists: the repository is developed on Windows, where git defaults
+# to core.autocrlf=true. Without a declaration here, a fresh checkout (or a
+# `git archive` export) hands CRLF files to whoever reads them, and the contour
+# test harnesses slice declarations out of client.js BY LINE — they then silently
+# miss declarations and fail for a reason that has nothing to do with the engine.
+# This actually happened with the first packaged archive.
+#
+# So: store and check out LF everywhere, and make the webp screenshots explicitly
+# binary so nothing ever tries to normalise them.
+* text=auto eol=lf
+
+*.webp binary
+*.png binary
+*.jpg binary
+*.ico binary

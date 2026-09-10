@@ -44,7 +44,7 @@
 | **谷地黄**（默认） | `#fff500` | 86.6% | 终末地官网的信号黄 |
 | **武陵青** | `#14d0d0` | 49.8% | 青碧色 |
 
-存储键 `dsh-theme-endfield-palette`，取值 `valley` / `wuling`。只有精确值 `wuling` 选中武陵青，未设置或异常值都回落到默认。
+存储键 `dsh-theme-endfield-contour-rework-palette`，取值 `valley` / `wuling`。只有精确值 `wuling` 选中武陵青，未设置或异常值都回落到默认。
 
 ### 语义状态色
 

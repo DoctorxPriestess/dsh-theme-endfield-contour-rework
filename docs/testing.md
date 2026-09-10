@@ -10,7 +10,22 @@ npm test           # 上面两项 + 配色 / 设置页 / 渲染 / 覆盖率 / �
 
 第二条原则：**每条断言都做过反向对照（变异验证）。** 故意把被测行为改坏，确认该断言真的会失败。一个从未被观察到失败过的校验，不能算证据。
 
-> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chrome 做无头渲染，需要本机安装 Chrome。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`。
+> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chromium 做无头渲染，需要本机安装 Chrome / Chromium / Edge。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`、`contour-cusps`、`contour-smoothness`、`contour-perf`、`prefs-key-mapping`、`migrate-prefs`、`fork-identity-check`、`browser-discovery`（它不启动浏览器，只验证发现逻辑本身）。
+>
+> **浏览器怎么找、结果怎么取**（`test/lib/browser.js`，全仓唯一一处）。原先每个测试各自内联一份候选路径、只查机器级安装位置，也不校验存在性；Chrome 默认装在 `%LOCALAPPDATA%` 就找不到，于是「换一台机器」容易变成「一个测试都跑不起来，而且错误信息是空的」。现在顺序是：`CHROME_PATH` / `CHROME_BIN` / `EDGE_PATH` / `PUPPETEER_EXECUTABLE_PATH` → PATH 查询（`where` / `which`）→ 按用户安装 → 机器级安装 → `EdgeCore\<版本>`（Edge 152 起 Store 版布局里真实内核可能只在这里）。找不到时会打印**查过的全部路径**。
+>
+> 结果传递默认走 **DevTools 协议**而非 `--dump-dom` 的 stdout，因为后者在一类真实环境里根本不通：装了 Store(AppX) 版 Edge 的 Windows 上，`Application\msedge.exe` 只是跳转 stub，启动参数被转发进现有会话，`--version` 都没有输出，stdout 与 `--screenshot=` 文件通道全废（exit 0、空输出）。同一台机器上 `--remote-debugging-port` 却正常——headless 内核确实起来了，只是没人拿得到它的输出。所以传输层优先用 CDP（Node ≥ 22 自带 WebSocket，零依赖）取 `document.documentElement.outerHTML`，stdout 保留为后备，Linux/CI 行为不变；`--virtual-time-budget=N` 由 `Emulation.setVirtualTimePolicy` 复现（原生标志会在预算耗尽时让浏览器自行退出、把 CDP 连接一起带走；完全不快进则会让若干测试从 4 秒变成 120 秒）。
+>
+> 三个细节值得记下来，因为都咬过人：**清理残留进程必须按镜像名限定**（桥接子进程自己的命令行里也带着 profile 路径，不限定就会把正在写 stdout 的自己杀掉，症状恰好是「CDP 起不来」）；**子进程的超时必须早于父进程的 spawnSync 超时**（否则清理来不及跑，残留实例会让下一次启动被转发而连锁失败）；**CDP 模式会丢弃旧式 `--headless`**（改由传输层统一决定，避免两个标志并存带来的版本差异）。
+>
+> 清理用的 token 有一道**独特性门限**（`isUniqueToken`）：匹配是 PowerShell 的 `-like '*token*'`，大小写不敏感且只做子串判断，像 `profile` 这样的通用词会命中用户自己浏览器的 `--profile-directory="Profile 1"` 并把它们杀掉。因此只接受 mkdtemp 风格的 token（含分隔符或数字、且不是纯字母），宁可漏清理也不误杀；这条规则由 `test/browser-shot-cleanup.test.js` 正向与反向断言。
+>
+> `--screenshot=` 后备路径曾经**每张截图泄漏一个完整浏览器实例**：在 Store 版 Edge 上启动器转交请求后自己退出，「一次性进程」的假设不成立（实测一次 `thunder-shot` 留下 11 个进程），累积后让整套测试偶发 `page produced no results`。现在该路径会等截图落盘再按本次运行唯一的 profile token 清理；`test/browser-shot-cleanup.test.js` 通过**先删除全局 WebSocket** 强制走该路径，断言截图正常写出且事后零残留。
+>
+> **截图取帧的三条规矩**（都是踩出来的，详见 CHANGELOG 的「Screenshot transport made deterministic」）：
+> 一、虚拟时钟预算耗尽后时钟停住、渲染器不产帧，`Page.captureScreenshot` 会挂到超时，所以截图前要让它再推进 `CLOCK_NUDGE_MS = 100` 毫秒——**这个量必须极小**，它的作用是「让合成器产一帧」而不是「让页面继续走」；曾经用 3000ms，立刻把 `thunder-shot` 全灭（它的 1400ms 预算必须落在雷霆大字 3 秒保持窗口内）。
+> 二、快进定时器不等于已经绘制，所以截图前等两个 rAF；弹层这类有入场动画的元素还要等有限动画结束（`--wait-animations`，**按测试显式开启**——需要动画中途那一帧的测试不能开）。
+> 三、就绪判定要同时看 `readyState` 与**页面 URL**，否则会在初始 `about:blank` 上误判「已就绪」，导航销毁执行上下文后求值抛 `page threw: Uncaught`。
 
 ---
 
@@ -82,6 +97,42 @@ node test/settings-locale.test.js   # 跟随语言设置（zh/en 词典对齐 + 
 
 ---
 
+## 设置能否被读回（键 ↔ 字段）
+
+```bash
+node test/prefs-key-mapping.test.js   # 浏览器侧的偏好键 ↔ host schema 字段
+node test/migrate-prefs.test.js       # tools/migrate-prefs.js 的文本改写契约
+```
+
+**`prefs-key-mapping.test.js`** 存在的理由是一个真实缺陷：浏览器侧用连字符键
+（`dsh-…-contour-speed`）寻址一个设置，而 host schema 的字段是驼峰（`contourSpeed`），
+设置服务只按其**声明过的字段**提供命名空间。键→字段的映射一度写成「切掉前缀」，于是七个
+带连字符的设置（`contourAnim` / `contourDir` / `contourSpeed` / `contourDensity` /
+`contourScrollPause` / `watermarkPersist` / `thunderAnim`）写进去的值永远读不回来——写入却
+报 `status= ready mode= host`、`settings.yaml` 里也确实有值，下次刷新却回到默认。单字段名
+（`radius`、`thunder`）因为键尾与字段名恰好相同，把这个缺陷盖住了很久。
+
+测试从两个**独立来源**取事实：client.js 里真实执行的偏好键（切出来放进 `vm` 跑，不复制
+逻辑）与 index.js 真实导出的 `FIELD_DEFAULTS`。断言：每个键映射到一个已声明字段、每个声明
+字段都有键可达、连字符键必须映射成驼峰（命名回归）、键不得硬编码包名（必须从 `PREFS_NS`
+派生）、`slice(PREFS_NS.length + 1)` 只允许出现在 helper 里。**做过变异验证**：把映射改回
+身份切片，它以「`CONTOUR_SPEED_KEY -> contour-speed` 不是已声明字段」逐条失败。
+
+> **测试夹具曾经和实现同错，这才是缺陷潜伏的原因。** `test/fixtures/settings-scope.js`
+> 与 `settings-scope.browser.js` 一度用同样的身份切片，于是 mock 与坏实现互相印证、建在其上
+> 的测试全绿。现在两者都做与 client.js 相同的转换，并由同一测试断言这份一致性；另外，
+> 往夹具里种一个 schema 未声明的字段不再是静默丢弃——Node 夹具直接抛错并点名该字段，页面
+> 夹具在 DOM 里留 `data-endfield-scope-error` 标记，由 `test/lib/browser.js` 升级为明确失败
+> （它一度因「夹具源码本身内联在页面里」而误报，因此只看真正的标记元素，这个边界也有测试）。
+
+**`migrate-prefs.test.js`** 钉住 `tools/migrate-prefs.js` 的承诺：默认 dry-run 一个字节都不写、
+`--write` 前先做带时间戳的备份、只迁移当前 schema 声明过的字段、其余段/注释/顺序逐字保留、
+目标段已存在时拒绝写入（`--force` 才覆盖且不产生重复段）、`--kebab` 把历史连字符键转成驼峰
+字段名且值仍是字符串（schema 是 `z.string()`，`radius: round` 与 `radius: "round"` 都能读，
+但 `contourSpeed: 0` 会被拒），缺文件 / 缺源段给出一行明确信息而不是崩。
+
+---
+
 ## 雷霆大字
 
 ```bash
@@ -106,40 +157,48 @@ node test/thunder-dismiss.test.js   # 点击关闭：真实指针事件 + 命中
 
 ## 等高线背景
 
-`check.js` 只能证明文件可解析，这不等于功能有效。这些脚本把**真实的 `client.js`** 放进一个按安装态 bundle 复刻的应用 DOM/CSS 里跑，然后**对实测像素断言**：
+`check.js` 只能证明文件可解析，这不等于功能有效。这些脚本把**真实的 `client.js`** 切出来跑——几何与性能三个脚本在 Node 里桩掉 2d context 直接执行（不需要浏览器），其余把整页放进一个按安装态 bundle 复刻的应用 DOM/CSS 里并对实测像素断言：
 
 ```bash
-node test/contour-render.test.js      # 21 项行为断言
-node test/contour-specks.test.js      # 残渣过滤 + 随机种子 + 空白格
-node test/contour-smoothness.test.js  # 曲线平滑（对比直线段渲染）
-node test/contour-cusps.test.js       # 逐帧尖点 / 锐角（issue #3）
-node test/contour-a11y.test.js        # prefers-reduced-motion 行为
-node test/contour-coverage.test.js    # 8×5 分区墨迹覆盖率
-node test/contour-perf.test.js        # 稳态帧成本（n=80）
+node test/contour-cusps.test.js       # 几何：尖点 / 重复提取 / 顶点跳变 / 碎屑 / seed 生命周期（Node）
+node test/contour-smoothness.test.js  # 几何：曲线 vs 原始折线的最大转角（Node）
+node test/contour-perf.test.js        # 成本形状 + 实测量 + 滚动门控（Node）
+node test/contour-render.test.js      # 21 项行为断言（浏览器）
+node test/contour-specks.test.js      # 残渣过滤 + 随机种子 + 空白格（浏览器）
+node test/contour-a11y.test.js        # prefers-reduced-motion 行为（浏览器）
+node test/contour-coverage.test.js    # 8×5 分区墨迹覆盖率（浏览器）
 node test/shoot.js                    # 输出亮/暗 × 两配色共四张截图供肉眼复核
 ```
 
-**`contour-render.test.js`** 覆盖：关闭时不创建节点且**不改动应用底色**；开启时画布挂进应用外框、图层确实上色、不透明底色已让位；正文颜色不变且仍可命中测试（图层在其**之下**）；动画开启时像素随时间变化、关闭后**完全静止**、**重新开启后再次变化**；暗色仍上色；拆除后节点归零。
+不带浏览器也能跑完全部 Node 侧校验：`npm run test:node`。
+
+**`contour-render.test.js`** 覆盖：关闭时不创建节点且**不改动应用底色**；开启时画布挂进应用外框、图层确实上色、不透明底色已让位；正文颜色不变且仍可命中测试（图层在其**之下**）；滚动开启时像素随时间变化、关闭后**完全静止**、**重新开启后再次变化**；暗色仍上色；拆除后节点归零。
 
 > 这套脚本抓到了三个真实 bug，都不是解析错误：子开关在已挂载时失效、TDZ 崩溃隐患、重启动画的首帧是空转。详见[工程笔记](engineering-notes.md#等高线背景)。
 
-**`contour-specks.test.js`** 守四件事，并逐一做了反向对照：改回写死种子 → 报「5 次加载地形完全相同」；关掉过滤器 → 报 9 条全画布外、15 条短描边、7 个小环；空白格门槛调回 1 → 空白格重现。
+**`contour-specks.test.js`** 守四件事，并逐一做了反向对照：改回写死种子 → 报「5 次加载地形完全相同」；关掉过滤器 → 报 9 条全画布外、15 条短描边、7 个小环；空白格门槛调回 1 → 空白格重现。（同样的碎屑属性在 Node 侧由 `contour-cusps` 复核：最短绘制等高线与最小环包围盒都必须高于过滤阈值。）
 
-**`contour-smoothness.test.js`** 把**真实的绘制函数原样切出**来跑，而不是重写一份等价逻辑。它拿同一批几何分别用曲线和直线段各画一遍，比较像素：曲线版必须**显著不同**（证明平滑真的生效）、**总墨迹量基本不变**（证明形状没被扭曲）、且抗锯齿覆盖更多。
+**`contour-cusps.test.js`** 量**真正画出来的曲线本身**：桩掉一个 2d context，让**原样切出的** `contourRenderCache()` 自己录下 `moveTo/lineTo/bezierCurveTo/closePath` 调用流（单次 `beginPath` + 每条路径一个 `moveTo`，因此先按 `moveTo` 切成子路径），再密集 de Casteljau 采样、逐点测转角（闭合环丢掉与起点重合的末样本后**按循环测，接缝一并计入**）。样条与路径布局不在测试里重算，所以测试不会悄悄偏离它要检查的渲染器。
 
-**`contour-cusps.test.js`** 补的是上面那条留下的**盲区**：`smoothness` 只比较**单帧**里「曲线画」与「直线画」的像素差，因此看不见两种画法**共有**的缺陷，也从不推进动画。issue #3 的锐角正是如此——每帧都在，只是随场漂移不断换位置，所以整套测试全绿而屏幕上每帧约有 127 个尖刺。
+扫描 6 种视口（含 320×240 与 2000×200 这类会被尺寸上限**钳制**的极端比例）× 2 档密度，断言：**没有尖点（>150°）**、**没有锐角**、中段仍平滑（p99 < 12°）、闭合环**确实是按环画的**、**同一条等高线不会被提取两次**、**同一条曲线内不会出现超过一个网格步长的顶点跳变**（阶梯式缝合走错层就会这样）、所有坐标有限且在纹理内、最短绘制等高线 ≥45px 且最小环包围盒 ≥25px（碎屑）、以及 seed 生命周期：**同 seed + 同尺寸重算出完全相同的地形**、**换 seed 得到不同地形**、**换密度复用同一个场**。实测：最大转角 1.1°、p99 0.6–0.7°、2358 条子路径、1304 个环。
 
-这个脚本改为**量真正画出来的曲线本身**：桩掉一个 2d context，让**原样切出的** `contourDrawLines()` 自己录下 `moveTo/lineTo/quadraticCurveTo/closePath` 调用流，再密集采样这条流、逐点测转角（闭合子路径**连接缝一起按循环测**）。样条的分段布局不在测试里重算，所以测试不会悄悄偏离它要检查的渲染器。
+这项里的「重复提取」与「顶点跳变」两条正是抓到真实缺陷的断言：`contourGenerateField()` 忘了把 `hCount` 放进返回对象，提取器解构出来是 `undefined`，于是**每条竖直边的 id 都成了 NaN**——`Int32Array` 把 NaN 静默存成 0，`es[NaN]` 又是空操作、永远不会打上时间戳，缝合走线因此从伪 id 出发并吐出**上一个等值层算出的顶点**。症状是同一圈等高线在多层被原样重复、以及路径中间出现跨越上百像素的瞬移；像素类测试全绿，因为没有像素被「画错」，只是画了不该画的东西。
 
-跑 12 帧真实动画序列，断言：**任一帧都没有尖点（>150°）**、**没有锐角（>90°）**、中段仍平滑（p99 < 12°，兜住「又退化成折线」）、且闭合环**确实是按环画的**（守机制而非只守症状）。三个方向对照都做了：还原末段 `quadraticCurveTo` → 报 146 个尖点；把 `closePath()` 变成空操作 → 报「0 个闭合子路径」；只删发夹尖端不删整根 → 最大转角从 65° 回升到 127°。
+**`contour-smoothness.test.js`** 把**真实的绘制函数原样切出**来跑，而不是重写一份等价逻辑。它把每条画出来的曲线与它来源的**原始 marching squares 折线**逐一对比（切分顺序一致），断言：每条都用**三次曲线**绘制（没有退化成直线段）、曲线**仍贴着等高线**（顶点偏差最差 2.6px、均值 0.35px）、且**最大转角**从原始折线的 175° 降到 0.6°。转角只在**两侧段长都 ≥0.3px** 时才计入——折返宽度小于描边粗细时，无论角度多大都看不见；同一条规则也用在 `contour-cusps` 上，两个脚本因此对「什么算可见拐角」保持一致。脚本顶部还记录了**为什么不能用「按弧长重采样后再比较」**：重采样会把 0.5px 宽的折返的两侧拉开到 1px，于是那个不可见的折返会被报成 158° 的「拐角」——实测症状就是本脚本曾在同一批曲线上报出两万多个锐角，而密集采样的 `contour-cusps` 只看到 1.1°。
 
-**`contour-a11y.test.js`** 用 `--force-prefers-reduced-motion` 在**整个浏览器**层面施加该偏好（页面脚本无法切换它），然后在动效开关为「开」的前提下断言：图案仍渲染、场**零变化**。
+**`contour-a11y.test.js`** 用 `--force-prefers-reduced-motion` 在**整个浏览器**层面施加该偏好（页面脚本无法切换它），然后在动效开关为「开」的前提下断言：图案仍渲染、**像素零变化**（滚动未启动）。该偏好在代码里是**每次协调实时读取**的（`thunder-edges` 会在同一进程里切换 `matchMedia` 来验证这一点），所以开着页面改变系统设置也会立刻生效。
 
 **`contour-coverage.test.js`** 直接读**画布本身**而非截图：截图里应用自己的卡片、输入区遮罩和正文会盖住图案，无法回答「场里有没有空白」。它把画布切成 8×5 分区并统计墨迹占比。
 
-**`contour-perf.test.js`** 不走 `requestAnimationFrame`——headless 会挂起 / 合并 rAF，只能采到 n=1，而没有分布支撑的数字不算测量。它按函数名把算法源码从 `client.js` 里原样切出后在紧循环里计时，并丢弃前两次采样（冷启动含 JIT 预热）。
+**`contour-perf.test.js`** 量的是新架构**承诺的成本形状**，而且不靠计时：桩掉 context 后驱动 300 帧，断言这一过程中**地形生成 0 次、等值线提取 0 次、纹理渲染 0 次**；改密度只重新提取 / 重绘各 1 次且**不重新生成地形**；并**静态检查** `contourFrame()` 的源码里根本不出现建/提取/渲染三件套（帧函数在构造上就只能是「缓存平移」）。随后实测成本：
 
-实测稳态：p95 8.6ms / 41.7ms 预算，约 81% 余量。
+- 一次性构建（地形 → 等值线 → 平滑纹理）：`320×240` 17ms、`1152×648` 82ms、`1432×753` 89ms、`1920×1080` 95ms、`2000×200` 22ms、`1920×1080@2x` 28ms；
+- 每帧：**1 次 `drawImage`**（大窗口跨接缝时最多 4 次）、约 0.001ms JS 时间，对照 120fps 的 8.3ms 预算；
+- 纹理尺寸上限：单边 ≤4096 设备像素、面积 ≤8.3e6 CSS px²。
+
+同一个脚本还逐条守住**滚动门控**：开着但被 reduced-motion 拦下、被启动加载屏拦下、被页面滚动暂停拦下、以及开关关闭时必须**不启动循环**；其中「清掉 reduced-motion 后循环恢复」这一条专门守住「偏好被实时读取而不是加载时缓存」。
+
+实测（本机、Node 内）：一次性构建最差 96ms，每帧 blit p95 ≤0.002ms。
 
 ---
 

@@ -1,7 +1,7 @@
 {
-  "name": "dsh-theme-endfield",
+  "name": "dsh-theme-endfield-contour-rework",
   "version": "1.0.0",
-  "description": "DeepSeek Harness web theme: the industrial editorial look of the Arknights: Endfield official site — cream paper, ink text, signal-yellow accents, zero radius.",
+  "description": "Fork of dsh-theme-endfield (Arknights: Endfield industrial editorial theme for DeepSeek Harness) with a redesigned contour animation engine: precomputed tileable Perlin terrain, marching-squares contours, cached-texture scrolling. AI-assisted fork; only tested on DSH 0.1.1-rc.2.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -10,13 +10,34 @@
     "theme",
     "endfield",
     "arknights",
-    "client"
+    "client",
+    "fork",
+    "contour",
+    "perlin",
+    "marching-squares"
   ],
   "license": "MIT",
+  "contributors": [
+    {
+      "name": "ymh0000123",
+      "url": "https://github.com/ymh0000123/dsh-theme-endfield",
+      "comment": "Original work: dsh-theme-endfield (MIT). This package is a fork of it."
+    }
+  ],
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework.git"
+  },
+  "homepage": "https://github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework#readme",
+  "bugs": {
+    "url": "https://github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework/issues"
+  },
   "scripts": {
     "check": "node check.js",
     "selftest": "node selftest.js",
+    "test:fork": "node .github/scripts/fork-identity-check.js",
+    "test:browser": "node test/browser-discovery.test.js && node test/browser-shot-cleanup.test.js",
     "test:contour": "node test/contour-render.test.js",
     "test:settings": "node test/settings-rows.test.js && node test/settings-durable-hold.test.js && node test/settings-off.test.js && node test/settings-locale.test.js",
     "test:thunder": "node test/thunder-edges.test.js && node test/thunder-shot.js && node test/thunder-dismiss.test.js",
@@ -31,10 +52,12 @@
     "test:coverage": "node test/contour-coverage.test.js",
     "test:perf": "node test/contour-perf.test.js",
     "test:loader": "node test/loader-performance.test.js",
-    "test": "node check.js && node selftest.js && node test/palette-contrast.test.js && node test/palette-switch.test.js && node test/settings-buttons.test.js && node test/hover-check.js && node test/settings-rows.test.js && node test/settings-durable-hold.test.js && node test/settings-off.test.js && node test/settings-locale.test.js && node test/thunder-edges.test.js && node test/thunder-shot.js && node test/thunder-dismiss.test.js && node test/contour-render.test.js && node test/loader-performance.test.js && node test/contour-specks.test.js && node test/watermark-stacking.test.js && node test/contour-smoothness.test.js && node test/contour-cusps.test.js && node test/contour-a11y.test.js && node test/contour-coverage.test.js && node test/contour-perf.test.js",
-    "test:ci": "node check.js && node selftest.js && node test/palette-contrast.test.js && node test/palette-switch.test.js && node test/settings-buttons.test.js && node test/hover-check.js && node test/settings-rows.test.js && node test/settings-durable-hold.test.js && node test/settings-off.test.js && node test/settings-locale.test.js && node test/thunder-edges.test.js && node test/thunder-shot.js && node test/thunder-dismiss.test.js && node test/contour-render.test.js && node test/loader-performance.test.js && node test/contour-specks.test.js && node test/watermark-stacking.test.js && node test/contour-smoothness.test.js && node test/contour-cusps.test.js && node test/contour-a11y.test.js",
+    "test:node": "node .github/scripts/fork-identity-check.js && node test/browser-discovery.test.js && node check.js && node selftest.js && node test/prefs-key-mapping.test.js && node test/migrate-prefs.test.js && node test/palette-contrast.test.js && node test/settings-rows.test.js && node test/settings-durable-hold.test.js && node test/settings-locale.test.js && node test/thunder-edges.test.js && node test/contour-cusps.test.js && node test/contour-smoothness.test.js && node test/contour-perf.test.js",
+    "test": "npm run test:ci",
+    "test:ci": "node .github/scripts/fork-identity-check.js && node test/browser-discovery.test.js && node test/browser-shot-cleanup.test.js && node check.js && node selftest.js && node test/prefs-key-mapping.test.js && node test/migrate-prefs.test.js && node test/palette-contrast.test.js && node test/palette-switch.test.js && node test/settings-buttons.test.js && node test/hover-check.js && node test/settings-rows.test.js && node test/settings-durable-hold.test.js && node test/settings-off.test.js && node test/settings-locale.test.js && node test/thunder-edges.test.js && node test/thunder-shot.js && node test/thunder-dismiss.test.js && node test/contour-render.test.js && node test/loader-performance.test.js && node test/contour-specks.test.js && node test/watermark-stacking.test.js && node test/contour-smoothness.test.js && node test/contour-cusps.test.js && node test/contour-a11y.test.js && node test/contour-coverage.test.js && node test/contour-perf.test.js",
     "shots": "node test/shoot.js",
-    "shots:verify": "node test/shoot.js && node test/verify-shots.js"
+    "shots:verify": "node test/shoot.js && node test/verify-shots.js",
+    "test:migrate": "node test/migrate-prefs.test.js"
   },
   "exports": {
     ".": "./index.js",
@@ -62,6 +85,9 @@
     "client.js",
     "cordis.patch.yml",
     "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "NOTICE.md",
     "docs",
     "LICENSE"
   ],

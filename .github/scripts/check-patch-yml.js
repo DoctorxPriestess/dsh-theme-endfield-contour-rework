@@ -13,7 +13,7 @@
 'use strict'
 const fs = require('fs')
 
-const PLUGIN = 'dsh-theme-endfield'
+const PLUGIN = 'dsh-theme-endfield-contour-rework'
 const SOURCE = 'cordis.patch.yml'
 const esc = (s) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
 

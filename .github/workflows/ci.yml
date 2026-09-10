@@ -78,12 +78,19 @@ jobs:
         if: always()
         run: node .github/scripts/package-check.js
 
+      # fork 专有：包名同时是 bundle 行名、module id、设置命名空间和 client 键前缀，
+      # 改名只做一半会静默失败（装上但不挂载 / 写设置被拒），语法与像素测试都看不见。
+      - name: fork 身份一致性
+        if: always()
+        run: node .github/scripts/fork-identity-check.js
+
   # ---------------------------------------------------------------------------
-  # 测试套件：19 项，逐个跑（不用 npm run test:ci 的 && 串联，那个第一个失败
-  # 就短路，PR 作者只能看到一个问题）。清单仍从 package.json 读，单一来源。
+  # 测试套件：逐个跑（不用 npm run test:ci 的 && 串联，那个第一个失败就短路，
+  # PR 作者只能看到一个问题）。清单仍从 package.json 读，单一来源——所以这里
+  # 不写死数量，改了清单不必回来同步注释。
   # ---------------------------------------------------------------------------
   test:
-    name: 测试套件 (19 项)
+    name: 测试套件
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -264,7 +271,7 @@ jobs:
             echo '| 检查 | 结果 |'
             echo '| --- | --- |'
             echo "| 静态检查 | $(icon "$STATIC") \`$STATIC\` |"
-            echo "| 测试套件 (19 项) | $(icon "$TEST") \`$TEST\` |"
+            echo "| 测试套件 | $(icon "$TEST") \`$TEST\` |"
             echo ''
             if [ "$STATIC" = success ] && [ "$TEST" = success ]; then
               echo '全部阻塞检查通过。'
