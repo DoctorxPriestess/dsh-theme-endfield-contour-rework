@@ -3,7 +3,7 @@
  *
  * Migration (see docs/engineering-notes.md): the theme no longer persists to
  * localStorage. Its switches read/write a DSH settings namespace
- * (`dsh-theme-endfield`) through the browser `ctx.settingsScope` service — the
+ * (`dsh-theme-endfield-contour-rework`) through the browser `ctx.settingsScope` service — the
  * client mirror of the host `ctx.settings.register(ns, schema)` that index.js
  * declares, persisted by DSH to the profile's <dshHome>/settings.yaml.
  *
@@ -31,8 +31,9 @@ const FIELD_DEFAULTS = {
   radius: 'square',
   contour: '0',
   contourAnim: '1',
-  contourFps: '24',
+  contourDir: '0',
   contourSpeed: '2',
+  contourDensity: '1',
   contourScrollPause: '1',
   watermark: '1',
   watermarkPersist: '0',
@@ -41,10 +42,27 @@ const FIELD_DEFAULTS = {
   thunderAnim: '0',
 }
 
+const PREFIX = 'dsh-theme-endfield-contour-rework-'
+
+/**
+ * Raw preference key -> the schema field it stores.
+ *
+ * This MIRRORS the client's own mapping (client.js `prefsKeyToField`) and must
+ * stay byte-for-byte equivalent in behaviour: the section is keyed by the schema
+ * field names declared above, which are camelCase, while raw keys spell the same
+ * setting in kebab case. An identity slice here would reproduce the very defect
+ * the mapping exists to avoid (a hyphenated setting persisting under an
+ * undeclared name and never being read back), and — worse — would make this
+ * fixture agree with a broken client, so every test built on it would pass.
+ * client.js's mapping is asserted against this one from test/prefs-key-mapping.test.js.
+ *
+ * Accepts the raw key ('dsh-…-contour-speed'), the bare kebab tail
+ * ('contour-speed') or the field name itself ('contourSpeed') for test
+ * convenience; all three resolve to 'contourSpeed'.
+ */
 function fieldName(rawKey) {
-  // 'dsh-theme-endfield-<field>' -> '<field>'; also accept the bare field.
-  if (rawKey.startsWith('dsh-theme-endfield-')) return rawKey.slice('dsh-theme-endfield-'.length)
-  return rawKey
+  const tail = rawKey.startsWith(PREFIX) ? rawKey.slice(PREFIX.length) : rawKey
+  return tail.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
 }
 
 /**
@@ -59,7 +77,15 @@ function settingsScopeStub(initial = {}) {
   // Merged defaults so `value` is never missing a key (mirrors schema defaults).
   const section = Object.assign({}, FIELD_DEFAULTS)
   for (const k of Object.keys(initial)) {
-    if (Object.prototype.hasOwnProperty.call(FIELD_DEFAULTS, k)) section[k] = String(initial[k])
+    const field = fieldName(k)
+    // A key the schema does not declare would be DROPPED by the real host
+    // (served sections carry declared fields only), so a test asking for one is
+    // a test bug — fail loudly instead of silently measuring the default.
+    if (!Object.prototype.hasOwnProperty.call(FIELD_DEFAULTS, field)) {
+      throw new Error('settings-scope fixture: ' + JSON.stringify(k) + ' is not a declared field;'
+        + ' the real settings service would ignore it. Declared fields: ' + Object.keys(FIELD_DEFAULTS).join(', '))
+    }
+    section[field] = String(initial[k])
   }
 
   let listeners = []

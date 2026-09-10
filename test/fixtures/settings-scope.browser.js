@@ -21,14 +21,42 @@
 const BROWSER_SETTINGS_SCOPE_SNIPPET = `
 var __endfieldFieldDefaults = {
   enabled:'1', palette:'valley', radius:'square', contour:'0', contourAnim:'1',
-  contourFps:'24', contourSpeed:'2', contourScrollPause:'1', watermark:'1',
-  watermarkPersist:'0', loader:'0', thunder:'0', thunderAnim:'0'
+  contourDir:'0', contourSpeed:'2', contourDensity:'1', contourScrollPause:'1',
+  watermark:'1', watermarkPersist:'0', loader:'0', thunder:'0', thunderAnim:'0'
 };
 function __endfieldSettingsScope(initial) {
-  function fieldOf(name){ return name.indexOf('dsh-theme-endfield-')===0 ? name.slice('dsh-theme-endfield-'.length) : name; }
+  /* Raw preference key -> the schema field it stores. This mirrors client.js
+     prefsKeyToField exactly (strip the namespace, then kebab -> camelCase): an
+     identity slice here would re-create the defect the mapping exists to avoid
+     AND make this fixture agree with a broken client, so the page tests built on
+     it would pass while the real settings never persisted. */
+  function fieldOf(name){
+    var tail = name.indexOf('dsh-theme-endfield-contour-rework-')===0 ? name.slice('dsh-theme-endfield-contour-rework-'.length) : name;
+    return tail.replace(/-([a-z])/g, function(_, c){ return c.toUpperCase(); });
+  }
+  /* An undeclared field cannot exist in a served section, so seeding one is a
+     test bug. It is reported in the DOM (and the console) instead of being
+     dropped silently, and test/lib/browser.js turns the marker into a failure —
+     a page script's own throw would only show up as a missing title. */
+  function __endfieldBadField(name){
+    try {
+      var host = document.documentElement || document.body;
+      if (host) {
+        var m = document.createElement('div');
+        m.setAttribute('data-endfield-scope-error', String(name));
+        m.style.display = 'none';
+        host.appendChild(m);
+      }
+      if (window.console && console.error) console.error('[settings-scope fixture] undeclared field: ' + name);
+    } catch (e) { /* reporting must never break the page */ }
+  }
   var section = {};
   for (var k in __endfieldFieldDefaults) section[k] = __endfieldFieldDefaults[k];
-  if (initial) for (var k2 in initial) if (k2 in __endfieldFieldDefaults) section[k2] = String(initial[k2]);
+  if (initial) for (var k2 in initial) {
+    var f2 = fieldOf(k2);
+    if (!(f2 in __endfieldFieldDefaults)) __endfieldBadField(k2);
+    section[f2] = String(initial[k2]);
+  }
   var listeners = [];
   var notify = function () { for (var i=0;i<listeners.length;i++){ try{listeners[i]();}catch(e){} } };
   var snap = function () { return { status:'ready', value: __copy(section), writable:true, mode:'host' }; };

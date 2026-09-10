@@ -11,7 +11,7 @@ const path = require('path')
 const http = require('http')
 
 const BASE = process.argv[2] || 'http://127.0.0.1:3080'
-const URL_PATH = '/plugins/dsh-theme-endfield/client.js'
+const URL_PATH = '/plugins/dsh-theme-endfield-contour-rework/client.js'
 const ROOT = path.resolve(__dirname, '..')
 
 const get = (url) => new Promise((resolve, reject) => {
@@ -49,7 +49,7 @@ const fail = (m) => { console.error('FAIL  ' + m); failures++ }
     ['--edge-accent: #14d0d0', '武陵青 accent = #14d0d0'],
     ['--edge-accent-rgb: 20, 208, 208', '武陵青 channel list (same colour, for rgba washes)'],
     ['--edge-accent: #fff500', '谷地黄 accent (default)'],
-    ["'dsh-theme-endfield-palette'", 'palette storage key'],
+    ["'dsh-theme-endfield-contour-rework-palette'", 'palette storage key'],
     ['切换武陵青', 'settings row offers 武陵青'],
     ['切换谷地黄', 'settings row offers 谷地黄'],
     ['#14d0d0', 'row states the accent in hex'],

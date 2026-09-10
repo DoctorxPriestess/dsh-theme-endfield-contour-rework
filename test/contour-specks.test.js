@@ -2,27 +2,43 @@
  * contour-specks.test.js — lock down the two reported contour defects:
  * "mysterious little dots" and "not actually random".
  *
+ * ── Measurement space (updated for the tileable-terrain engine) ──────────────
+ * This file used to judge debris against the **visible canvas**: a path with no
+ * vertex inside the viewport was "grid overshoot" debris, and a path with under
+ * 40px of stroke *inside the viewport* read as a speck. That model belonged to the
+ * per-frame engine, which extracted contours in screen space every frame.
+ *
+ * The current engine extracts contours once in **tile space** (a texture about 3x
+ * the viewport, scrolled into view), so a contour living outside the viewport is
+ * not debris at all — it is the part of the tile that has not scrolled in yet, and
+ * roughly 85% of the paths legitimately sit there at any moment. Measured with the
+ * old rule, 3237 paths across 5 runs were reported as "entirely off-canvas".
+ *
+ * So the invariants are now measured on the paths' OWN geometry (length, bounding
+ * box), which is space-independent, plus a bounds check against the tile. This is
+ * the same rule the Node-side contour-cusps test asserts on the same engine, so
+ * the two cannot drift apart.
+ *
  * ── A. specks ────────────────────────────────────────────────────────────────
- * Marching squares legitimately emits two kinds of debris that read as dots
- * rather than terrain, both measured on the real render before the fix:
- *   OFF-CANVAS SLIVERS. The grid is ceil(w/step)+1 wide, so its last row/column
- *     sits on or past the canvas edge (+8px / +7px at 1432x753). 33 of 85 paths
- *     held vertices outside the canvas and 3 had ZERO visible length.
- *   APEX RINGS. Near a gaussian peak the innermost level closes into a tiny
- *     circle: 4 rings with a bbox under 26x26, smallest 11.8x15.1px, against a
- *     measured median inter-line gap of 21px (7322 samples).
+ * Marching squares legitimately emits debris that reads as dots rather than
+ * terrain. The engine's keep() filter drops it (CONTOUR_KEEP_LEN = 54px of raw
+ * stroke, CONTOUR_KEEP_RING = 31.5px of ring box); this test asserts the same
+ * property on what was actually DRAWN, at the looser thresholds 40px / 21px (a
+ * drawn curve is slightly shorter than the raw polyline it replaces, and 21px is
+ * the measured median inter-line gap).
  *
  * ── B. randomness ────────────────────────────────────────────────────────────
- * contourBuild() seeded mulberry32 with the constant 0x5eed4242, so every visit
+ * The old engine seeded mulberry32 with the constant 0x5eed4242, so every visit
  * drew the SAME landscape -- two independent loads produced 85 paths and 42497px
  * of stroke, identical vertex for vertex. The seed is now per page load.
  *
  * ── C. the regression that randomness exposed ────────────────────────────────
  * A fixed seed had been hiding a real defect: with independent uniform bump
  * placement, layouts clump and leave voids. Measured over 12 random seeds, the
- * coverage test failed 5 times (up to 3 blank cells). Placement is now a
- * jittered grid, so this test also asserts the sheet stays gap-free -- otherwise
- * "random" would simply mean "sometimes broken".
+ * coverage test failed 5 times (up to 3 blank cells). The current engine's height
+ * field is a periodic gradient-noise fBm, which has no placement step to clump;
+ * this test still asserts the sheet stays gap-free -- otherwise "random" would
+ * simply mean "sometimes broken".
  *
  * Every assertion is measured on the REAL client.js in a headless browser.
  * Paths are captured by intercepting the canvas path calls, because a rasterised
@@ -33,19 +49,13 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 const { BROWSER_SETTINGS_SCOPE_SNIPPET } = require(path.join(__dirname, 'fixtures', 'settings-scope.browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-specks-'))
-const chrome = [
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 // Thresholds mirror the constants in client.js; kept here so a silent loosening
 // of either one is caught rather than rubber-stamped.
@@ -95,23 +105,41 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
     const W=cv.width,H=cv.height
     const P=window.__PATHS__||[]
     const inside=(x,y)=>x>=0&&x<=W&&y>=0&&y<=H
+    /* The tile is about 3x the viewport (CONTOUR_TEX_MULT=3, quantised to 128px, then
+       shrunk to respect the area cap). 4x is a safe upper bound that still catches a
+       path escaping the tile — the real defect class (coordinates running off to
+       multiples of the viewport, or going negative). */
+    const BX=W*4, BY=H*4
     const info=P.map((p,i)=>{
-      let vis=0, any=false
+      let vis=0, any=false, nonFinite=0, outOfTile=0
+      let ilen=0
       let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity
       for(let k=0;k<p.length;k+=2){
         const x=p[k],y=p[k+1]
-        if(inside(x,y)){ any=true
-          if(x<minx)minx=x; if(x>maxx)maxx=x
-          if(y<miny)miny=y; if(y>maxy)maxy=y }
+        if(!Number.isFinite(x)||!Number.isFinite(y)){ nonFinite++; continue }
+        if(x<0||x>BX||y<0||y>BY) outOfTile++
+        if(x<minx)minx=x; if(x>maxx)maxx=x
+        if(y<miny)miny=y; if(y>maxy)maxy=y
+        if(inside(x,y)) any=true
         if(k>=2){
           const px=p[k-2],py=p[k-1]
-          if(inside(x,y)&&inside(px,py)){
-            const dx=x-px,dy=y-py; vis+=Math.sqrt(dx*dx+dy*dy) }
+          if(Number.isFinite(px)&&Number.isFinite(py)){
+            const dx=x-px,dy=y-py
+            const d=Math.sqrt(dx*dx+dy*dy)
+            /* ilen is the path's own length — the space-independent quantity. vis counts
+               only the part inside the viewport, which is a diagnostic now: the tile
+               legitimately extends past the viewport. (No backticks in here: this whole
+               page script lives inside a template literal.) */
+            ilen+=d
+            if(inside(x,y)&&inside(px,py)) vis+=d
+          }
         }
       }
       const gx=p[0]-p[p.length-2], gy=p[1]-p[p.length-1]
-      return {i, vis:+vis.toFixed(1), anyVisible:any,
-              bw:any?+(maxx-minx).toFixed(1):0, bh:any?+(maxy-miny).toFixed(1):0,
+      return {i, vis:+vis.toFixed(1), ilen:+ilen.toFixed(1), anyVisible:any,
+              nonFinite, outOfTile,
+              bw:(maxx>minx)?+(maxx-minx).toFixed(1):0,
+              bh:(maxy>miny)?+(maxy-miny).toFixed(1):0,
               closed:(gx*gx+gy*gy)<4}
     })
     // ink coverage on an 8x5 grid: proves "no specks" was not achieved by erasing
@@ -130,10 +158,12 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
     document.title='SPK '+JSON.stringify({
       canvas:W+'x'+H, paths:info.length,
       totalVis:+info.reduce((s,p)=>s+p.vis,0).toFixed(0),
+      totalLen:+info.reduce((s,p)=>s+p.ilen,0).toFixed(0),
       inkPx,
-      invisible:info.filter(p=>!p.anyVisible).length,
-      tooShort:info.filter(p=>p.anyVisible&&p.vis<${MIN_LEN}),
-      tinyRings:info.filter(p=>p.anyVisible&&p.closed&&p.bw<${MIN_RING}&&p.bh<${MIN_RING}),
+      nonFinite:info.filter(p=>p.nonFinite>0).length,
+      outOfTile:info.filter(p=>p.outOfTile>0).length,
+      tooShort:info.filter(p=>p.ilen<${MIN_LEN}),
+      tinyRings:info.filter(p=>p.closed&&p.bw<${MIN_RING}&&p.bh<${MIN_RING}),
       emptyCells:cells.filter(c=>c<0.6).length, minCell:Math.min.apply(null,cells)
     })
   },1500)
@@ -164,40 +194,55 @@ const fail = (s) => { console.error('FAIL  ' + s); failures++ }
 const pass = (s) => console.log('ok    ' + s)
 
 console.log('canvas ' + runs[0].canvas + ',  ' + RUNS + ' independent page loads')
+console.log('  (visible ink is a diagnostic: the tile is ~3x the viewport, so most paths')
+console.log('   legitimately sit outside it at any moment — the invariants below are')
+console.log('   measured on each path its own length and bbox, in tile space.)')
 console.log('')
-console.log(' run | paths | visible ink | invisible | <' + MIN_LEN
-  + 'px | rings<' + MIN_RING + 'px | blank cells')
+console.log(' run | paths | drawn len | visible ink | <' + MIN_LEN
+  + 'px | rings<' + MIN_RING + 'px | escaped | blank cells')
 for (let i = 0; i < runs.length; i++) {
   const r = runs[i]
   console.log('  ' + i + '  |  ' + String(r.paths).padStart(3) + '  | '
-    + String(r.totalVis).padStart(7) + 'px   |     ' + String(r.invisible).padStart(2)
-    + '    |    ' + String(r.tooShort.length).padStart(2) + '    |     '
-    + String(r.tinyRings.length).padStart(2) + '     |     ' + r.emptyCells
+    + String(r.totalLen).padStart(8) + 'px | '
+    + String(r.totalVis).padStart(7) + 'px   |    ' + String(r.tooShort.length).padStart(2)
+    + '    |     ' + String(r.tinyRings.length).padStart(2) + '     |    '
+    + String(r.outOfTile).padStart(2) + '    |     ' + r.emptyCells
     + '  (min ' + r.minCell + '%)')
 }
 console.log('')
 
 // ---- A. specks -----------------------------------------------------------
-const invisible = runs.reduce((s, r) => s + r.invisible, 0)
-if (invisible > 0) {
-  fail(invisible + ' path(s) across ' + RUNS + ' runs lie ENTIRELY off-canvas'
-    + '\n      -> grid overshoot debris is still being emitted')
+// A0: every coordinate finite. The NaN class of defect (a missing field making edge
+// ids NaN) produced garbage geometry, and a test that only looks at lengths and boxes
+// can still report plausible numbers for it.
+const nanAll = runs.reduce((s, r) => s + r.nonFinite, 0)
+if (nanAll > 0) {
+  fail(nanAll + ' path(s) contain non-finite coordinates across ' + RUNS + ' runs'
+    + '\n      -> the extractor emitted NaN/Infinity; geometry downstream is meaningless')
 } else {
-  pass('no path lies entirely off-canvas (grid-overshoot slivers are pruned)')
+  pass('every drawn coordinate is finite across all ' + RUNS + ' runs')
+}
+
+const escaped = runs.reduce((s, r) => s + r.outOfTile, 0)
+if (escaped > 0) {
+  fail(escaped + ' path(s) across ' + RUNS + ' runs escape the tile bounds (4x viewport)'
+    + '\n      -> a contour was not wrapped into tile space; it would never scroll in')
+} else {
+  pass('no path escapes the tile bounds (every contour is wrapped into tile space)')
 }
 
 const shortAll = runs.reduce((a, r) => a.concat(r.tooShort), [])
 if (shortAll.length > 0) {
-  fail(shortAll.length + ' path(s) have under ' + MIN_LEN + 'px of visible stroke'
+  fail(shortAll.length + ' path(s) draw under ' + MIN_LEN + 'px of stroke'
     + '\n      e.g. ' + JSON.stringify(shortAll.slice(0, 3))
     + '\n      -> these read as dashes/specks, not contour lines')
 } else {
-  pass('every drawn path carries at least ' + MIN_LEN + 'px of visible stroke')
+  pass('every drawn path carries at least ' + MIN_LEN + 'px of stroke')
 }
 
 const ringsAll = runs.reduce((a, r) => a.concat(r.tinyRings), [])
 if (ringsAll.length > 0) {
-  fail(ringsAll.length + ' tiny CLOSED ring(s) with a bbox under ' + MIN_RING + 'px'
+  fail(ringsAll.length + ' tiny CLOSED ring(s) with a bbox under ' + MIN_RING + 'px in both axes'
     + '\n      e.g. ' + JSON.stringify(ringsAll.slice(0, 3))
     + '\n      -> a ring smaller than one line spacing reads as a dot')
 } else {

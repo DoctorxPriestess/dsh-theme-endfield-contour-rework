@@ -9,19 +9,15 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 /* Unlike the .test.js files this one deliberately KEEPS its output (the PNGs are
    the point), so it writes to a gitignored scratch directory rather than a temp
    dir that is hard to find afterwards. */
 const OUT = path.join(ROOT, '.kagent', 'shots')
-const chrome = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].find((p) => fs.existsSync(p))
-if (!chrome) { console.error('no chrome'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 /* Mock of the real conversation page. Class names and the opaque bg-base fills
    are copied from the installed @deepseek-ai bundles so the screenshot exercises
@@ -124,12 +120,12 @@ const mk = (dark, wuling) => `<!doctype html><html><head><meta charset="utf-8"><
 <script>
   ${dark ? "document.body.setAttribute('data-ds-dark-theme','')" : ''}
   const LS=localStorage
-  LS.setItem('dsh-theme-endfield-enabled','1')
-  LS.setItem('dsh-theme-endfield-loader','0')
-  LS.setItem('dsh-theme-endfield-watermark','0')
-  LS.setItem('dsh-theme-endfield-contour','1')
-  LS.setItem('dsh-theme-endfield-contour-anim','1')
-  LS.setItem('dsh-theme-endfield-palette', ${wuling ? "'wuling'" : "'valley'"})
+  LS.setItem('dsh-theme-endfield-contour-rework-enabled','1')
+  LS.setItem('dsh-theme-endfield-contour-rework-loader','0')
+  LS.setItem('dsh-theme-endfield-contour-rework-watermark','0')
+  LS.setItem('dsh-theme-endfield-contour-rework-contour','1')
+  LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
+  LS.setItem('dsh-theme-endfield-contour-rework-palette', ${wuling ? "'wuling'" : "'valley'"})
   const mod=window.__MOD__.factory(()=>null)
   /* Apply token overrides the way the app does — inline on <body> — because the
      palette-aware tokens are var() references that must resolve on that element. */

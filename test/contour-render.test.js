@@ -28,17 +28,11 @@ const ROOT = path.resolve(__dirname, '..')
 // running the tests never leaves artifacts inside the package.
 const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-render-'))
 
-function findChrome() {
-  const cands = [
-    process.env.CHROME_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  ].filter(Boolean)
-  for (const c of cands) if (fs.existsSync(c)) return c
-  return null
-}
+// Browser discovery + result transport live in one shared module now: this file used to
+// carry its own Windows-only candidate list, and every test fetched the page with
+// --dump-dom through the browser's stdout (which a Store/AppX Edge launcher silently
+// swallows). See test/lib/browser.js.
+const { findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 
 /* The mock reproduces the parts of the real app that decide whether the layer is
    visible at all, with values read out of the installed bundles:
@@ -141,9 +135,9 @@ async function main() {
   window.__run__=async()=>{
     const LS=window.__LS__
     // ---------- 1. feature OFF ----------
-    LS.setItem('dsh-theme-endfield-enabled','1')
-    LS.removeItem('dsh-theme-endfield-contour')
-    LS.setItem('dsh-theme-endfield-loader','0')
+    LS.setItem('dsh-theme-endfield-contour-rework-enabled','1')
+    LS.removeItem('dsh-theme-endfield-contour-rework-contour')
+    LS.setItem('dsh-theme-endfield-contour-rework-loader','0')
     window.__apply__()
     await sleep(120)
     R('off: no contour node', document.querySelectorAll('[data-endfield-contour]').length===0)
@@ -155,8 +149,8 @@ async function main() {
     R('off: conversation keeps opaque bg', cbgOff==='rgb(232, 232, 226)', cbgOff)
 
     // ---------- 2. switch ON via the same storage the settings row writes ----------
-    LS.setItem('dsh-theme-endfield-contour','1')
-    LS.setItem('dsh-theme-endfield-contour-anim','1')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour','1')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
     // trigger the page observer the same way the app's own rendering would
     document.body.appendChild(document.createElement('span'))
     await sleep(400)
@@ -202,7 +196,7 @@ async function main() {
       for(let k=3;k<a1.length;k+=4) if(a1[k]!==a2[k]) diff++
     }
     R('anim on: pixels change over time', diff>500, 'changedAlpha='+diff)
-    LS.setItem('dsh-theme-endfield-contour-anim','0')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
     document.body.appendChild(document.createElement('span'))
     await sleep(500)
     const b1=snap().slice(0); await sleep(600); const b2=snap()
@@ -212,7 +206,7 @@ async function main() {
     R('anim off: pattern still painted', px(lines).opaque>3000, 'opaquePx='+px(lines).opaque)
 
     // ---------- 5. animation back on keeps moving ----------
-    LS.setItem('dsh-theme-endfield-contour-anim','1')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
     document.body.appendChild(document.createElement('span'))
     await sleep(300)
     /* Wait for PIXELS to move rather than for a fixed wall-clock window.
@@ -256,7 +250,7 @@ async function main() {
 
   fs.writeFileSync(page, MOCK.replace('</body>', probe + '<script>window.addEventListener("load",()=>{window.__run__()})</' + 'script></body>'))
 
-  const { execFileSync } = require('child_process')
+  const { execFileSync } = require(path.join(__dirname, 'lib', 'browser.js'))
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'contour-'))
   const args = [
     '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',

@@ -32,7 +32,7 @@ const src = fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8')
 
 const FIELD_DEFAULTS = {
   enabled: '1', palette: 'valley', radius: 'square', contour: '0',
-  contourAnim: '1', contourFps: '24', contourSpeed: '2',
+  contourAnim: '1', contourDir: '0', contourSpeed: '2', contourDensity: '1',
   contourScrollPause: '1', watermark: '1', watermarkPersist: '0',
   loader: '0', thunder: '0', thunderAnim: '0',
 }
@@ -70,7 +70,7 @@ const walk = (el, out = []) => {
 
 /* --------------------------------- states ---------------------------------
    Phase A (namespace unserved): the mirror has a Host view (host mode answers
-   writable), but `dsh-theme-endfield` is not among its served namespaces, so
+   writable), but `dsh-theme-endfield-contour-rework` is not among its served namespaces, so
    the scope derives status:'unavailable' with no decoded value. This is the
    exact `status= unavailable mode= host, yet writable` scenario from the bug.
    Phase B (namespace served): a later Host registration committed the document,

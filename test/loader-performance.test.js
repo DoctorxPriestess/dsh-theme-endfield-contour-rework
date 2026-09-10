@@ -7,19 +7,13 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 const { BROWSER_SETTINGS_SCOPE_SNIPPET } = require(path.join(__dirname, 'fixtures', 'settings-scope.browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-loader-'))
-const chrome = [
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   html,body,#root{height:100%;margin:0}
@@ -78,10 +72,10 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
     while(document.querySelector('[data-endfield-loader]')) await sleep(100)
     const clearsAtRemoval=contourClears
     const beforeToggle=contourClears
-    __prefs.setItem('dsh-theme-endfield-contour-anim','0')
+    __prefs.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
     document.body.appendChild(document.createElement('span'))
     await sleep(150)
-    __prefs.setItem('dsh-theme-endfield-contour-anim','1')
+    __prefs.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
     document.body.appendChild(document.createElement('span'))
     await sleep(300)
     const clearsAfterToggle=contourClears

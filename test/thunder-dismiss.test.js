@@ -23,18 +23,13 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 const { BROWSER_SETTINGS_SCOPE_SNIPPET } = require(path.join(__dirname, 'fixtures', 'settings-scope.browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 
-const chrome = [process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-dismiss-'))
 fs.copyFileSync(path.join(ROOT, 'client.js'), path.join(TMP, 'client.js'))

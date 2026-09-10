@@ -35,19 +35,13 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 const { BROWSER_SETTINGS_SCOPE_SNIPPET } = require(path.join(__dirname, 'fixtures', 'settings-scope.browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 const OUT = process.env.ENDFIELD_OUT || fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-stack-'))
-const chrome = [
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 const W = 1440
 const H = 900
@@ -222,6 +216,10 @@ const run = (alpha, shot) => {
   const args = [
     '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
     '--force-device-scale-factor=1', '--virtual-time-budget=5000',
+    /* Only for this test: the popover animates in, and a capture taken mid-animation puts it
+       at a different pixel position than the DOM reports, so the wordmark showing through its
+       rounded corners is counted as leaking on top of it by the zero-tolerance assertion. */
+    '--wait-animations',
     '--window-size=' + W + ',' + H, '--user-data-dir=' + tmp,
   ]
   if (shot) args.push('--screenshot=' + shot)

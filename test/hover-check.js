@@ -22,14 +22,13 @@ const zlib = require('zlib')
 const { spawn } = require('child_process')
 
 const ROOT = path.resolve(__dirname, '..')
-const findChrome = () => [process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe']
-  .filter(Boolean).find((p) => fs.existsSync(p))
+// Discovery comes from the shared module (this file used to carry its own inline
+// Windows-only candidate list). The CDP plumbing below stays local on purpose: it needs
+// Emulation.setDeviceMetricsOverride at 4x and font-rasteriser flags that the shared
+// transport does not expose.
+const { findChrome, describeSearch, shutdownBrowser } = require(path.join(__dirname, 'lib', 'browser.js'))
 const chrome = findChrome()
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 let failures = 0
 const pass = (m) => console.log('ok    ' + m)
@@ -187,9 +186,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       if(last) applyTokens(last) }
     window.__setPalette__=(p)=>{ if(p==='wuling') document.body.classList.add('theme-endfield-wuling')
       else document.body.classList.remove('theme-endfield-wuling') }
-    localStorage.setItem('dsh-theme-endfield-enabled','1')
-    localStorage.setItem('dsh-theme-endfield-loader','0')
-    localStorage.setItem('dsh-theme-endfield-contour','0')
+    localStorage.setItem('dsh-theme-endfield-contour-rework-enabled','1')
+    localStorage.setItem('dsh-theme-endfield-contour-rework-loader','0')
+    localStorage.setItem('dsh-theme-endfield-contour-rework-contour','0')
     const mod=window.__MOD__.factory(()=>null)
     mod.apply({get:(n)=>n==='theme'?{overrideTokens:(_s,t)=>{applyTokens(t);return ()=>{}}}:undefined,effect:()=>{}})
     window.__setScheme__('dark')
@@ -210,12 +209,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
      sufficient; rasterising at 4x is what guarantees a solid stroke core exists
      on every platform. The CSS is untouched, so the rule under test is still the
      shipped one. */
+  const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'hover-prof-'))
   const proc = spawn(chrome, ['--headless=new', '--disable-gpu', '--no-sandbox',
     '--hide-scrollbars', '--window-size=520,220',
     '--font-render-hinting=none', '--disable-font-subpixel-positioning',
     '--disable-lcd-text', '--force-color-profile=srgb',
     '--remote-debugging-port=' + port,
-    '--user-data-dir=' + fs.mkdtempSync(path.join(os.tmpdir(), 'hover-prof-')),
+    '--user-data-dir=' + PROFILE,
     'file:///' + page.replace(/\\/g, '/')], { stdio: ['ignore', 'ignore', 'ignore'] })
 
   try {
@@ -296,7 +296,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     }
     cdp.close()
   } finally {
-    proc.kill()
+    /* `proc.kill()` alone is not enough on a machine where the browser is Store/AppX Edge:
+       the spawned pid is only the launcher stub, and the real instance carries on (measured:
+       a full nine-process instance left behind, holding a debug port). The shared transport
+       knows how to shut that down properly, so reuse it. */
+    await shutdownBrowser(port, PROFILE)
+    try { proc.kill() } catch (e) { /* already gone */ }
   }
 
   console.log('')

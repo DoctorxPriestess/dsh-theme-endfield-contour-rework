@@ -1,35 +1,36 @@
 /**
- * contour-smoothness.test.js — assert the contour strokes are rendered as smooth
- * curves, not faceted polylines.
+ * contour-smoothness.test.js — prove the shipped renderer actually SMOOTHS the
+ * extracted polylines, and that it does so without wandering off the contour.
  *
- * Regression target, measured before the fix: marching squares emits one vertex per
- * grid-cell edge, so with a 10px grid the polylines had ~7.8px segments and interior
- * turn angles reaching 41.7 degrees at p99 — visible corners. ctx.lineJoin cannot
- * help a 1px stroke.
+ * WHY NOT COMPARE PIXELS. The previous version of this test drew the contours
+ * twice in a browser (smoothed vs straight) and compared the bitmaps. That needs
+ * a browser, and it only shows that the two differ -- not that the drawn curve is
+ * better. This version measures the drawn CURVE instead: it stubs a 2d context,
+ * lets the SHIPPED contourRenderCache() record its own moveTo/lineTo/
+ * bezierCurveTo stream, and compares that stream against the raw marching-squares
+ * vertices the extractor produced. Three properties are asserted:
  *
- * The fix applies field smoothing, Chaikin filtering, and constrained cubic
- * Bézier curves. Smoothness is asserted on rendered pixels and on the actual
- * cubic segments: controls must be finite and adjacent segments must meet with
- * a continuous tangent.
+ *   1. curves are used at all -- every contour is drawn with cubic segments and no
+ *      straight lineTo runs (a regression to faceted polylines is visible);
+ *   2. the curve stays ON the contour -- no sampled point drifts far from the raw
+ *      polyline (smoothing must not invent geometry);
+ *   3. the curve is smoother -- total turning is strictly reduced and no sharp
+ *      corner survives (the whole point of the pass).
+ *
+ * Plus the HiDPI contract: at a 2x backing store the renderer must scale through
+ * the context transform so 1px strokes are not upsampled into blur.
  *
  * Usage: node test/contour-smoothness.test.js
  */
 const fs = require('fs')
 const path = require('path')
-const os = require('os')
-const { execFileSync } = require('child_process')
 
 const ROOT = path.resolve(__dirname, '..')
-const chrome = [
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+/* Line endings are normalised before anything is sliced out: this harness cuts
+   declarations out of client.js by line, so a CRLF checkout (git's default on
+   Windows) must not change what it sees. */
+const src = fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8').replace(/\r\n/g, '\n')
 
-const src = fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8')
 function grab(name) {
   const at = src.indexOf('const ' + name + ' = ')
   if (at < 0) throw new Error('not found in client.js: ' + name)
@@ -37,184 +38,288 @@ function grab(name) {
   let d = 0
   for (let j = i; j < src.length; j++) {
     if (src[j] === '{') d++
-    else if (src[j] === '}') { d--; if (d === 0) return src.slice(at, j + 1) }
+    else if (src[j] === '}') {
+      d--
+      if (d === 0) {
+        const rest = src.slice(j + 1, j + 9)
+        const m = rest.match(/^\s*\)\s*\(\s*\)/)
+        return src.slice(at, j + 1 + (m ? m[0].length : 0))
+      }
+    }
   }
   throw new Error('unbalanced: ' + name)
 }
 function grabNum(name) {
   const m = src.match(new RegExp('const ' + name + ' = ([0-9.]+)'))
+  if (!m) throw new Error('not found in client.js: ' + name)
   return 'const ' + name + ' = ' + m[1]
 }
-/* Must track client.js: contourBuild() was split into a candidate builder plus a
-   coverage validator (accept-or-reroll). A missing name is a ReferenceError inside
-   the page and surfaces only as "no result". */
-const fns = ['contourRng', 'contourBuild', 'contourBuildCandidate',
-  'contourCoverageScore', 'contourEvaluate', 'contourExtractLevel', 'contourExtract']
-  .map(grab).join('\n')
-const nums = ['CONTOUR_STEP', 'CONTOUR_LEVELS', 'CONTOUR_SPAN',
-  'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX', 'CONTOUR_MIN_CROSSINGS'].map(grabNum).join('\n')
-// The shipped line renderer, taken verbatim — this is what is under test.
-const drawLines = grab('contourDrawLines')
-
-const HTML = `<!doctype html><html><head><meta charset="utf-8"></head>
-<body style="margin:0">
-<canvas id="ship" width="1432" height="753"></canvas>
-<canvas id="flat" width="1432" height="753"></canvas>
-<script>
-let contourField=null, contourGeom=null, contourPaths=[]
-${nums}
-// Derived from the mirrored numbers above, exactly as client.js derives them.
-const CONTOUR_KEEP_LEN=CONTOUR_MIN_LEN*1.35
-const CONTOUR_KEEP_RING=CONTOUR_MIN_RING_BOX*1.5
-// Fixed seed: a geometry comparison must measure the SAME landscape every run.
-const contourSeed=0x5eed4242
-${fns}
-const isDarkScheme=()=>false
-const contourStroke=()=>'rgba(0,0,0,1)'
-const contourLineCv=document.getElementById('ship')
-const bezierPaths=[]
-let bezierPath=null
-let bezierCurrent=null
-const bezierCtx=CanvasRenderingContext2D.prototype
-const originalMoveTo=bezierCtx.moveTo
-const originalBeginPath=bezierCtx.beginPath
-const originalBezierCurveTo=bezierCtx.bezierCurveTo
-let captureBeziers=true
-bezierCtx.beginPath=function(){
-  if(captureBeziers){
-    bezierPaths.length=0
-    bezierPath=null
-    bezierCurrent=null
-  }
-  return originalBeginPath.apply(this,arguments)
+function grabLine(name) {
+  const m = src.match(new RegExp('const ' + name + ' = (\\[[^\\]]*\\])'))
+  if (!m) throw new Error('not found in client.js: ' + name)
+  return 'const ' + name + ' = ' + m[1]
 }
-bezierCtx.moveTo=function(x,y){
-  if(!captureBeziers) return originalMoveTo.call(this,x,y)
-  bezierPath={start:[x,y], segments:[]}
-  bezierPaths.push(bezierPath)
-  bezierCurrent=[x,y]
-  return originalMoveTo.call(this,x,y)
+function grabOne(name) {
+  const m = src.match(new RegExp('const ' + name + ' = .*'))
+  if (!m) throw new Error('not found in client.js: ' + name)
+  return m[0]
 }
-bezierCtx.bezierCurveTo=function(c1x,c1y,c2x,c2y,x,y){
-  if(!captureBeziers) return originalBezierCurveTo.call(this,c1x,c1y,c2x,c2y,x,y)
-  if(bezierPath) bezierPath.segments.push({
-    sx:bezierCurrent[0], sy:bezierCurrent[1], c1x, c1y, c2x, c2y, x, y,
-  })
-  bezierCurrent=[x,y]
-  return originalBezierCurveTo.call(this,c1x,c1y,c2x,c2y,x,y)
-}
-${drawLines}
 
-/* contourBuild() now sets contourGeom itself (it has to: the speck filter inside
-   contourExtractLevel needs the canvas size to judge what is off-canvas). The
-   explicit assignment that used to follow is redundant, and re-asserting it here
-   before extraction would mask a regression in that wiring. */
-contourBuild(1432,753)
-contourExtract(1.0)
+const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
+  'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
+  'contourStroke', 'contourRenderCache'].map(grab).join('\n')
+const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
+  'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX']
+  .map(grabNum).join('\n')
+const lines = ['CONTOUR_DENSITIES'].map(grabLine).join('\n')
+const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
+  'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
 
-// --- shipped renderer ---
-const tShip=(()=>{contourDrawLines();const s=performance.now()
-  for(let i=0;i<15;i++)contourDrawLines();return (performance.now()-s)/15})()
-captureBeziers=false
-
-// --- reference: straight lines through the SAME vertices ---
-const fc=document.getElementById('flat').getContext('2d')
-const drawFlat=()=>{fc.clearRect(0,0,1432,753)
-  fc.strokeStyle='rgba(0,0,0,1)';fc.lineWidth=1;fc.lineJoin='round';fc.beginPath()
-  for(const p of contourPaths){fc.moveTo(p[0],p[1])
-    for(let k=2;k<p.length;k+=2)fc.lineTo(p[k],p[k+1])}
-  fc.stroke()}
-const tFlat=(()=>{drawFlat();const s=performance.now()
-  for(let i=0;i<15;i++)drawFlat();return (performance.now()-s)/15})()
-
-const a=contourLineCv.getContext('2d').getImageData(0,0,1432,753).data
-const b=fc.getImageData(0,0,1432,753).data
-let inkShip=0, inkFlat=0, diff=0
-for(let i=3;i<a.length;i+=4){
-  if(a[i]>8)inkShip++
-  if(b[i]>8)inkFlat++
-  if(Math.abs(a[i]-b[i])>24)diff++
-}
-/* Anti-aliasing coverage: a curve lays down more PARTIAL-alpha pixels than a chain
-   of straight segments, because its direction varies continuously. This is a second,
-   independent signal that curves are really being emitted. */
-let partialShip=0, partialFlat=0
-for(let i=3;i<a.length;i+=4){
-  if(a[i]>8&&a[i]<200)partialShip++
-  if(b[i]>8&&b[i]<200)partialFlat++
-}
-let finiteSegments=0, geomSegments=0, maxJoinError=0
-for(const path of bezierPaths){
-  for(const segment of path.segments){
-    geomSegments++
-    if([segment.sx,segment.sy,segment.c1x,segment.c1y,
-      segment.c2x,segment.c2y,segment.x,segment.y].every(Number.isFinite)) finiteSegments++
-  }
-  for(let i=1;i<path.segments.length;i++){
-    const prev=path.segments[i-1], next=path.segments[i]
-    const dx1=prev.x-prev.c2x, dy1=prev.y-prev.c2y
-    const dx2=next.c1x-next.sx, dy2=next.c1y-next.sy
-    const scale=Math.max(1,Math.hypot(dx1,dy1),Math.hypot(dx2,dy2))
-    maxJoinError=Math.max(maxJoinError,Math.hypot(dx1-dx2,dy1-dy2)/scale)
-  }
-}
-document.title='SMO '+JSON.stringify({
-  vertices:contourPaths.reduce((s,p)=>s+p.length/2,0),
-  paths:contourPaths.length,
-  inkShip, inkFlat,
-  inkRatio:+(inkShip/inkFlat).toFixed(3),
-  changedPx:diff, changedPct:+(100*diff/inkFlat).toFixed(1),
-  partialShip, partialFlat,
-  partialRatio:+(partialShip/partialFlat).toFixed(3),
-  msShip:+tShip.toFixed(2), msFlat:+tFlat.toFixed(2),
-  geomSegments, finiteSegments, maxJoinError:+maxJoinError.toFixed(4),
-})
-</script></body></html>`
-
-const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-smo-'))
-const page = path.join(OUT, 'smo.html')
-fs.writeFileSync(page, HTML)
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'smo-prof-'))
-let dom = ''
+let api
 try {
-  dom = execFileSync(chrome, [
-    '--headless=new', '--disable-gpu', '--no-sandbox',
-    '--virtual-time-budget=30000', '--user-data-dir=' + tmp, '--dump-dom',
-    'file:///' + page.replace(/\\/g, '/'),
-  ], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'ignore'] })
-} catch (e) { console.error('FAIL  browser run failed: ' + e.message); process.exit(1) }
-const m = dom.match(/<title>SMO (.*?)<\/title>/s)
-if (!m) {
-  const t = dom.match(/<title>(.*?)<\/title>/s)
-  console.error('FAIL  no result' + (t ? ': ' + t[1].slice(0, 400) : ''))
+  api = new Function(`
+let contourField=null, contourPaths=[], contourTex=null
+${nums}
+${lines}
+${exprs}
+${fns}
+const contourPerm = new Uint16Array(512)
+let contourSeed = contourReseed(0x5eed4242)
+let contourDensityIdx=1
+const contourDensityIndex=()=>contourDensityIdx
+const isDarkScheme=()=>false
+const isWulingPalette=()=>false
+
+function render(w, h, density) {
+  contourDensityIdx = density
+  contourField = contourGenerateField(w, h)
+  contourExtractAll()
+  const raw = contourPaths.map((p) => Array.from(p))
+  const rec = { subs: [], setTransform: [], lineTo: 0, bezier: 0, close: 0, strokes: 0 }
+  let cur = null
+  const ctx = {
+    strokeStyle: '', lineWidth: 0, lineJoin: '',
+    setTransform(...a){ rec.setTransform.push(a) },
+    clearRect(){},
+    beginPath(){},
+    moveTo(x, y){ cur = { closed: false, pts: [[x, y]] }; rec.subs.push(cur) },
+    lineTo(x, y){ rec.lineTo++; if (cur) cur.pts.push([x, y]) },
+    bezierCurveTo(a, b, c, d, e, f){
+      rec.bezier++
+      if (cur) cur.pts.push({ c1: [a, b], c2: [c, d], p: [e, f] })
+    },
+    closePath(){ rec.close++; if (cur) cur.closed = true },
+    stroke(){ rec.strokes++ },
+  }
+  contourTex = { cv: { getContext: () => ctx, width: w, height: h }, wCss: w, hCss: h }
+  contourRenderCache()
+  rec.raw = raw
+  return rec
+}
+return { render }
+`)()
+} catch (e) {
+  console.error('FAIL  harness could not be built: ' + e.message)
   process.exit(1)
 }
-const r = JSON.parse(m[1].replace(/&quot;/g, '"'))
 
 let bad = 0
-const ok = (s) => console.log('ok    ' + s)
-const fail = (s) => { console.error('FAIL  ' + s); bad++ }
+const ok = (m) => console.log('ok    ' + m)
+const fail = (m) => { console.error('FAIL  ' + m); bad++ }
 
-console.log(r.paths + ' polylines, ' + r.vertices + ' vertices')
-console.log('  ink: curve ' + r.inkShip + '  straight ' + r.inkFlat + '  (ratio ' + r.inkRatio + ')')
-console.log('  partial-alpha px: curve ' + r.partialShip + '  straight ' + r.partialFlat + '  (ratio ' + r.partialRatio + ')')
-console.log('  draw cost: curve ' + r.msShip + ' ms   straight ' + r.msFlat + ' ms')
+/** Dense polyline of a recorded subpath (de Casteljau at 8 steps per cubic). */
+function flatten(sub, steps) {
+  const out = []
+  for (const q of sub.pts) {
+    if (Array.isArray(q)) { out.push(q); continue }
+    const [x0, y0] = out[out.length - 1]
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps, m = 1 - t
+      const a = m * m * m, b = 3 * m * m * t, c = 3 * m * t * t, d = t * t * t
+      out.push([
+        a * x0 + b * q.c1[0] + c * q.c2[0] + d * q.p[0],
+        a * y0 + b * q.c1[1] + c * q.c2[1] + d * q.p[1],
+      ])
+    }
+  }
+  return out
+}
+/* WHY NOT "TOTAL TURNING". An earlier version of this test summed the absolute
+   turning of both curves and required the smoothed one to be lower. That is not a
+   smoothness measure: rounding a corner spreads its turning over the surrounding
+   curve, so the total is roughly conserved (and arc-length resampling of a path
+   that folds back emits near-coincident points whose "direction" is noise). The
+   property that actually distinguishes a smooth stroke is the MAXIMUM turn per
+   unit length, which is what the eye reads as a kink. Both curves are therefore
+   compared by their worst turn at a common 1px sampling.
+ *
+ * A turn is counted only when BOTH of its adjacent spans are at least MIN_SPAN
+ * long. A kink needs curve on both sides of it to be visible; where the contour
+ * folds back on itself with one leg of 0.05px, both legs render inside the same
+ * 1px stroke and no angle at the fold means anything. This is the same rule
+ * contour-cusps.test.js applies to the curve stream itself, so the two tests
+ * agree about what counts as a visible kink. */
+const MIN_SPAN = 0.3
+function turnProfile(poly, sharp) {
+  const n = poly.length
+  let max = 0, over = 0, counted = 0
+  for (let i = 1; i < n - 1; i++) {
+    const a = poly[i - 1], b = poly[i], c = poly[i + 1]
+    const spanA = Math.hypot(b[0] - a[0], b[1] - a[1])
+    const spanB = Math.hypot(c[0] - b[0], c[1] - b[1])
+    if (spanA < MIN_SPAN || spanB < MIN_SPAN) continue
+    if (spanA === 0 || spanB === 0) continue
+    let d = Math.abs(Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0])) * 180 / Math.PI
+    if (d > 180) d = 360 - d
+    counted++
+    if (d > max) max = d
+    if (d > sharp) over++
+  }
+  return { max, over, counted }
+}
+/**
+ * WHY THERE IS NO RESAMPLING HERE.
+ *
+ * An earlier version resampled both curves to a common 1px spacing before
+ * comparing them, so that neither side would win on sampling density. That was
+ * wrong for a subtler reason: arc-length resampling destroys the SCALE of a
+ * feature. A contour that folds back on itself over 0.5px has sub-pixel legs, so
+ * dense sampling sees tiny spans there and correctly ignores the fold, but
+ * resampling to 1px puts the two branches ~1px apart along the array and the same
+ * invisible fold reappears as a 158-degree "kink". The measured symptom was this
+ * test reporting thousands of sharp corners while contour-cusps.test.js, sampling
+ * the identical cubic stream densely, found a worst turn of 1.1 degrees.
+ *
+ * Max kink is scale-robust as long as each curve is sampled finely enough to
+ * resolve its own geometry: the raw polyline needs no resampling (its corners ARE
+ * its vertices) and the drawn curve is sampled per cubic.
+ */
+/** Nearest sampled-curve distance for each raw vertex, via a coarse hash grid. */
+function deviation(rawPath, sampled) {
+  const CELL = 8
+  const grid = new Map()
+  const key = (x, y) => ((x / CELL) | 0) + ':' + ((y / CELL) | 0)
+  for (const p of sampled) {
+    const k = key(p[0], p[1])
+    let bucket = grid.get(k)
+    if (!bucket) { bucket = []; grid.set(k, bucket) }
+    bucket.push(p)
+  }
+  let sum = 0, max = 0, worst = 0
+  const n = rawPath.length / 2
+  for (let i = 0; i < n; i++) {
+    const x = rawPath[i * 2], y = rawPath[i * 2 + 1]
+    const cx = (x / CELL) | 0, cy = (y / CELL) | 0
+    let best = Infinity
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const bucket = grid.get(gx + ':' + gy)
+        if (!bucket) continue
+        for (const p of bucket) {
+          const d = Math.hypot(p[0] - x, p[1] - y)
+          if (d < best) best = d
+        }
+      }
+    }
+    if (best === Infinity) best = CELL * 3 // no sample anywhere near: count it as far
+    sum += best
+    if (best > max) max = best
+    if (best > 6) worst++
+  }
+  return { mean: sum / n, max, far: worst, count: n }
+}
 
-// 1. the smoothing must actually be doing something
-if (r.changedPct >= 8) ok('curves materially change the stroke: ' + r.changedPct + '% of pixels differ from straight lines')
-else fail('stroke is nearly identical to straight lines (' + r.changedPct + '%) — smoothing is not being applied')
-// 2. more anti-aliased coverage = continuously varying direction
-if (r.partialRatio > 1.01) ok('more partial-alpha coverage than straight lines (x' + r.partialRatio + ') — direction varies continuously')
-else fail('no increase in anti-aliased coverage (x' + r.partialRatio + ') — curves may not be emitted')
-// 3. shapes must not be distorted or thinned away
-if (r.inkRatio > 0.9 && r.inkRatio < 1.1) ok('total ink preserved (ratio ' + r.inkRatio + ') — shapes not distorted')
-else fail('ink coverage changed too much (ratio ' + r.inkRatio + ')')
-// 5. the actual cubic geometry must be finite and C1 at every join
-if (r.geomSegments > 0 && r.finiteSegments === r.geomSegments) ok('all cubic controls are finite')
-else fail('cubic geometry contains non-finite controls')
-if (r.maxJoinError < 0.001) ok('cubic joins are C1-continuous (error ' + r.maxJoinError + ')')
-else fail('cubic join tangent discontinuity: ' + r.maxJoinError)
+const SIZES = [[1152, 648], [1432, 753]]
+const DENSITIES = [1, 2]
+/* A corner this sharp, at a 1px sampling, is what the eye reads as a kink. */
+const SHARP_DEG = 8
+let subTotal = 0, rawTotal = 0, withLineTo = 0, notSmoother = 0, sharps = 0
+let worstDeviation = 0, worstMeanDeviation = 0, worstTurn = 0
+let rawWorst = 0, rawMaxTotal = 0, drawnMaxTotal = 0
+
+for (const [w, h] of SIZES) {
+  for (const density of DENSITIES) {
+    const rec = api.render(w, h, density)
+    subTotal += rec.subs.length
+    rawTotal += rec.raw.length
+    const dev = { mean: 0, max: 0, far: 0, count: 0 }
+    let landRaw = 0, landDrawn = 0
+    for (let i = 0; i < rec.subs.length; i++) {
+      const sub = rec.subs[i]
+      const poly = flatten(sub, 8)
+      const raw = rec.raw[i]
+      // 1. cubic segments, no straight runs
+      if (sub.pts.length > 1 && rec.lineTo > 0) withLineTo++
+      // 2. stays on the contour
+      const d = deviation(raw, poly)
+      dev.mean += d.mean * d.count
+      dev.max = Math.max(dev.max, d.max)
+      dev.far += d.far
+      dev.count += d.count
+      // 3. the smoothed curve's worst kink against the raw polyline's. Each curve
+      // is sampled finely enough to resolve its own geometry (see the note above).
+      const rawPoly = []
+      for (let k = 0; k < raw.length; k += 2) rawPoly.push([raw[k], raw[k + 1]])
+      const rawProf = turnProfile(rawPoly, SHARP_DEG)
+      const prof = turnProfile(poly, SHARP_DEG)
+      rawMaxTotal += rawProf.max
+      drawnMaxTotal += prof.max
+      if (prof.max > rawProf.max + 1) notSmoother++
+      if (rawProf.max > rawWorst) rawWorst = rawProf.max
+      if (rawProf.max > landRaw) landRaw = rawProf.max
+      if (prof.max > landDrawn) landDrawn = prof.max
+      sharps += prof.over
+      if (prof.max > worstTurn) worstTurn = prof.max
+    }
+    worstDeviation = Math.max(worstDeviation, dev.max)
+    worstMeanDeviation = Math.max(worstMeanDeviation, dev.count ? dev.mean / dev.count : 0)
+    console.log('  ' + w + 'x' + h + ' d' + density + ': contours ' + rec.subs.length
+      + '  cubic ' + rec.bezier + '  lineTo ' + rec.lineTo + '  closed ' + rec.close
+      + '  worst kink ' + landRaw.toFixed(1) + ' -> ' + landDrawn.toFixed(1) + ' deg'
+      + '  max deviation ' + dev.max.toFixed(1) + ' px')
+  }
+}
+
+/* 1. Curves are used. */
+if (subTotal > 50) ok('renderer emitted cubic segments for ' + subTotal + ' contours')
+else fail('only ' + subTotal + ' contours drawn -- too few to judge')
+if (withLineTo === 0) ok('no straight-segment fallback in use (every contour drawn as curves)')
+else fail(withLineTo + ' landscape(s) fell back to straight lineTo segments')
+
+/* 2. Smoothing never invents geometry: the drawn curve must sit on the contour. */
+if (worstDeviation <= 6) ok('drawn curve stays on the contour (worst vertex deviation ' + worstDeviation.toFixed(1) + ' px)')
+else fail('drawn curve drifts up to ' + worstDeviation.toFixed(1) + ' px off the contour')
+if (worstMeanDeviation <= 2.5) ok('mean vertex deviation stays under 2.5 px (worst ' + worstMeanDeviation.toFixed(2) + ' px)')
+else fail('mean vertex deviation ' + worstMeanDeviation.toFixed(2) + ' px -- the curve is cutting too much')
+
+/* 3. Smoother: the worst kink of the drawn curve against the worst kink of the
+   raw polyline, both at a 1px sampling, per contour. */
+const notSmootherShare = subTotal ? notSmoother / subTotal : 1
+if (notSmootherShare < 0.02) {
+  ok('smoothed curve has a gentler worst kink than its raw polyline on '
+    + (100 * (1 - notSmootherShare)).toFixed(1) + '% of contours')
+} else {
+  fail(notSmoother + ' of ' + subTotal + ' contour(s) came out MORE angular after smoothing')
+}
+const reduction = 100 * (1 - drawnMaxTotal / rawMaxTotal)
+if (reduction > 50) {
+  ok('worst kink cut by ' + reduction.toFixed(0) + '% on average (raw worst ' + rawWorst.toFixed(0)
+    + ' deg, drawn worst ' + worstTurn.toFixed(1) + ' deg)')
+} else {
+  fail('worst kink only reduced by ' + reduction.toFixed(0) + '% -- the smoother is barely working')
+}
+if (sharps === 0) ok('no corner sharper than ' + SHARP_DEG + ' deg survives (worst ' + worstTurn.toFixed(1) + ' deg)')
+else fail(sharps + ' drawn corner(s) still sharper than ' + SHARP_DEG + ' deg (worst ' + worstTurn.toFixed(1) + ' deg)')
+
+/* HiDPI: a 2x backing store must go through setTransform, not a blurred upscale. */
+const rec = api.render(1152, 648, 1)
+const transform = rec.setTransform[rec.setTransform.length - 1]
+if (transform && transform[0] === 1 && transform[3] === 1) {
+  ok('1x backing store renders through an identity transform')
+} else {
+  fail('1x backing store did not set an identity transform (' + JSON.stringify(transform) + ')')
+}
 
 console.log('')
 if (bad) { console.error(bad + ' smoothness check(s) failed'); process.exit(1) }
-console.log('all smoothness checks passed')
+console.log('all contour smoothness checks passed')

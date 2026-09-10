@@ -35,19 +35,14 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { execFileSync, findChrome, describeSearch } = require(path.join(__dirname, 'lib', 'browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 const OUTDIR = path.join(ROOT, '.kagent', 'shots')
 fs.mkdirSync(OUTDIR, { recursive: true })
 
-const chrome = [process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(describeSearch()); process.exit(1) }
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-thunder-'))
 fs.copyFileSync(path.join(ROOT, 'client.js'), path.join(TMP, 'client.js'))
@@ -82,7 +77,7 @@ const mk = (dark) => `<!doctype html><html><head><meta charset="utf-8"><style>
 <script src="./client.js"></script>
 <script>
   /* The theme's switches no longer persist through localStorage — it reads and
-     writes its own 'dsh-theme-endfield' namespace over the DSH ctx.settingsScope
+     writes its own 'dsh-theme-endfield-contour-rework' namespace over the DSH ctx.settingsScope
      service (client mirror of the host settings.namespace; persisted to the
      profile's settings.yaml), exactly like dsh-client-locale consumes settings. So
      seeding browser storage here would switch thunder on for NOTHING: the store
@@ -97,8 +92,9 @@ const mk = (dark) => `<!doctype html><html><head><meta charset="utf-8"><style>
      the word over the theme's paper — watermark is default-ON, so it must be forced
      off here or it would layer into the capture. */
   const DEFAULTS = { enabled:'1', palette:'valley', radius:'square', contour:'0',
-    contourAnim:'1', contourFps:'24', contourSpeed:'2', contourScrollPause:'1',
-    watermark:'1', watermarkPersist:'0', loader:'0', thunder:'0', thunderAnim:'0' }
+    contourAnim:'1', contourDir:'0', contourSpeed:'2', contourDensity:'1',
+    contourScrollPause:'1', watermark:'1', watermarkPersist:'0', loader:'0',
+    thunder:'0', thunderAnim:'0' }
   const section = { enabled:'1', thunder:'1', loader:'0', contour:'0', watermark:'0',
     thunderAnim:'0' }
   const value = {}; for (const k in DEFAULTS) value[k] = (k in section) ? section[k] : DEFAULTS[k]

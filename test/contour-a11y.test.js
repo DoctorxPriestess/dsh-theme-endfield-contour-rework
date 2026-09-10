@@ -12,19 +12,13 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { execFileSync } = require('child_process')
+const { findChrome, dumpDom } = require(path.join(__dirname, 'lib', 'browser.js'))
 const { BROWSER_SETTINGS_SCOPE_SNIPPET } = require(path.join(__dirname, 'fixtures', 'settings-scope.browser.js'))
 
 const ROOT = path.resolve(__dirname, '..')
 const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'endfield-a11y-'))
-const chrome = [
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean).find((p) => fs.existsSync(p))
-if (!chrome) { console.error('FAIL  no Chrome/Edge found (set CHROME_PATH)'); process.exit(1) }
+const chrome = findChrome()
+if (!chrome) { console.error(require(path.join(__dirname, 'lib', 'browser.js')).describeSearch()); process.exit(1) }
 
 const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   html,body,#root{height:100%;margin:0}
@@ -77,14 +71,14 @@ fs.writeFileSync(page, HTML)
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'a11y-prof-'))
 let dom = ''
 try {
-  dom = execFileSync(chrome, [
+  dom = dumpDom(chrome, [
     '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
     // This is the whole point of the file: impose the OS-level preference.
     '--force-prefers-reduced-motion',
     '--virtual-time-budget=12000', '--window-size=1400,900',
     '--user-data-dir=' + tmp, '--dump-dom',
     'file:///' + page.replace(/\\/g, '/'),
-  ], { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] })
+  ], 120000)
 } catch (e) { console.error('FAIL  browser run failed: ' + e.message); process.exit(1) }
 
 const m = dom.match(/<title>A11Y (\[.*?\])<\/title>/s)

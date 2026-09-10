@@ -1,11 +1,15 @@
 'use strict';
 /**
- * dsh-theme-endfield — installed (bundle) HOST half.
+ * dsh-theme-endfield-contour-rework — installed (bundle) HOST half.
+ *
+ * Fork 自 dsh-theme-endfield — https://github.com/ymh0000123/dsh-theme-endfield
+ * Copyright (c) ymh0000123（原始作品）。MIT 许可证，原文见仓库根的 LICENSE；
+ * 出处与改动说明见 NOTICE.md / CHANGELOG.md。
  *
  * This module is the cordis plugin the loader mounts when the package is
  * installed through the official CLI:
  *
- *   dsh plugin --profile web add github:ymh0000123/dsh-theme-endfield
+ *   dsh plugin --profile web add github:DoctorxPriestess/dsh-theme-endfield-contour-rework
  *
  * The `dsh.bundle.patch` layer (cordis.patch.yml) inserts this package's row;
  * the loader requires this main entry and uses its `name` + `apply` exports.
@@ -22,7 +26,7 @@
  * the theme's switches now lives with DSH's own user-settings service instead:
  *
  *   - This HOST half registers a persisted settings *namespace*
- *     (`dsh-theme-endfield`) through `ctx.settings.register(ns, schema)`, which
+ *     (`dsh-theme-endfield-contour-rework`) through `ctx.settings.register(ns, schema)`, which
  *     `@deepseek-ai/dsh-settings-file` persists to the profile harness home
  *     (`~/.dsh/.../settings.yaml`). Path and persistence are decided by DSH
  *     itself and are completely independent of the web origin/port.
@@ -43,12 +47,12 @@
  * cordis peer, so the theme degrades to a no-op the same way it always did in
  * any profile that does not supply a settings service.
  */
-const NAME = 'dsh-theme-endfield';
+const NAME = 'dsh-theme-endfield-contour-rework';
 
 /**
  * Settings namespace owned by this plugin, and schema defaults for every
  * field. Field names are the short tails of the original localStorage keys
- * (the `dsh-theme-endfield-` prefix is implied by the namespace). Keeping the
+ * (the `dsh-theme-endfield-contour-rework-` prefix is implied by the namespace). Keeping the
  * actual stored values as strings means old persisted values stay valid with
  * no migration.
  *
@@ -56,19 +60,25 @@ const NAME = 'dsh-theme-endfield';
  * instead of by an "absent key" check, and documented in docs/features.md):
  *   - default-ON switches store '1' and the client reads them as `!== '0'`;
  *   - default-OFF switches store '0' and the client reads them as `=== '1'`;
- *   - palettes / radii / frame-rate / speed each store exactly one of their
- *     documented literals ('valley'/'wuling'; 'square'/'round'; fps in
- *     24/60/120; speed in 1/2/4), with the shipped default filled in here.
+ *   - palette / radius store one of their documented literals ('valley' /
+ *     'wuling'; 'square' / 'round');
+ *   - the contour DIRECTION, SPEED and DENSITY store integer indices into the
+ *     client's option tables (0..7 compass directions, 0..4 speeds in px/s,
+ *     0..3 iso-level counts), not the literals themselves, so a stored index can
+ *     never go stale when the tables are retuned. There is no frame-rate field:
+ *     the tileable-terrain engine renders once and only translates the cached
+ *     texture, so frames cost nothing to configure.
  */
-const NAMESPACE = 'dsh-theme-endfield';
+const NAMESPACE = 'dsh-theme-endfield-contour-rework';
 const FIELD_DEFAULTS = {
   enabled: '1',             // 终末地主题 —— default on
   palette: 'valley',        // 主题配色 —— 谷地黄 (walley default)
   radius: 'square',         // 主题圆角 —— 直角
   contour: '0',             // 等高线背景 —— default off
-  contourAnim: '1',         // 动态等高线 —— default on
-  contourFps: '24',         // 动态帧率 —— 24 FPS
-  contourSpeed: '2',        // 动态速度 —— 标准 2x
+  contourAnim: '1',         // 等高线滚动 —— default on
+  contourDir: '0',          // 滚动方向 —— 0 = 向上（index into CONTOUR_DIRS）
+  contourSpeed: '2',        // 滚动速度 —— index 2 = 48 px/s
+  contourDensity: '1',      // 等高线密度 —— index 1 = 14 条等值线
   contourScrollPause: '1',  // 滚动暂停 —— default on
   watermark: '1',           // 背景水印 —— default on
   watermarkPersist: '0',    // 水印保持显示 —— default off
@@ -83,7 +93,7 @@ const FIELD_DEFAULTS = {
       `import z from "schemastery"` and it resolves). Those are covered by the
       first two tries below.
    2) A DEV-LINK bundle (this repo symlinked into the profile's node_modules,
-      e.g. `"dsh-theme-endfield": "link:E:/..."`) does NOT: its files resolve
+      e.g. `"dsh-theme-endfield-contour-rework": "link:E:/..."`) does NOT: its files resolve
       from the repo path, where no schemastery lives — so bare/scoped require
       throws MODULE_NOT_FOUND and (with the old loader) registration silently
       would never happen (the "settings won't save" symptom). So when those
