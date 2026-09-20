@@ -91,18 +91,37 @@ function grabOne(name) {
    track client.js; a missing one throws here instead of failing mysteriously. */
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder',
-  'contourTerrace', 'contourTerraceField']
+  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourTerrainRow',
+  'contourOctaveLadder', 'contourStair', 'contourTerrace', 'contourCliff',
+  'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp', 'contourReliefWarp',
+  'contourRidgeAt', 'contourValleyAt', 'contourFeaturePeriod', 'contourHash3',
+  'contourPrimitiveDelta', 'contourApplyPrimitives']
   .map(grab).join('\n')
+/* Single-expression arrows have no brace to scan to, so they are taken verbatim
+   by line instead of by brace matching. */
+const oneLiners = ['contourSmooth', 'contourHash01'].map(grabOne).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN',
-  'CONTOUR_TERRACE_SOFT']
+  'CONTOUR_TERRACE_SOFT', 'CONTOUR_NOISE_NORM', 'CONTOUR_FEATURE_MIN',
+  'CONTOUR_PLATEAU_BAND', 'CONTOUR_CLIFF_BAND', 'CONTOUR_CLIFF_STEPS_BASE',
+  'CONTOUR_CLIFF_STEPS_SPAN', 'CONTOUR_CLIFF_SOFT_BASE', 'CONTOUR_CLIFF_SOFT_FALL']
   .map(grabNum).join('\n')
 const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
-  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE'].map(grabLine).join('\n')
+  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_TERRAIN_CLASS', 'CONTOUR_TERRAIN_MACRO',
+  'CONTOUR_TERRAIN_SHAPE', 'CONTOUR_TERRAIN_RIDGE', 'CONTOUR_TERRAIN_VALLEY',
+  'CONTOUR_TERRAIN_PLATEAU', 'CONTOUR_TERRAIN_CLIFF', 'CONTOUR_TERRAIN_CLIFFBAND',
+  'CONTOUR_TERRAIN_RELIEF', 'CONTOUR_TERRAIN_WATER', 'CONTOUR_TERRAIN_BLOBS',
+  'CONTOUR_TERRAIN_BLOBSCALE', 'CONTOUR_PALETTE_0', 'CONTOUR_PALETTE_1', 'CONTOUR_PALETTE_2',
+  'CONTOUR_PALETTE_3', 'CONTOUR_PALETTE_4'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
-  'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
+  'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_FEATURE_PALETTES',
+  'CONTOUR_FEATURE_GRID'].map(grabOne).join('\n')
+/* The landform bookkeeping ids (featKind) are plain integers. */
+const kinds = ['CONTOUR_FEAT_NONE', 'CONTOUR_FEAT_PLATEAU', 'CONTOUR_FEAT_CLIFF',
+  'CONTOUR_FEAT_FAN', 'CONTOUR_FEAT_CONE', 'CONTOUR_FEAT_CRATER', 'CONTOUR_FEAT_DUNE',
+  'CONTOUR_FEAT_PIT', 'CONTOUR_FEAT_ARETE', 'CONTOUR_FEAT_TROUGH', 'CONTOUR_FEAT_KARST',
+  'CONTOUR_FEAT_TALUS', 'CONTOUR_FEAT_WATER'].map(grabNum).join('\n')
 /* The shipped roughness stop, read from client.js rather than typed here: these
    geometry checks must always measure the terrain the theme actually ships. */
 const ROUGH = (src.match(/const CONTOUR_ROUGHNESS_DEFAULT = ([0-9]+)/) || [])[1]
@@ -113,8 +132,10 @@ try {
   api = new Function(`
 let contourField=null, contourPaths=[], contourTex=null
 ${nums}
+${kinds}
 ${lines}
 ${exprs}
+${oneLiners}
 ${fns}
 /* Fixed seed ON PURPOSE: a geometry regression must measure the SAME landscape
    every run. contourSeed is a let in client.js (a mount re-rolls it), so the
@@ -163,9 +184,17 @@ return {
   roughnessStop() { return ${ROUGH} },
   terracedStops() {
     const out = []
-    for (let i = 0; i < CONTOUR_ROUGHNESS_TERRACE.length; i++) {
-      if (CONTOUR_ROUGHNESS_TERRACE[i] > 0) out.push({ stop: i, strength: CONTOUR_ROUGHNESS_TERRACE[i] })
+    const row = contourTerrainRow()
+    for (let i = 0; i < CONTOUR_ROUGHNESS_BASE.length; i++) {
+      /* A stop needs its own sweep once ANY landform is switched on for it: the
+         warps, the banded staircases and the primitives are all new geometry. */
+      const anyFeature = CONTOUR_TERRAIN_PLATEAU[i] > 0 || CONTOUR_TERRAIN_CLIFF[i] > 0 ||
+        CONTOUR_TERRAIN_RIDGE[i] > 0 || CONTOUR_TERRAIN_VALLEY[i] > 0 ||
+        CONTOUR_TERRAIN_SHAPE[i] > 0 || CONTOUR_TERRAIN_RELIEF[i] > 0 ||
+        CONTOUR_TERRAIN_WATER[i] >= 0 || CONTOUR_TERRAIN_BLOBS[i] > 0
+      out.push({ stop: i, strength: CONTOUR_TERRAIN_CLIFF[i] + CONTOUR_TERRAIN_PLATEAU[i], anyFeature })
     }
+    void row
     return out
   },
   /* Terrain lifecycle. client.js keeps the permutation table as the single carrier
@@ -308,9 +337,11 @@ let smallestRingBox = Infinity
    soft staircase is the one edit that could put genuine corners into the terrain,
    so the "no cusp / no debris" claims must be measured on the terraced stops and
    not only on the shipped default. */
-const terracedStops = api.terracedStops()
+const featureStops = api.terracedStops()
 const SWEEPS = [{ stop: api.roughnessStop(), sizes: SIZES }]
-for (const t of terracedStops) SWEEPS.push({ stop: t.stop, sizes: [[1152, 648], [320, 240]] })
+for (const t of featureStops) {
+  if (t.anyFeature && t.stop !== api.roughnessStop()) SWEEPS.push({ stop: t.stop, sizes: [[1152, 648], [320, 240]] })
+}
 const worstByStop = []
 
 for (const sweep of SWEEPS) {
@@ -391,17 +422,19 @@ const worstP99 = Math.max.apply(null, worstP99s)
 if (worstP99 < 12) ok('bulk stays smooth: worst p99 turn ' + worstP99.toFixed(1) + ' deg')
 else fail('p99 turn angle rose to ' + worstP99.toFixed(1) + ' deg — strokes are faceted again')
 
-/* The staircase is the only edit that can reintroduce corners, so its stops are
-   held to the same bound as the rest — separately reported, because a regression
-   there is a different bug from a regression on the plain terrain. */
-if (terracedStops.length === 0) fail('no roughness stop carries a staircase — the plateau/cliff stops are gone')
+/* The landform layer is the edit that can reintroduce corners (a staircase, a
+   tail-steepened summit, a primitve's rim), so every stop that carries one is
+   swept separately and held to the same bound as the rest. Reported stop by stop,
+   because a regression there is a different bug from one on the plain terrain. */
+const sweptFeatureStops = featureStops.filter((t) => t.anyFeature)
+if (sweptFeatureStops.length < 6) fail('only ' + sweptFeatureStops.length + ' stops carry landforms — the landform layer looks switched off')
 else {
   const bad = worstByStop.filter((s) => s.worst > 150)
   if (bad.length === 0) {
-    ok('terraced stops stay smooth too: ' + terracedStops.map((t) => 'stop ' + t.stop
-      + ' (' + t.strength + ') max ' + (worstByStop.find((s) => s.stop === t.stop) || { worst: 0 }).worst.toFixed(1) + ' deg').join(', '))
+    ok('landform stops stay smooth too: ' + sweptFeatureStops.map((t) => 'stop ' + t.stop
+      + ' max ' + (worstByStop.find((s) => s.stop === t.stop) || { worst: 0 }).worst.toFixed(1) + ' deg').join(', '))
   } else {
-    fail('a terraced stop has a cusp: ' + bad.map((s) => 'stop ' + s.stop + ' max ' + s.worst.toFixed(1) + ' deg').join(', '))
+    fail('a landform stop has a cusp: ' + bad.map((s) => 'stop ' + s.stop + ' max ' + s.worst.toFixed(1) + ' deg').join(', '))
   }
 }
 

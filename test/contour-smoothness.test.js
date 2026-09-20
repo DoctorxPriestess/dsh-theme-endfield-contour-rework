@@ -67,18 +67,36 @@ function grabOne(name) {
 
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder',
-  'contourTerrace', 'contourTerraceField']
+  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourTerrainRow',
+  'contourOctaveLadder', 'contourStair', 'contourTerrace', 'contourCliff',
+  'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp', 'contourReliefWarp',
+  'contourRidgeAt', 'contourValleyAt', 'contourFeaturePeriod', 'contourHash3',
+  'contourPrimitiveDelta', 'contourApplyPrimitives']
   .map(grab).join('\n')
+/* Single-expression arrows have no brace to scan to, so they are taken verbatim
+   by line instead of by brace matching. */
+const oneLiners = ['contourSmooth', 'contourHash01'].map(grabOne).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN',
-  'CONTOUR_TERRACE_SOFT']
+  'CONTOUR_TERRACE_SOFT', 'CONTOUR_NOISE_NORM', 'CONTOUR_FEATURE_MIN',
+  'CONTOUR_PLATEAU_BAND', 'CONTOUR_CLIFF_BAND', 'CONTOUR_CLIFF_STEPS_BASE',
+  'CONTOUR_CLIFF_STEPS_SPAN', 'CONTOUR_CLIFF_SOFT_BASE', 'CONTOUR_CLIFF_SOFT_FALL']
   .map(grabNum).join('\n')
+const kinds = ['CONTOUR_FEAT_NONE', 'CONTOUR_FEAT_PLATEAU', 'CONTOUR_FEAT_CLIFF',
+  'CONTOUR_FEAT_FAN', 'CONTOUR_FEAT_CONE', 'CONTOUR_FEAT_CRATER', 'CONTOUR_FEAT_DUNE',
+  'CONTOUR_FEAT_PIT', 'CONTOUR_FEAT_ARETE', 'CONTOUR_FEAT_TROUGH', 'CONTOUR_FEAT_KARST',
+  'CONTOUR_FEAT_TALUS', 'CONTOUR_FEAT_WATER'].map(grabNum).join('\n')
 const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
-  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE'].map(grabLine).join('\n')
+  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_TERRAIN_CLASS', 'CONTOUR_TERRAIN_MACRO',
+  'CONTOUR_TERRAIN_SHAPE', 'CONTOUR_TERRAIN_RIDGE', 'CONTOUR_TERRAIN_VALLEY',
+  'CONTOUR_TERRAIN_PLATEAU', 'CONTOUR_TERRAIN_CLIFF', 'CONTOUR_TERRAIN_CLIFFBAND',
+  'CONTOUR_TERRAIN_RELIEF', 'CONTOUR_TERRAIN_WATER', 'CONTOUR_TERRAIN_BLOBS',
+  'CONTOUR_TERRAIN_BLOBSCALE', 'CONTOUR_PALETTE_0', 'CONTOUR_PALETTE_1', 'CONTOUR_PALETTE_2',
+  'CONTOUR_PALETTE_3', 'CONTOUR_PALETTE_4'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
-  'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
+  'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_FEATURE_PALETTES',
+  'CONTOUR_FEATURE_GRID'].map(grabOne).join('\n')
 /* The shipped roughness stop, read from client.js rather than typed here: the
    smoothness bar is about the terrain the theme actually ships. */
 const ROUGH = (src.match(/const CONTOUR_ROUGHNESS_DEFAULT = ([0-9]+)/) || [])[1]
@@ -89,8 +107,10 @@ try {
   api = new Function(`
 let contourField=null, contourPaths=[], contourTex=null
 ${nums}
+${kinds}
 ${lines}
 ${exprs}
+${oneLiners}
 ${fns}
 const contourPerm = new Uint16Array(512)
 let contourSeed = contourReseed(0x5eed4242)

@@ -978,23 +978,12 @@ function apply(ctx) {
        constants above, so the long-standing landscape is literally those
        numbers and can never drift away from them silently. */
     const CONTOUR_ROUGHNESS_DEFAULT = 7
-    const CONTOUR_ROUGHNESS_BASE = [960, 768, 640, 549, 480, 427, 384, CONTOUR_BASE_CELL, 274, 266, 258, 250]
-    const CONTOUR_ROUGHNESS_PERSIST = [0.24, 0.28, 0.32, 0.36, 0.39, 0.42, 0.45, CONTOUR_PERSIST, 0.53, 0.56, 0.59, 0.62]
-    const CONTOUR_ROUGHNESS_OCTAVES = [2, 3, 3, 4, 4, 4, 5, CONTOUR_OCTAVES, 5, 5, 6, 6]
-    /* PLATEAUS AND CLIFFS — the fourth table, and the reason stops 10..12 read as
-       mountain country rather than as "more of the same, only smaller".
-       A value here is the strength of a SOFT STAIRCASE applied to the height field
-       (see contourTerrace): the terrain is flattened into plateaus and the relief
-       is concentrated into narrow bands between them. On the sheet that is exactly
-       the ask — 高原 (a plateau crosses no iso-level, so it carries no lines at all)
-       and 悬崖 (the band between two plateaus crosses several levels over a few
-       tens of px, so the lines bunch into a near-parallel bundle up the face).
-       ZERO FOR STOPS 0..9 ON PURPOSE: everything up to and including the shipped
-       default must remain the terrain it has always been, and the ramps at 10..12
-       are what the request asked to add. The progression is deliberately steep at
-       the end (0.35 / 0.62 / 0.88) so the last three detents are visibly different
-       from each other. */
-    const CONTOUR_ROUGHNESS_TERRACE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0.35, 0.62, 0.88]
+    const CONTOUR_ROUGHNESS_BASE = [960, 768, 640, 549, 480, 427, 384, CONTOUR_BASE_CELL, 360, 440, 520, 600]
+    const CONTOUR_ROUGHNESS_PERSIST = [0.24, 0.28, 0.32, 0.36, 0.39, 0.42, 0.45, CONTOUR_PERSIST, 0.50, 0.52, 0.54, 0.56]
+    const CONTOUR_ROUGHNESS_OCTAVES = [2, 3, 3, 4, 4, 4, 5, CONTOUR_OCTAVES, 5, 5, 5, 5]
+    /* PLATEAUS AND CLIFFS are now two tables of the landform layer
+       (CONTOUR_TERRAIN_PLATEAU, CONTOUR_TERRAIN_CLIFF) further down: a whole-field
+       staircase for 高原, and the same staircase applied INSIDE bands for 悬崖. */
     /* Staircase shape, derived from that strength:
          STEPS     how many plateau levels the field is quantised into. Too few and
                    the plateaus swallow the whole sheet (no contour anywhere); too
@@ -1014,15 +1003,16 @@ function apply(ctx) {
     const CONTOUR_TERRACE_SOFT = 0.5
     const contourRoughnessIndex = () => contourReadIndex(
       CONTOUR_ROUGHNESS_KEY, CONTOUR_ROUGHNESS_BASE.length - 1, CONTOUR_ROUGHNESS_DEFAULT)
-    /* The roughness stop as the generator needs it: the ladder of octaves is
-       resolved HERE, once per build, not per sample. */
+    /* The roughness stop as the generator needs it: the fBm ladder (cell,
+       persistence, octave budget) plus the landform row for that stop. Resolved
+       HERE, once per build, not per sample. */
     const contourTerrainProfile = () => {
       const i = contourRoughnessIndex()
-      const baseCell = CONTOUR_ROUGHNESS_BASE[i]
-      const persist = CONTOUR_ROUGHNESS_PERSIST[i]
-      const want = CONTOUR_ROUGHNESS_OCTAVES[i]
-      const terrace = CONTOUR_ROUGHNESS_TERRACE[i]
-      return { baseCell, persist, octaves: want, terrace }
+      const row = contourTerrainRow()
+      row.baseCell = CONTOUR_ROUGHNESS_BASE[i]
+      row.persist = CONTOUR_ROUGHNESS_PERSIST[i]
+      row.octaves = CONTOUR_ROUGHNESS_OCTAVES[i]
+      return row
     }
     /* The soft staircase behind 高原 + 悬崖 (see CONTOUR_ROUGHNESS_TERRACE).
        u is the position inside the field's own [min,max], strength is 0..1.
@@ -1035,10 +1025,8 @@ function apply(ctx) {
        Pointwise, so tileability and determinism are untouched, and it fixes the
        range's own endpoints (mn -> mn, mx -> mx), which keeps the iso-levels
        derived from that range crossing the terrain. */
-    const contourTerrace = (u, strength) => {
-      if (!(strength > 0)) return u
-      const steps = CONTOUR_TERRACE_STEPS_BASE + Math.round(CONTOUR_TERRACE_STEPS_SPAN * strength)
-      const w = Math.min(0.45, CONTOUR_TERRACE_SOFT * strength)
+    const contourStair = (u, steps, w) => {
+      if (!(steps > 1)) return u
       const x = u * steps
       const i = Math.floor(x)
       const f = x - i
@@ -1047,11 +1035,554 @@ function apply(ctx) {
       const y = (i + sm) / steps
       return y < 0 ? 0 : (y > 1 ? 1 : y)
     }
-    /* Apply the staircase in place over the field's actual range. */
+    const contourTerrace = (u, strength) => {
+      if (!(strength > 0)) return u
+      const steps = CONTOUR_TERRACE_STEPS_BASE + Math.round(CONTOUR_TERRACE_STEPS_SPAN * strength)
+      const w = Math.min(0.45, CONTOUR_TERRACE_SOFT * strength)
+      return contourStair(u, steps, w)
+    }
+    /* The CLIFF shape of the same idea: many steps with thin ramps. A plateau
+       wants few steps with wide treads (a floor to stand on), a cliff wants the
+       level lines bunched up the face — the two differ in `steps` and `w`, not in
+       "how strong" the effect is, so they get their own parameters. */
+    const contourCliff = (u, strength) => {
+      if (!(strength > 0)) return u
+      const s = strength > 1 ? 1 : strength
+      const steps = CONTOUR_CLIFF_STEPS_BASE + Math.round(CONTOUR_CLIFF_STEPS_SPAN * s)
+      const w = CONTOUR_CLIFF_SOFT_BASE - CONTOUR_CLIFF_SOFT_FALL * s
+      return contourStair(u, steps, w < 0.05 ? 0.05 : w)
+    }
+    /* Apply the staircase in place over the field's actual range (used by the
+       landform layer for the whole-field plateau pass). */
     const contourTerraceField = (F, mn, mx, strength) => {
       const span = mx - mn
       if (!(span > 0)) return
       for (let i = 0; i < F.length; i++) F[i] = mn + span * contourTerrace((F[i] - mn) / span, strength)
+    }
+
+    /* ======================= 地形特征层 (landform layer) =======================
+       Each roughness stop names a terrain CLASS (plains / hills / low, mid, high
+       mountains) and a set of landforms, all of them ANALYTIC — no erosion, no
+       flow accumulation, no sediment transport. That ceiling is deliberate: a
+       physically simulated landscape needs iterative passes over the whole tile
+       (water routing, deposition), which would turn a ~90 ms rebuild into seconds,
+       break the exactly-tileable guarantee the scroll depends on, and buy detail
+       nobody can see in a 1px-stroke background. What a contour sheet actually
+       shows of a landform is the SHAPE of its level lines, and every shape below
+       comes from either a monotone height remap or a local analytic primitive:
+
+         陡坡/缓坡, 凸坡/凹坡, 均坡   a spatially varying exponent (shape warp)
+         阶梯坡 / 高原                the soft staircase (contourTerrace)
+         悬崖                         the same staircase inside BANDS only, so the
+                                      sheet keeps natural terrain between cliffs
+         山脊线/分水岭                ridged noise (1 - |n|), added
+         山谷线/冲沟                  narrow troughs at the noise zero crossings
+         尖锐山峰/深谷                a smooth tail-steepening polynomial
+         海/湖/河漫滩/潟湖            an EXACT plane: everything below the water
+                                      level is clamped to it. Water on a contour
+                                      map IS flat, and a flat region draws no line
+         冲积扇/泥石流扇/三角洲, 火山锥, 火口湖, 天坑/矿坑/冰斗, 沙丘/雅丹,
+         峰林/峰丛/角峰, 刃脊, 峡湾/阶地河道, 倒石堆, 沙嘴
+                                      parameterised primitives (see
+                                      CONTOUR_FEATURE_PALETTES), placed by hashing
+                                      a slot grid and evaluated with TOROIDAL
+                                      distance, so a primitive straddling the tile
+                                      edge is drawn identically on both sides.
+
+       Bookkeeping: every LOCALISED modifier writes its own |height change| into
+       field.featAmt and its kind into field.featKind, so "how much of the sheet is
+       feature terrain" is measured rather than asserted by eye — the <75% cap and
+       the plateau-decreasing / cliff-increasing rules are all assertions in
+       test/contour-roughness.test.js. The base-terrain shaping (macro relief,
+       slope shape, ridge lines, sharp tails) is NOT counted as coverage: it sets
+       the terrain everything else sits in. Coverage counts the landforms a reader
+       would point at: plateaus, cliffs, blobs, water. */
+
+    const CONTOUR_FEAT_NONE = 0
+    const CONTOUR_FEAT_PLATEAU = 1
+    const CONTOUR_FEAT_CLIFF = 2
+    const CONTOUR_FEAT_FAN = 3
+    const CONTOUR_FEAT_CONE = 4
+    const CONTOUR_FEAT_CRATER = 5
+    const CONTOUR_FEAT_DUNE = 6
+    const CONTOUR_FEAT_PIT = 7
+    const CONTOUR_FEAT_ARETE = 8
+    const CONTOUR_FEAT_TROUGH = 9
+    const CONTOUR_FEAT_KARST = 10
+    const CONTOUR_FEAT_TALUS = 11
+    const CONTOUR_FEAT_WATER = 12
+    /* A cell counts as feature terrain once a modifier moved it by at least this
+       share of the field's range — i.e. by about a contour interval or more. */
+    const CONTOUR_FEATURE_MIN = 0.02
+
+    /* Terrain class per stop. 0 plains, 1 hills, 2 low mountains, 3 mid mountains,
+       4 high mountains. Only a label: the shape of the stop comes from the numbers
+       below, and the palettes keyed by this class. */
+    const CONTOUR_TERRAIN_CLASS = [0, 0, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4]
+    /* Broad elevation trend (a very low frequency layer). POSITIVE lifts the
+       middle of the tile into a plateau/massif, NEGATIVE carves a basin ringed by
+       higher ground -- which is what makes a 盆地 read as one. */
+    const CONTOUR_TERRAIN_MACRO = [0.16, 0.12, 0.14, 0.16, 0.18, 0.22, 0.24, 0.26, -0.20, -0.16, 0.20, 0.26]
+    /* Slope shape: the exponent of u^k follows a low frequency mask, so the same
+       stop carries 凹坡 (k > 1, lines bunch at the top) in one region and 凸坡
+       (k < 1, lines bunch at the bottom) in another. 均坡 is what remains. */
+    const CONTOUR_TERRAIN_SHAPE = [0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30]
+    /* 山脊线 / 分水岭: how much ridged noise (1 - |n|) is added. Kept a MINORITY
+       of the range: ridge noise multiplies the number of local maxima, and the
+       measured legibility ceiling (level lines no finer than the 10px sampling
+       grid) is set by however many extrema the terrain has per tile. */
+    const CONTOUR_TERRAIN_RIDGE = [0, 0.01, 0.02, 0.03, 0.05, 0.07, 0.09, 0.11, 0.14, 0.16, 0.18, 0.20]
+    /* 山谷线 / 冲沟: how deep the troughs cut along those zero crossings. */
+    const CONTOUR_TERRAIN_VALLEY = [0, 0, 0.01, 0.02, 0.02, 0.03, 0.04, 0.06, 0.07, 0.09, 0.11, 0.13]
+    /* 高原: the staircase strength inside PLATEAU BANDS. A landform is a REGION,
+       not a filter over the whole sheet: applying the staircase everywhere turned
+       the map into a quilt of mesas (measured: 73% of the sheet flat at stop 6,
+       with the relief piling up on the seams) — the "mountains chopped flat" this
+       design was told to avoid. The band mask leaves natural terrain in between.
+       Strength falls from stop 6 to stop 9, then is exactly 0: from stop 10 the
+       cliffs below carry the relief instead. */
+    const CONTOUR_TERRAIN_PLATEAU = [0, 0, 0, 0, 0, 0.75, 0.60, 0.45, 0.20, 0, 0, 0]
+    /* 悬崖: the staircase strength inside CLIFF BANDS, on its own (narrower) mask.
+       A cliff is the OTHER staircase shape: many steps with thin ramps, so the
+       level lines bunch into a bundle up the face, where a plateau wants few steps
+       with wide treads. Ramps up to the maximum at stop 12. */
+    const CONTOUR_TERRAIN_CLIFF = [0, 0, 0, 0, 0, 0, 0, 0.10, 0.22, 0.40, 0.62, 0.90]
+    /* Band width, per stop: the COVERAGE has to grow towards the top as well, or
+       "the cliffs are strongest at 12" would only be true of their steepness.
+       Measured, not guessed: |Perlin| is heavily concentrated near zero (|n| < 0.3
+       already covers ~70% of a tile), so a band threshold has to be far tighter
+       than intuition suggests. These put the plateau bands at roughly a third of
+       the sheet and the cliff bands at a quarter to a third, together comfortably
+       inside the <75% ceiling, with natural terrain left in the gaps. */
+    const CONTOUR_PLATEAU_BAND = 0.13
+    const CONTOUR_CLIFF_BAND = 0.11
+    const CONTOUR_TERRAIN_CLIFFBAND = [0, 0, 0, 0, 0, 0, 0, 0.09, 0.10, 0.12, 0.14, 0.17]
+    const CONTOUR_CLIFF_STEPS_BASE = 3
+    const CONTOUR_CLIFF_STEPS_SPAN = 5
+    const CONTOUR_CLIFF_SOFT_BASE = 0.22
+    const CONTOUR_CLIFF_SOFT_FALL = 0.16
+    /* 尖锐山峰 / 深谷: the tail-steepening polynomial (contourReliefWarp). Two
+       sharp ends on a gentle middle slope -- high mountains at the top stops.
+       Capped well below 1: the warp's own middle flattens as 1 - r, so a large r
+       would buy sharp summits by turning the mid-slope into yet another plateau. */
+    const CONTOUR_TERRAIN_RELIEF = [0, 0, 0, 0, 0, 0, 0.03, 0.07, 0.14, 0.24, 0.36, 0.50]
+    /* Water level as a share of the range, NEGATIVE = no water at this stop. The
+       plains and basins keep lakes and rivers; the high mountains keep cirque
+       lakes and a fjord; the mid stops stay dry so the contour structure reads. */
+    const CONTOUR_TERRAIN_WATER = [0.34, 0.28, 0.22, 0.18, 0.12, 0.08, -1, -1, -1, -1, 0.16, 0.22]
+    /* Blob density: the share of the 4x4 feature slots that spawn a primitive. */
+    const CONTOUR_TERRAIN_BLOBS = [0.30, 0.34, 0.38, 0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.58, 0.68, 0.78]
+    /* How large a primitive is, as a share of its slot. */
+    const CONTOUR_TERRAIN_BLOBSCALE = [0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95, 0.95, 1.00, 1.05, 1.10, 1.15]
+    /* Feature palettes per terrain class. Ids repeated to weight them. */
+    const CONTOUR_PALETTE_0 = [3, 3, 9, 9, 6, 6, 7, 8]
+    const CONTOUR_PALETTE_1 = [3, 3, 11, 11, 10, 9, 6, 7]
+    const CONTOUR_PALETTE_2 = [3, 11, 11, 4, 10, 10, 9, 5]
+    const CONTOUR_PALETTE_3 = [5, 5, 4, 4, 8, 8, 10, 11]
+    const CONTOUR_PALETTE_4 = [5, 5, 4, 8, 8, 9, 10, 11]
+    /* Single line on purpose: the test harnesses slice declarations by name, so a
+       declaration that spans lines cannot be extracted. */
+    const CONTOUR_FEATURE_PALETTES = [CONTOUR_PALETTE_0, CONTOUR_PALETTE_1, CONTOUR_PALETTE_2, CONTOUR_PALETTE_3, CONTOUR_PALETTE_4]
+    /* The slot grid: 4x4 primitives per tile. Larger grids mean smaller, busier
+       features; 16 keeps a 1px contour sheet readable at any texture size. */
+    const CONTOUR_FEATURE_GRID = 4
+
+    const contourTerrainRow = () => {
+      const i = contourRoughnessIndex()
+      return {
+        cls: CONTOUR_TERRAIN_CLASS[i],
+        macro: CONTOUR_TERRAIN_MACRO[i],
+        shape: CONTOUR_TERRAIN_SHAPE[i],
+        ridge: CONTOUR_TERRAIN_RIDGE[i],
+        valley: CONTOUR_TERRAIN_VALLEY[i],
+        plateau: CONTOUR_TERRAIN_PLATEAU[i],
+        cliff: CONTOUR_TERRAIN_CLIFF[i],
+        cliffBand: CONTOUR_TERRAIN_CLIFFBAND[i],
+        relief: CONTOUR_TERRAIN_RELIEF[i],
+        water: CONTOUR_TERRAIN_WATER[i],
+        blobs: CONTOUR_TERRAIN_BLOBS[i],
+        blobScale: CONTOUR_TERRAIN_BLOBSCALE[i],
+      }
+    }
+
+    /* Integer, tileable noise period for a feature scale (in lattice cells).
+       Kept well inside CONTOUR_PERIOD_MAX so the permutation table stays safe. */
+    const contourFeaturePeriod = (size, baseCell, scale) => {
+      const p = Math.round(size / (baseCell * scale))
+      return p < 2 ? 2 : (p > 64 ? 64 : p)
+    }
+    /* Deterministic 32-bit hash of three integers, used to derive every primitive
+       parameter from (slot, stop, seed). A hash rather than a stored list: the
+       landscape must stay reproducible from the seed alone, and a primitive must be
+       derivable in O(1) wherever it is needed. */
+    const contourHash3 = (a, b, c) => {
+      let h = Math.imul((a | 0) ^ 0x9E3779B9, 0x85EBCA6B)
+      h = Math.imul(h ^ ((b | 0) + 0x165667B1), 0xC2B2AE35)
+      h = Math.imul(h ^ ((c | 0) + 0x27D4EB2F), 0x165667B1)
+      h ^= h >>> 15
+      h = Math.imul(h, 0x2545F491)
+      h ^= h >>> 13
+      return h >>> 0
+    }
+    const contourHash01 = (a, b, c) => contourHash3(a, b, c) / 4294967296
+
+    /* 凸坡 / 凹坡 / 均坡. g(u) = u^k with k driven by a low frequency mask: k < 1
+       bunches the level lines at the BOTTOM of the slope (凸坡, lines sparse above,
+       dense below), k > 1 at the TOP (凹坡). Both are monotone and fix the
+       endpoints, so the field's range is untouched. */
+    const contourShapeWarp = (u, k) => {
+      if (k === 1) return u
+      if (u <= 0) return 0
+      if (u >= 1) return 1
+      return Math.pow(u, k)
+    }
+    /* 尖锐山峰 + 深谷 in one smooth polynomial: g = u + 2r*u(1-u)(2u-1), whose
+       derivative is 1 + 2r(6u^2 - 6u + 1) — steepest at both ends (summits and
+       valley floors), gentlest in between. FINITE derivative everywhere, unlike
+       u^p (p < 1) whose slope runs to infinity at an endpoint and whose innermost
+       level lines can fall below the 10px sampling grid; the cusp suite asserts the
+       drawn curves of every stop stay under 8 degrees. r is capped below 1 so the
+       map stays monotone (g' at the middle is 1 - r). */
+    const contourReliefWarp = (u, r) => {
+      const y = u + 2 * r * u * (1 - u) * (2 * u - 1)
+      return y < 0 ? 0 : (y > 1 ? 1 : y)
+    }
+    /* ~1 for the corners of the noise range of contourNoise (|Perlin| <= 1/sqrt2). */
+    const CONTOUR_NOISE_NORM = 1.41421356
+    /* Ridged noise: peaks along the zero crossings of an octave, in 0..1. 山脊线
+       (a divide: water sheds to both sides) is exactly this on a contour map. */
+    const contourRidgeAt = (x, y, tw, th, px, py) => {
+      const n = contourNoise((x / tw) * px, (y / th) * py, px, py) * CONTOUR_NOISE_NORM
+      const a = n < 0 ? -n : n
+      return a > 1 ? 0 : 1 - a
+    }
+    /* Valley lines / gullies: a narrow trough at the zero crossing of its own
+       octave, so 山谷线 (the line that collects water) is a smooth V in plan view. */
+    const contourValleyAt = (x, y, tw, th, px, py) => {
+      const n = contourNoise((x / tw) * px, (y / th) * py, px, py) * CONTOUR_NOISE_NORM
+      const a = n < 0 ? -n : n
+      return a > 1 ? 0 : (1 - a) * (1 - a)
+    }
+    /* Smoothstep on an already clamped 0..1 input. */
+    const contourSmooth = (t) => t * t * (3 - 2 * t)
+
+    /* One analytic primitive, added into the normalised field.
+       kind selects the shape. dx/dy are the SHORTEST SIGNED toroidal offsets to
+       the primitive's centre: every shape below is a function of those, never of
+       the raw position, which is what keeps a primitive that straddles the tile
+       edge identical on both sides. amp is in units of the field's range. */
+    const contourPrimitiveDelta = (kind, dx, dy, rad, ang, phase, amp) => {
+      const d = Math.sqrt(dx * dx + dy * dy)
+      const t = 1 - d / rad
+      if (t <= 0) return 0
+      const along = dx * Math.cos(ang) + dy * Math.sin(ang)
+      const perp = Math.abs(-dx * Math.sin(ang) + dy * Math.cos(ang))
+      switch (kind) {
+        /* 冲积扇 / 洪积扇 / 泥石流扇 / 三角洲: a fan, apex at the centre, toe at
+           the radius, with a concave-up profile like a real deposit. */
+        case CONTOUR_FEAT_FAN: return amp * t * t * (0.6 + 0.4 * contourSmooth(t))
+        /* 火山锥: cone with a crater at the summit. */
+        case CONTOUR_FEAT_CONE:
+          return amp * Math.pow(t, 1.2) - (d < rad * 0.26 ? amp * 0.75 * (1 - d / (rad * 0.26)) : 0)
+        /* 火口湖 / 冰斗 / 潟湖: a bowl. Its floor can drop under the water level,
+           in which case the water plane fills it — a lake where the terrain says
+           there should be one. */
+        case CONTOUR_FEAT_CRATER: {
+          const r = d / rad
+          return -amp * Math.pow(1 - r * r, 0.7)
+        }
+        /* 天坑 / 矿坑: nearly cylindrical, steep walls, flat floor. */
+        case CONTOUR_FEAT_PIT: {
+          const r = d / rad
+          return -amp * Math.pow(1 - Math.pow(r, 6), 0.5)
+        }
+        /* 沙丘 / 雅丹: directional ripples, damped to zero at the rim. */
+        case CONTOUR_FEAT_DUNE: {
+          const lam = rad / 3.5
+          return amp * 0.5 * (0.5 + 0.5 * Math.sin(phase + (along / lam) * 6.2831853)) * Math.pow(t, 0.5)
+        }
+        /* 刃脊 / 沙嘴: an elongated crest (a 刃脊 is a knife-edge between two
+           cirques; a 沙嘴 is the same shape built of sand at the shore). */
+        case CONTOUR_FEAT_ARETE: {
+          const w = rad * 0.28
+          if (perp >= w) return 0
+          return amp * Math.pow(1 - perp / w, 1.2) * Math.pow(t, 0.4)
+        }
+        /* 峡湾 / 河漫滩 / 阶地河道: an elongated trough with stepped sides — the
+           staircase in the cross-slope direction, not in height, which is what a
+           river terrace looks like on a contour sheet. */
+        case CONTOUR_FEAT_TROUGH: {
+          const w = rad * 0.5
+          if (perp >= w) return 0
+          const tier = contourTerrace(perp / w, 0.55)
+          return -amp * (1 - tier) * Math.pow(t, 0.35)
+        }
+        /* 峰林 / 峰丛 / 角峰: several sharp towers inside one blob, the karst
+           signature (little level rings packed together). */
+        case CONTOUR_FEAT_KARST: {
+          const r = d / rad
+          const lobes = 0.45 + 0.55 * Math.abs(Math.cos(3 * Math.atan2(dy, dx) + phase))
+          return amp * Math.pow(1 - r, 2.1) * lobes
+        }
+        /* 倒石堆 / 火山碎屑裙: a low cone at the foot of the feature next to it. */
+        case CONTOUR_FEAT_TALUS: return amp * 0.6 * Math.pow(t, 2)
+        default: return 0
+      }
+    }
+
+    /* Place and apply the primitives for one stop: a fixed slot grid, one
+       primitive per slot, parameters hashed from (slot, class, seed). */
+    const contourApplyPrimitives = (U, field, prof) => {
+      const cols = field.cols
+      const rows = field.rows
+      const step = field.step
+      const tw = field.tw
+      const th = field.th
+      const amt = field.featAmt
+      const kind = field.featKind
+      const palette = CONTOUR_FEATURE_PALETTES[prof.cls]
+      const G = CONTOUR_FEATURE_GRID
+      const sw = tw / G
+      const sh = th / G
+      const span = field.mx - field.mn
+      const ampUnit = span > 0 ? 1 : 0
+      for (let sy = 0; sy < G; sy++) {
+        for (let sx = 0; sx < G; sx++) {
+          const h0 = contourHash3(sx * 73856093 + 0x51ed270b, sy * 19349663 + 0x27d4eb2f, contourSeed)
+          const h1 = contourHash3(h0, prof.cls + 17, contourSeed ^ 0x165667b1)
+          const h2 = contourHash3(h1, sx + sy * 31, contourSeed ^ 0x9e3779b9)
+          if ((h0 >>> 8) / 16777216 >= prof.blobs) continue
+          const kd = palette[(h1 >>> 5) % palette.length]
+          const r1 = ((h1 >>> 11) & 1023) / 1024
+          const r2 = ((h1 >>> 21) & 1023) / 1024
+          const r3 = ((h2 >>> 3) & 1023) / 1024
+          const r4 = ((h2 >>> 13) & 1023) / 1024
+          const r5 = ((h2 >>> 23) & 511) / 512
+          const cx = (sx + 0.12 + 0.76 * r1) * sw
+          const cy = (sy + 0.12 + 0.76 * r2) * sh
+          const rad = prof.blobScale * (0.55 + 0.75 * r3) * Math.min(sw, sh) * 0.48
+          if (!(rad > step)) continue
+          const ang = r4 * 6.2831853
+          const phase = r5 * 6.2831853
+          /* Amplitude in units of the range: big enough to reshape the terrain,
+             small enough that the feature stays a landform and not the terrain. */
+          const amp = ampUnit * (0.07 + 0.11 * prof.blobs)
+          const i0 = Math.floor((cx - rad) / step)
+          const i1 = Math.ceil((cx + rad) / step)
+          const j0 = Math.floor((cy - rad) / step)
+          const j1 = Math.ceil((cy + rad) / step)
+          const halfW = tw * 0.5
+          const halfH = th * 0.5
+          for (let j = j0; j <= j1; j++) {
+            const yy = j * step
+            let sdy = yy - cy
+            /* Shortest SIGNED offset: the primitive is periodic, so a cell is
+               influenced by whichever wrap of the centre is nearer. */
+            if (sdy > halfH) sdy -= th
+            else if (sdy < -halfH) sdy += th
+            /* The storage index comes from the WRAPPED COORDINATE. Wrapping the
+               index instead would be wrong wherever the tile is not a whole number
+               of grid cells (which is the common case: the texture is quantised to
+               128px against a 10px grid), because one index step would then mean
+               slightly more than one period and the feature would be displaced by
+               up to a cell across the seam -- caught by the seam check in the
+               tuning harness as a 2e-2 discontinuity on an exact tiling. */
+            const yw = yy - Math.floor(yy / th) * th
+            let jj = Math.round(yw / step)
+            if (jj > rows - 1) jj = rows - 1
+            else if (jj < 0) jj = 0
+            const row = jj * cols
+            for (let i = i0; i <= i1; i++) {
+              const xx = i * step
+              let sdx = xx - cx
+              if (sdx > halfW) sdx -= tw
+              else if (sdx < -halfW) sdx += tw
+              if (sdx * sdx + sdy * sdy > rad * rad) continue
+              const xw = xx - Math.floor(xx / tw) * tw
+              let ii = Math.round(xw / step)
+              if (ii > cols - 1) ii = cols - 1
+              else if (ii < 0) ii = 0
+              const idx = row + ii
+              const before = U[idx]
+              const after = before + contourPrimitiveDelta(kd, sdx, sdy, rad, ang, phase, amp)
+              U[idx] = after
+              const diff = after > before ? after - before : before - after
+              if (diff > amt[idx]) {
+                amt[idx] = diff
+                kind[idx] = kd
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /* Apply the whole landform layer to a freshly generated fBm field, in place.
+       The order is deliberate:
+         1. normalise the fBm to 0..1 (every feature below is resolution-blind);
+         2. ADDITIVE features (macro relief, ridge lines, gullies, primitives) —
+            they define the terrain the warps then shape;
+         3. re-normalise (step 2 moved the range);
+         4. MONOTONE warps: slope shape, staircase (plateau), banded staircase
+            (cliffs), sharp tails;
+         5. the water plane LAST: clamping to a level only stays a perfect plane if
+            nothing warps the field after it;
+         6. write back into the BASE range and recompute mn/mx, so the iso-levels
+            are derived from what is really there (a lake raises the minimum). */
+    const contourApplyLandforms = (field, prof) => {
+      const F = field.F
+      const U = field.uScratch
+      const amt = field.featAmt
+      const kind = field.featKind
+      const cols = field.cols
+      const rows = field.rows
+      const step = field.step
+      const tw = field.tw
+      const th = field.th
+      const n = cols * rows
+      const baseMn = field.mn
+      const baseSpan = field.mx - field.mn
+      if (!(baseSpan > 0) || U === null || n === 0) return
+      const inv = 1 / baseSpan
+      for (let i = 0; i < n; i++) {
+        U[i] = (F[i] - baseMn) * inv
+        amt[i] = 0
+        kind[i] = CONTOUR_FEAT_NONE
+      }
+      const bcell = prof.baseCell > 0 ? prof.baseCell : 280
+      /* --- stage 2: additive base features ------------------------------------ */
+      const pmx = contourFeaturePeriod(tw, bcell, 3.4)
+      const pmy = contourFeaturePeriod(th, bcell, 3.4)
+      const prx = contourFeaturePeriod(tw, bcell, 3.0)
+      const pry = contourFeaturePeriod(th, bcell, 3.0)
+      const pvx = contourFeaturePeriod(tw, bcell, 2.2)
+      const pvy = contourFeaturePeriod(th, bcell, 2.2)
+      const macro = prof.macro
+      const ridge = prof.ridge
+      const valley = prof.valley
+      for (let j = 0; j < rows; j++) {
+        const y = j * step
+        const row = j * cols
+        for (let i = 0; i < cols; i++) {
+          const x = i * step
+          let u = U[row + i]
+          if (macro !== 0) u += macro * contourNoise((x / tw) * pmx, (y / th) * pmy, pmx, pmy) * CONTOUR_NOISE_NORM
+          if (ridge > 0) u += ridge * (contourRidgeAt(x, y, tw, th, prx, pry) - 0.5)
+          if (valley > 0) u -= valley * contourValleyAt(x, y, tw, th, pvx, pvy)
+          U[row + i] = u
+        }
+      }
+      if (prof.blobs > 0) contourApplyPrimitives(U, field, prof)
+      /* --- stage 3: renormalise ---------------------------------------------- */
+      let mn2 = Infinity
+      let mx2 = -Infinity
+      for (let i = 0; i < n; i++) {
+        const u = U[i]
+        if (u < mn2) mn2 = u
+        if (u > mx2) mx2 = u
+      }
+      const span2 = mx2 - mn2
+      if (!(span2 > 0)) return
+      const inv2 = 1 / span2
+      for (let i = 0; i < n; i++) U[i] = (U[i] - mn2) * inv2
+      /* --- stage 4: monotone warps -------------------------------------------- */
+      const shape = prof.shape
+      const plateau = prof.plateau
+      const cliff = prof.cliff
+      const relief = prof.relief
+      /* One period per mask, coarser for the plateau regions than for the cliff
+         bands: plateaus are broad areas of the sheet, cliffs are the narrower
+         faces inside them. */
+      const psx = contourFeaturePeriod(tw, bcell, 1.6)
+      const psy = contourFeaturePeriod(th, bcell, 1.6)
+      const pbx = contourFeaturePeriod(tw, bcell, 2.6)
+      const pby = contourFeaturePeriod(th, bcell, 2.6)
+      const pcx = contourFeaturePeriod(tw, bcell, 1.8)
+      const pcy = contourFeaturePeriod(th, bcell, 1.8)
+      const reliefR = relief > 0.65 ? 0.65 : relief
+      const hasStairs = plateau > 0 || cliff > 0
+      for (let j = 0; j < rows; j++) {
+        const y = j * step
+        const row = j * cols
+        for (let i = 0; i < cols; i++) {
+          const idx = row + i
+          const x = i * step
+          const u0 = U[idx]
+          let u = u0
+          if (shape > 0) {
+            const m = contourNoise((x / tw) * psx, (y / th) * psy, psx, psy) * CONTOUR_NOISE_NORM
+            u = contourShapeWarp(u, Math.max(0.35, Math.min(2.8, 1 + shape * m)))
+          }
+          if (reliefR > 0) u = contourReliefWarp(u, reliefR)
+          if (hasStairs) {
+            /* Two landforms, two masks, one staircase per cell: a cell inside a
+               plateau region gets the wide-tread staircase, a cell inside a cliff
+               band the thin-ramp one (the sharper of the two wins where they
+               overlap). Everything outside both keeps the terrain it had. */
+            let s = 0
+            let isCliff = false
+            if (plateau > 0) {
+              const b = contourNoise((x / tw) * pbx, (y / th) * pby, pbx, pby) * CONTOUR_NOISE_NORM
+              const a = b < 0 ? -b : b
+              if (a < CONTOUR_PLATEAU_BAND) s = plateau * (1 - contourSmooth(a / CONTOUR_PLATEAU_BAND))
+            }
+            if (cliff > 0) {
+              const c = contourNoise((x / tw) * pcx, (y / th) * pcy, pcx, pcy) * CONTOUR_NOISE_NORM
+              const a = c < 0 ? -c : c
+              const bandW = prof.cliffBand > 0 ? prof.cliffBand : CONTOUR_CLIFF_BAND
+              if (a < bandW) {
+                const t = cliff * (1 - contourSmooth(a / bandW))
+                if (t > s) { s = t; isCliff = true }
+              }
+            }
+            if (s > 0) {
+              u = isCliff ? contourCliff(u, s) : contourTerrace(u, s)
+              const diff = u > u0 ? u - u0 : u0 - u
+              if (diff > amt[idx]) {
+                amt[idx] = diff
+                kind[idx] = isCliff ? CONTOUR_FEAT_CLIFF : CONTOUR_FEAT_PLATEAU
+              }
+            }
+          }
+          U[idx] = u
+        }
+      }
+      /* --- stage 5: the water plane ------------------------------------------- */
+      const wl = prof.water
+      if (wl >= 0 && wl < 1) {
+        for (let i = 0; i < n; i++) {
+          if (U[i] < wl) {
+            const diff = wl - U[i]
+            U[i] = wl
+            if (diff >= amt[i]) {
+              amt[i] = diff
+              kind[i] = CONTOUR_FEAT_WATER
+            }
+          }
+        }
+      }
+      /* --- stage 6: back into the base range, with the real extremes ---------- */
+      let mnF = Infinity
+      let mxF = -Infinity
+      for (let i = 0; i < n; i++) {
+        const v = baseMn + U[i] * baseSpan
+        F[i] = v
+        if (v < mnF) mnF = v
+        if (v > mxF) mxF = v
+      }
+      /* The grid carries one padded row/column past the tile edge (cols is
+         ceil(tw/step)+1). When the tile is a whole number of cells that sample IS
+         the tile boundary -- the same physical point as index 0 -- so it has to
+         carry the same value, or the repeat would show a hairline where the sheet
+         wraps. Idempotent on the plain fBm, which is already exactly periodic. */
+      if (Math.abs((cols - 1) * step - tw) < 1e-6) {
+        for (let j = 0; j < rows; j++) F[j * cols + cols - 1] = F[j * cols]
+      }
+      if (Math.abs((rows - 1) * step - th) < 1e-6) {
+        for (let i = 0; i < cols; i++) F[(rows - 1) * cols + i] = F[i]
+      }
+      field.mn = mnF
+      field.mx = mxF
     }
     /* How many octaves of that ladder are actually usable on a texture of tw x th
        CSS px: octave o has period (px0 * 2^o), and the lattice indices must stay
@@ -1315,12 +1846,9 @@ function apply(ctx) {
           if (v > mx) mx = v
         }
       }
-      /* Plateau/cliff shaping for the roughest stops. Applied to the finished fBm
-         (not per octave), so it acts on the landscape as a whole: it is a remap of
-         the height range, not another frequency. Stops 0..9 carry strength 0 and
-         therefore a field bit-for-bit identical to the pre-terrace one. */
-      if (prof.terrace > 0) contourTerraceField(F, mn, mx, prof.terrace)
-      /* Marching-squares scratch buffers, allocation-free across levels (the
+      /* The landform layer is applied below, once the field object exists (it
+         writes the feature bookkeeping the tests measure).
+         Marching-squares scratch buffers, allocation-free across levels (the
          stitched walk reuses them for every level of one extraction).
 
          hCount MUST be returned: the extractor destructures it to build the
@@ -1330,8 +1858,14 @@ function apply(ctx) {
          vertices -- the exact defect the cusps test caught as duplicated rings. */
       const hCount = (cols - 1) * rows
       const eCount = hCount + cols * (rows - 1)
-      return {
+      /* The field object is built first because the landform layer needs it (it
+         writes the feature bookkeeping the tests measure). uScratch / featAmt /
+         featKind are per-build: nothing of the previous terrain survives. */
+      const field = {
         cols, rows, step, tw, th, F, mn, mx, hCount,
+        uScratch: new Float32Array(cols * rows),
+        featAmt: new Float32Array(cols * rows),
+        featKind: new Uint8Array(cols * rows),
         ex: new Float32Array(eCount),
         ey: new Float32Array(eCount),
         es: new Int32Array(eCount).fill(-1),
@@ -1341,6 +1875,8 @@ function apply(ctx) {
         touched: new Int32Array(eCount),
         seq: 0,
       }
+      contourApplyLandforms(field, prof)
+      return field
     }
 
     /** Iso-level heights for the current density, from the field's own range. */

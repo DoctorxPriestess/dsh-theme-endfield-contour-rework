@@ -98,8 +98,11 @@ const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
   'contourBuildTexture', 'contourBlit', 'contourRetune', 'contourFrame',
-  'contourTerrainProfile', 'contourOctaveLadder', 'contourRebuildForRoughness',
-  'contourReadIndex', 'contourTerrace', 'contourTerraceField']
+  'contourTerrainProfile', 'contourTerrainRow', 'contourOctaveLadder',
+  'contourRebuildForRoughness', 'contourReadIndex', 'contourStair', 'contourTerrace',
+  'contourCliff', 'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp',
+  'contourReliefWarp', 'contourRidgeAt', 'contourValleyAt', 'contourFeaturePeriod',
+  'contourHash3', 'contourPrimitiveDelta', 'contourApplyPrimitives']
 const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN',
   'CONTOUR_MIN_RING_BOX', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_GRAD_X',
@@ -107,9 +110,23 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
   'CONTOUR_TEX_QUANT', 'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY',
-  'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT']
+  'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT',
+  'CONTOUR_NOISE_NORM', 'CONTOUR_FEATURE_MIN', 'CONTOUR_PLATEAU_BAND',
+  'CONTOUR_CLIFF_BAND', 'CONTOUR_CLIFF_STEPS_BASE', 'CONTOUR_CLIFF_STEPS_SPAN',
+  'CONTOUR_CLIFF_SOFT_BASE', 'CONTOUR_CLIFF_SOFT_FALL',
+  'CONTOUR_FEATURE_GRID', 'CONTOUR_FEAT_NONE', 'CONTOUR_FEAT_PLATEAU',
+  'CONTOUR_FEAT_CLIFF', 'CONTOUR_FEAT_FAN', 'CONTOUR_FEAT_CONE', 'CONTOUR_FEAT_CRATER',
+  'CONTOUR_FEAT_DUNE', 'CONTOUR_FEAT_PIT', 'CONTOUR_FEAT_ARETE', 'CONTOUR_FEAT_TROUGH',
+  'CONTOUR_FEAT_KARST', 'CONTOUR_FEAT_TALUS', 'CONTOUR_FEAT_WATER',
+  'contourSmooth', 'contourHash01']
 const LINE = ['CONTOUR_DENSITIES', 'CONTOUR_SPEEDS', 'CONTOUR_ROUGHNESS_BASE',
-  'CONTOUR_ROUGHNESS_PERSIST', 'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE']
+  'CONTOUR_ROUGHNESS_PERSIST', 'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_TERRAIN_CLASS',
+  'CONTOUR_TERRAIN_MACRO', 'CONTOUR_TERRAIN_SHAPE', 'CONTOUR_TERRAIN_RIDGE',
+  'CONTOUR_TERRAIN_VALLEY', 'CONTOUR_TERRAIN_PLATEAU', 'CONTOUR_TERRAIN_CLIFF',
+  'CONTOUR_TERRAIN_CLIFFBAND', 'CONTOUR_TERRAIN_RELIEF', 'CONTOUR_TERRAIN_WATER',
+  'CONTOUR_TERRAIN_BLOBS', 'CONTOUR_TERRAIN_BLOBSCALE', 'CONTOUR_PALETTE_0',
+  'CONTOUR_PALETTE_1', 'CONTOUR_PALETTE_2', 'CONTOUR_PALETTE_3', 'CONTOUR_PALETTE_4',
+  'CONTOUR_FEATURE_PALETTES']
 
 let body
 let gateDecls

@@ -65,7 +65,7 @@ It only copies fields the current schema declares, leaves every other part of `s
 Everything lives in **Settings › Endfield Theme Settings**:
 
 - master switch; palette (Valley Yellow / Wuling Cyan); radius (square / round);
-- contour background, contour scroll switch, scroll direction (8 directions), scroll speed (`12 / 24 / 48 / 96 / 192` px/s), contour density (sparse / medium / dense / very dense), terrain roughness (**a 12-stop slider: plains → extreme mountains, with plateaus and cliffs from stop 10 up**);
+- contour background, contour scroll switch, scroll direction (8 directions), scroll speed (`12 / 24 / 48 / 96 / 192` px/s), contour density (sparse / medium / dense / very dense), terrain roughness (**a 12-stop slider: plains → hills → high mountains, stacking plateaus / cliffs / ridge lines / deep valleys / water and landform primitives stop by stop**);
 - watermark, and keep-watermark-visible;
 - start-up loading animation;
 - thunder title, and its entrance animation.
@@ -73,7 +73,7 @@ Everything lives in **Settings › Endfield Theme Settings**:
 Behaviour worth knowing:
 
 - scroll speed is in **pixels per second** and advances with the real frame interval, so it looks the same at 60 / 120 / 144 / 240 Hz;
-- changing direction or speed only updates two cached numbers; changing density re-extracts contours from the **same** terrain; changing terrain roughness regenerates the terrain from the **same seed** (low stops are flat plains, high stops are extreme mountains — from stop 10 the field is pushed through a soft staircase, so the sheet reads as plateaus separated by cliffs — and the shipped stop is the map you already had);
+- changing direction or speed only updates two cached numbers; changing density re-extracts contours from the **same** terrain; changing terrain roughness regenerates the terrain from the **same seed** (low stops are flat plains, high stops are rugged high mountains; plateaus appear at stop 6 and shrink to none by stop 10, cliffs start at stop 8 and are heaviest at stop 12, and no landform layer covers more than 75% of the sheet);
 - a new random terrain is generated each time the contour background is switched on, and the same seed and size always reproduce the same terrain within a session;
 - `prefers-reduced-motion` is read live: with it on, the pattern renders statically.
 

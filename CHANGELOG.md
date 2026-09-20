@@ -4,6 +4,75 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.3.0 — landform layer: terrain types, plateaus, cliffs and a feature catalogue
+
+### 地貌层：每个档位是一种地形 + 一组解析式特征地形
+
+The roughness slider no longer only makes the noise finer — each stop now names a **terrain class**
+(plains / hills / low, mid and high mountains) and stacks a set of landforms on it. Every landform is
+**analytic**: a monotone height remap, or a local primitive. There is no erosion, flow accumulation or
+sediment simulation, and that ceiling is deliberate — a simulated landscape needs iterative passes
+over the whole tile, which would turn a ~100 ms rebuild into seconds and break the exactly-tileable
+guarantee the seamless scroll depends on, for detail nobody can see in a 1px-stroke background.
+
+- Twelve new tables (`CONTOUR_TERRAIN_*`), one entry per stop: terrain class, macro elevation trend,
+  slope shape, ridge lines, valley lines, plateau, cliff, cliff band width, sharp peaks / deep
+  valleys, water level, primitive density and scale.
+- Slope form: `u^k` with a low-frequency mask varying the exponent — 凹坡 (lines bunch at the top) in
+  one region, 凸坡 (lines bunch at the bottom) in another, 均坡 in between.
+- 山脊线 / 分水岭 come from ridged noise (`1 - |n|`), 山谷线 / 冲沟 from narrow troughs at the zero
+  crossings of their own octave.
+- 陡崖 is the **other** shape of the same staircase: many steps with thin ramps, and applied only
+  inside bands. 高原 uses few steps with wide treads, also banded. Both are smoothstep-soft, because a
+  hard quantiser puts real slope discontinuities into the field and the level lines crossing them
+  carry corners no amount of Chaikin / B-spline smoothing removes.
+- Water is an **exact plane**: everything below the level is clamped to it, so lakes and a fjord draw
+  no interior lines at all. Water appears at 8 stops (plains lakes, basin water, alpine lakes) and the
+  remaining 4 stay dry.
+- Feature primitives, placed by hashing a slot grid and evaluated on **toroidal** offsets so a landform
+  straddling the tile edge is drawn identically on both sides: 冲积扇 / 洪积扇 / 泥石流扇 / 三角洲,
+  火山锥 / 火口湖, 天坑 / 矿坑 / 冰斗 / 牛轭湖 / 潟湖, 峰林 / 峰丛 / 角峰, 刃脊 / 沙嘴 / 堤坝,
+  峡湾 / 阶地河道, 沙丘 / 雅丹, 倒石堆.
+
+**Plateaus decrease with roughness; cliffs increase and peak at stop 12** (the request): plateau
+strength is 0.75 / 0.60 / 0.45 / 0.20 at stops 6–9 and **0 from stop 10 on**; cliff strength and band
+width both grow from stop 8 to stop 12. Measured on the field: plateau area 25.8% → 22.0% → 21.5% →
+15.1% → none, cliff area 11.6% → 15.7% → 19.2% → 20.6% → **27.0%**.
+
+**No landform layer covers 75% of the sheet** — a stated ceiling, asserted per stop from the
+generator's own bookkeeping (a cell counts once a feature moved it by ≥2% of the height range, about
+one contour interval). Measured worst case: 44.0% at stop 12; every stop is between 4% and 44%.
+
+### 一份实测出来的重调：山地段变成「山更少更大」
+
+With landforms on top, the old top stops (250 px cell, 6 octaves, persistence 0.62) measured as
+uniform speckle — 1400+ polylines and 925k px of stroke at stop 12, unreadable. What sets legibility
+is the number of local **extrema** per tile, so stops 9–12 now use *larger* cells (360 / 440 / 520 /
+600 px) with 5 octaves: fewer, bigger mountains, and the drama comes from the cliffs (27%), sharp
+peaks and deep valleys. Measured: 500–800 polylines, 40–60 per iso-level (the ceiling is 90). The
+ladder's monotonicity promise therefore moves from raw frequency to measured structure: every stop
+draws, plateau area falls, cliff area rises to the maximum at stop 12, feature coverage stays <75%.
+
+### 修掉一个真缺陷：斑块在索引上环绕，接缝错位一格
+
+The primitives first wrapped with `i % cols`, but the grid is not a whole number of cells wide (the
+texture is quantised to 128px against a 10px grid), so one index step is not one period and a landform
+crossing the seam was displaced by up to a cell. Found by bisecting the pipeline stage by stage and
+measuring the first-vs-last column: every stage alone showed 0 except the primitives, at 2.2e-2.
+Wrapping by **coordinate** (and mirroring the padded edge row/column) brings the seam error to exactly
+**0**, which `test/contour-roughness.test.js` now asserts at every stop. The directional shapes (dune
+ripples, arête strike, fjord cross-section) also had to use the shortest **signed** toroidal offset,
+or the same boundary was evaluated with opposite directions on the two sides.
+
+### 测试
+
+`test/contour-roughness.test.js` was rewritten around the new layer: twelve well-formed tables, the
+default stop still exactly the shipped fBm constants, the plateau/cliff patterns as tables **and** as
+measured field coverage, the <75% ceiling per stop, water flatness (exactly equal heights), exact tile
+periodicity, and a measured legibility ceiling per iso-level. `test/contour-cusps.test.js` now sweeps
+**every** stop that carries a landform (two sizes × two densities × 12 stops): worst turn is still
+1.1°, unchanged from before the layer existed.
+
 ## 1.2.0 — cliffs, plateaus, and the twice-clicked slider fix
 
 ### 悬崖与高原：第 10–12 档换了地形形状
