@@ -67,14 +67,16 @@ function grabOne(name) {
 
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder']
+  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder',
+  'contourTerrace', 'contourTerraceField']
   .map(grab).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
-  'CONTOUR_ROUGHNESS_DEFAULT']
+  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN',
+  'CONTOUR_TERRACE_SOFT']
   .map(grabNum).join('\n')
 const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
-  'CONTOUR_ROUGHNESS_OCTAVES'].map(grabLine).join('\n')
+  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
   'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
 /* The shipped roughness stop, read from client.js rather than typed here: the

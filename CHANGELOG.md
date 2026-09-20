@@ -4,6 +4,45 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.2.0 — cliffs, plateaus, and the twice-clicked slider fix
+
+### 悬崖与高原：第 10–12 档换了地形形状
+
+The three roughest stops are no longer "the same terrain, only finer": from stop 10 up the height
+field is pushed through a **soft staircase**, which flattens it into plateaus and squeezes the
+relief into narrow cliff faces. On the sheet that is what the request asked for — a plateau carries
+no contour at all (a wide blank area) and the face between two plateaus carries several lines
+bunched into a near-parallel bundle.
+
+- `client.js` gains `CONTOUR_ROUGHNESS_TERRACE = [0 …×9, 0.35, 0.62, 0.88]` plus `contourTerrace()`
+  and `contourTerraceField()`. Stops up to and including the shipped default carry strength `0` and
+  take the same short-circuit branch, so their fields stay **bit-for-bit** what they were.
+- The staircase is a pointwise remap of the finished fBm field into `2 + round(4 × strength)` levels
+  with smoothstep ramps (`w = min(0.45, 0.5 × strength)`), applied after the octave sum rather than
+  per octave: it acts on the landscape as a whole (a change of shape, not another frequency).
+- **Soft** edges, not `floor()`: a hard quantiser puts real slope discontinuities into the field,
+  and the contours crossing them carry corners that no amount of Chaikin / B-spline smoothing
+  removes. `test/contour-cusps.test.js` now sweeps **every terraced stop** separately (two sizes ×
+  two densities); the worst turn stays at 1.1°, identical to the un-terraced terrain.
+- Measured on the fixed-seed suite: plateau share 3.9% at the default stop → 32% / 54% / 68% at
+  stops 10/11/12, and of the terrain that is *not* plateau the steep share climbs 35% → 51% / 64% /
+  83%. Stroke length is deliberately **not** the metric across those stops — a staircase swaps many
+  scattered contours for a few long bundles, so 575k → 569k px hides a complete change of picture.
+- The staircase shape itself was picked by rendering true-scale strips across candidate shapes: a
+  wider span (7 levels and up) leaves a third of the sheet empty with single lines on the faces, a
+  narrower one flattens half the picture. `2 + round(4 × strength)` keeps the sheet legible.
+
+### 修复：粗糙度/密度/方向「要点两次才生效」
+
+- `scope.set()` commits asynchronously, so any handler that wrote a preference and immediately read
+  it back acted on the **previous** value — the visible symptom was a detent needing two clicks
+  (the first one only refreshed the row). `prefsSet` now records the written value in a page-local
+  **write-through overlay** (`prefsWritten`) that `prefsGet` prefers until the host echo lands, at
+  which point `prefsSettleWritten()` retires the entry and the scoped snapshot takes over again.
+- `test/prefs-write-latency.test.js` reproduces the original ordering with a deliberately deferred
+  scope stub: it fails when the overlay is removed (verified), and it also pins the other half of the
+  contract — an unconfirmed write must stay effective page-locally instead of silently reverting.
+
 ## 1.1.0 — terrain roughness slider
 
 ### 地形粗糙度：一个 12 档滑块，低=平原、高=极端山地

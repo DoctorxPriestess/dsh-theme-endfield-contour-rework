@@ -10,7 +10,7 @@ npm test           # 上面两项 + 配色 / 设置页 / 渲染 / 覆盖率 / �
 
 第二条原则：**每条断言都做过反向对照（变异验证）。** 故意把被测行为改坏，确认该断言真的会失败。一个从未被观察到失败过的校验，不能算证据。
 
-> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chromium 做无头渲染，需要本机安装 Chrome / Chromium / Edge。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`、`contour-cusps`、`contour-smoothness`、`contour-roughness`、`contour-perf`、`prefs-key-mapping`、`migrate-prefs`、`fork-identity-check`、`browser-discovery`（它不启动浏览器，只验证发现逻辑本身）。
+> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chromium 做无头渲染，需要本机安装 Chrome / Chromium / Edge。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`、`contour-cusps`、`contour-smoothness`、`contour-roughness`、`contour-perf`、`prefs-key-mapping`、`prefs-write-latency`、`migrate-prefs`、`fork-identity-check`、`browser-discovery`（它不启动浏览器，只验证发现逻辑本身）。
 >
 > **浏览器怎么找、结果怎么取**（`test/lib/browser.js`，全仓唯一一处）。原先每个测试各自内联一份候选路径、只查机器级安装位置，也不校验存在性；Chrome 默认装在 `%LOCALAPPDATA%` 就找不到，于是「换一台机器」容易变成「一个测试都跑不起来，而且错误信息是空的」。现在顺序是：`CHROME_PATH` / `CHROME_BIN` / `EDGE_PATH` / `PUPPETEER_EXECUTABLE_PATH` → PATH 查询（`where` / `which`）→ 按用户安装 → 机器级安装 → `EdgeCore\<版本>`（Edge 152 起 Store 版布局里真实内核可能只在这里）。找不到时会打印**查过的全部路径**。
 >
@@ -101,6 +101,7 @@ node test/settings-locale.test.js   # 跟随语言设置（zh/en 词典对齐 + 
 
 ```bash
 node test/prefs-key-mapping.test.js   # 浏览器侧的偏好键 ↔ host schema 字段
+node test/prefs-write-latency.test.js # 写后立刻回读：写透层 / 回相退役 / 未确认写不回滚
 node test/migrate-prefs.test.js       # tools/migrate-prefs.js 的文本改写契约
 ```
 
@@ -124,6 +125,9 @@ node test/migrate-prefs.test.js       # tools/migrate-prefs.js 的文本改写�
 > 往夹具里种一个 schema 未声明的字段不再是静默丢弃——Node 夹具直接抛错并点名该字段，页面
 > 夹具在 DOM 里留 `data-endfield-scope-error` 标记，由 `test/lib/browser.js` 升级为明确失败
 > （它一度因「夹具源码本身内联在页面里」而误报，因此只看真正的标记元素，这个边界也有测试）。
+
+**`prefs-write-latency.test.js`** 钉住的是**时序**而不是取值：`ctx.settingsScope` 的 `scope.set()` 是异步提交的，所以「写完之后同一个 tick 里再读」必须读到**刚写的**值，否则任何「写完立刻读回再决策」的处理器都会用到上一次的值——用户那边的现象就是**挡位要点两次才生效**（第一次点击只让面板刷新）。夹具 `test/fixtures/settings-scope.js` 为此加了 `deferWrites` 模式：`set()` 只入队，真实的回相要等 `flush()`，于是原始时序能在 Node 里稳定复现。断言：写入在同 tick 内可读；夹具**确实**延迟了回写（防止测试因为夹具变成同步而假绿）；回相到达后以 scope 快照为准（写透层退役、不留陈旧值）；未经回相确认的写在页面内依然有效（不能被悄悄还原）；同步 scope 的老路径行为不变；开关这类**用字符串极性**存储的值经过写透层也不会被改写成布尔。
+**做过变异验证**：注释掉 client.js 里那行 `if (prefsWritten.has(field)) return prefsWritten.get(field)`，它以 3 条失败（`an unconfirmed write reverted to "11"` 等）退出，恢复后全绿。
 
 **`migrate-prefs.test.js`** 钉住 `tools/migrate-prefs.js` 的承诺：默认 dry-run 一个字节都不写、
 `--write` 前先做带时间戳的备份、只迁移当前 schema 声明过的字段、其余段/注释/顺序逐字保留、
@@ -160,9 +164,10 @@ node test/thunder-dismiss.test.js   # 点击关闭：真实指针事件 + 命中
 `check.js` 只能证明文件可解析，这不等于功能有效。这些脚本把**真实的 `client.js`** 切出来跑——几何与性能三个脚本在 Node 里桩掉 2d context 直接执行（不需要浏览器），其余把整页放进一个按安装态 bundle 复刻的应用 DOM/CSS 里并对实测像素断言：
 
 ```bash
-node test/contour-cusps.test.js       # 几何：尖点 / 重复提取 / 顶点跳变 / 碎屑 / seed 生命周期（Node）
+node test/contour-cusps.test.js       # 几何：尖点 / 重复提取 / 顶点跳变 / 碎屑 / seed 生命周期，含每个「高原+悬崖」档位（Node）
 node test/contour-smoothness.test.js  # 几何：曲线 vs 原始折线的最大转角（Node）
-node test/contour-roughness.test.js   # 粗糙度阶梯：单调性 / 出厂档位 / 可读性上限 / 逐档出图（Node）
+node test/contour-roughness.test.js   # 粗糙度阶梯：单调性 / 出厂档位 / 可读性上限 / 逐档出图 / 高原与悬崖（Node）
+node test/prefs-write-latency.test.js # 设置写入的时序：写后立刻回读 / 回相退役 / 未确认写不回滚（Node）
 node test/contour-perf.test.js        # 成本形状 + 实测量 + 滚动门控（Node）
 node test/contour-render.test.js      # 21 项行为断言（浏览器）
 node test/contour-specks.test.js      # 残渣过滤 + 随机种子 + 空白格（浏览器）
@@ -191,7 +196,11 @@ node test/shoot.js                    # 输出亮/暗 × 两配色共四张截�
 
 **`contour-coverage.test.js`** 直接读**画布本身**而非截图：截图里应用自己的卡片、输入区遮罩和正文会盖住图案，无法回答「场里有没有空白」。它把画布切成 8×5 分区并统计墨迹占比。
 
-**`contour-roughness.test.js`** 守的是「唯一会改变地形形状的那个设置」。它不检查有没有抛异常——粗糙度调错了不会抛异常，只会画出**坏地图**：某一档什么都不画、相邻两档画出来一模一样（滑块有半程是死的）、或者最粗糙那档糊成均匀噪点。现有套件全都发现不了：cusps / smoothness 只扫**出厂档**那一个地形，specks 只问单条线是不是碎屑。所以这个脚本按用户看到的方式量**整条阶梯**：三张参数表格式与单调性；出厂档**逐字等于出厂常量**（`280 / 0.5 / 5`，老用户升级后地图不变）；倍频阶梯在 5 种纹理尺寸下都不越过置乱表上限、且不会塌成 0 层；每一档都真的产出等高线；闭合环数与总笔长**逐档递增**（即每个档位都肉眼可辨，实测最小步进 +6%）；没有一档画出碎屑；以及那条实测出来的可读性上限——**最细倍频的振幅占比 ≤12%**（超过它，最细那层就落在 10px 采样网格附近，画面从地形退化成噪点；实测最差 10.6%，出现在 4096×384 纹理的第 12 档）。
+**`contour-roughness.test.js`** 守的是「唯一会改变地形形状的那个设置」。它不检查有没有抛异常——粗糙度调错了不会抛异常，只会画出**坏地图**：某一档什么都不画、相邻两档画出来一模一样（滑块有半程是死的）、或者最粗糙那档糊成均匀噪点。现有套件全都发现不了：cusps / smoothness 原本只扫**出厂档**那一个地形，specks 只问单条线是不是碎屑。所以这个脚本按用户看到的方式量**整条阶梯**：四张参数表格式与单调性；出厂档**逐字等于出厂常量**（`280 / 0.5 / 5`，老用户升级后地图不变）；倍频阶梯在 5 种纹理尺寸下都不越过置乱表上限、且不会塌成 0 层；每一档都真的产出等高线；闭合环数**逐档递增**；没有一档画出碎屑；以及那条实测出来的可读性上限——**最细倍频的振幅占比 ≤12%**（超过它，最细那层就落在 10px 采样网格附近，画面从地形退化成噪点；实测最差 10.6%，出现在 4096×384 纹理的第 12 档）。
+
+**`contour-roughness.test.js` 的后半段专测「高原 + 悬崖」**（第 10–12 档）。这里的关键是**指标选对**：阶梯会把许多零散短环换成少数长线束，所以「总笔画随档位增加」在这一段**不成立**（实测 575k → 569k px），拿它当判据会得出「这一档没生效」的错误结论。脚本改为直接量**场本身**：相邻网格点高度差 < 0.15%×range 的算**高原**、> 3%×range 的算**悬崖坡面**，两个阈值都是 range 的固定比例而非分位数（分位数会随效果一起移动，正好把自己的效果抵消掉）。断言项：表格前 9 档必须**恰好为 0**（默认档及以下逐位不变）；三个带阶梯的档位强度严格递增；高原占比从默认档 3.9% 涨到 32% / 54% / 68%；「悬崖占比」定义为 `steep / (1 - flat)`（在**剩余起伏**里的占比——用全图占比会朝效果反方向走：实测 33.6% → 26.9%，归一化后 35% → 83%）；第一个带阶梯的档位高原占比必须仍 < 50%（否则整屏空白，等于把图弄坏）。
+
+**`contour-cusps.test.js` 现在把每一个带阶梯的档位单独扫一遍**（1152×648 与 320×240 × 两个密度），因为软阶梯是这次唯一有可能往高度场里塞进真尖角的改动。实测最大转角 1.1°，与不带阶梯的地形完全一致；「≥8° 转角」「顶点跳变」「碎屑阈值」等既有断言对这一段同样生效。
 
 **`contour-perf.test.js`** 量的是新架构**承诺的成本形状**，而且不靠计时：桩掉 context 后驱动 300 帧，断言这一过程中**地形生成 0 次、等值线提取 0 次、纹理渲染 0 次**；改密度只重新提取 / 重绘各 1 次且**不重新生成地形**；改粗糙度则**恰恰相反**——必须重新生成 1 次、重新提取 1 次、重绘 1 次，且**用同一个 seed**（地形被重新调形而不是换地图；滑回出厂档必须逐字复原出发时的那张地形）。这里刻意让 `contourRoughnessIndex()` 走**真实的偏好读取路径**（与密度那个固定桩不同），所以「滑块 → 偏好 → 地形」这条链路也在测试范围内；沙箱里把 `setTimeout` 显式置空，引擎于是走「无定时器时同步重建」的分支，一次档位变更的成本才数得清。并**静态检查** `contourFrame()` 的源码里根本不出现建/提取/渲染三件套（帧函数在构造上就只能是「缓存平移」）。随后实测成本：
 

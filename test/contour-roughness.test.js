@@ -74,13 +74,15 @@ function grabOne(name) {
 
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourTerrainProfile', 'contourOctaveLadder'].map(grab).join('\n')
+  'contourTerrainProfile', 'contourOctaveLadder', 'contourTerrace', 'contourTerraceField']
+  .map(grab).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
-  'CONTOUR_ROUGHNESS_DEFAULT']
+  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN',
+  'CONTOUR_TERRACE_SOFT']
   .map(grabNum).join('\n')
 const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
-  'CONTOUR_ROUGHNESS_OCTAVES'].map(grabLine).join('\n')
+  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
   'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
 
@@ -136,16 +138,51 @@ function contourTerrainProfileFor(i) {
     baseCell: CONTOUR_ROUGHNESS_BASE[i],
     persist: CONTOUR_ROUGHNESS_PERSIST[i],
     octaves: CONTOUR_ROUGHNESS_OCTAVES[i],
+    terrace: CONTOUR_ROUGHNESS_TERRACE[i],
   }
+}
+/* The two things a staircase is supposed to change, measured on the field itself
+   so they are independent of how many iso-levels happen to be drawn:
+     flat   — share of neighbouring grid cells that differ by less than 0.15% of
+              the field's own range. That is a PLATEAU: no iso-level can cross it
+              unless one lands inside such a tiny height step.
+     steep  — share of neighbouring cells differing by more than 20x that, i.e. a
+              CLIFF FACE: many levels crammed into one grid step.
+   Both thresholds are absolute fractions of the range (which is normalised by the
+   fBm's own octave sum and therefore comparable across stops), NOT quantiles of
+   the same distribution — a quantile-based split would move with the effect it is
+   meant to measure and would report "no change" for any amount of terracing. */
+function fieldStats(tw, th, i) {
+  contourRoughnessIdx = i
+  const f = contourGenerateField(tw, th)
+  const span = f.mx - f.mn
+  if (!(span > 0)) return { flat: 0, steep: 0, span: 0 }
+  const flatT = 0.0015 * span
+  const steepT = 20 * flatT
+  let flat = 0
+  let steep = 0
+  let n = 0
+  for (let j = 0; j < f.rows; j++) {
+    const row = j * f.cols
+    for (let i2 = 0; i2 < f.cols - 1; i2++) {
+      n++
+      const d = Math.abs(f.F[row + i2 + 1] - f.F[row + i2])
+      if (d < flatT) flat++
+      else if (d > steepT) steep++
+    }
+  }
+  return { flat: flat / n, steep: steep / n, span }
 }
 return {
   build,
   ladder,
+  fieldStats,
   profileFor: contourTerrainProfileFor,
   profile: () => contourTerrainProfile(),
   setRoughness: (i) => { contourRoughnessIdx = i },
   defaultStop: CONTOUR_ROUGHNESS_DEFAULT,
-  tables: { base: CONTOUR_ROUGHNESS_BASE.slice(), persist: CONTOUR_ROUGHNESS_PERSIST.slice(), octaves: CONTOUR_ROUGHNESS_OCTAVES.slice() },
+  tables: { base: CONTOUR_ROUGHNESS_BASE.slice(), persist: CONTOUR_ROUGHNESS_PERSIST.slice(), octaves: CONTOUR_ROUGHNESS_OCTAVES.slice(), terrace: CONTOUR_ROUGHNESS_TERRACE.slice() },
+  terraceShape: { base: CONTOUR_TERRACE_STEPS_BASE, span: CONTOUR_TERRACE_STEPS_SPAN, soft: CONTOUR_TERRACE_SOFT },
   extra: { GAP: CONTOUR_PERIOD_MAX, MIN_LEN: CONTOUR_MIN_LEN, MIN_RING: CONTOUR_MIN_RING_BOX, SHIPPED: [CONTOUR_BASE_CELL, CONTOUR_PERSIST, CONTOUR_OCTAVES], DENSITIES: CONTOUR_DENSITIES.slice() },
 }
 `)()
@@ -274,19 +311,123 @@ const empty = measured.filter((m) => m.paths === 0)
 if (empty.length === 0) pass('every stop draws contours (no blank patch at any detent)')
 else fail('stops that drew nothing: ' + empty.map((m) => m.stop).join(', '))
 
+/* ---------- 4b. plateaus and cliffs ----------
+   The staircase is a table like the other three, so it is asserted like them: zero
+   everywhere it must not touch the shipped terrain, strictly increasing afterwards,
+   and — the part that actually matters — measurably present in the FIELD, not just
+   in the table. flat/steep come from api.fieldStats() and are absolute fractions
+   of the field's own range (see the note there). */
+const TE = api.tables.terrace
+const terrStops = []
+for (let i = 0; i < stops; i++) if (TE[i] > 0) terrStops.push(i)
+let terrBad = []
+if (TE.length !== stops) terrBad.push('terrace table has ' + TE.length + ' entries, expected ' + stops)
+for (let i = 0; i < stops; i++) {
+  if (typeof TE[i] !== 'number' || !isFinite(TE[i]) || TE[i] < 0 || TE[i] > 1) terrBad.push('terrace[' + i + ']=' + TE[i])
+}
+/* Nothing at or below the shipped default may be touched: those stops must stay the
+   terrain they have always been, bit for bit. */
+for (let i = 0; i <= d; i++) if (TE[i] !== 0) terrBad.push('terrace[' + i + ']=' + TE[i] + ' is not 0 (stop <= default must be untouched)')
+if (terrBad.length === 0) pass('the terrace table is 0 up to and including the default stop (' + d + ') and in range everywhere')
+else fail('terrace table is invalid: ' + terrBad.slice(0, 4).join('; '))
+if (terrStops.length >= 3) pass('a plateau/cliff staircase is applied to ' + terrStops.length + ' stops (from stop ' + terrStops[0] + ')')
+else fail('only ' + terrStops.length + ' stop(s) carry a staircase — the request was for the roughest ones (10 and up)')
+let terrNonMono = []
+for (let k = 1; k < terrStops.length; k++) {
+  if (!(TE[terrStops[k]] > TE[terrStops[k - 1]])) {
+    terrNonMono.push('stop ' + terrStops[k - 1] + '->' + terrStops[k] + ' (' + TE[terrStops[k - 1]] + ' -> ' + TE[terrStops[k]] + ')')
+  }
+}
+if (terrNonMono.length === 0) {
+  pass('the staircase deepens at every terraced detent (' + terrStops.map((s) => s + ':' + TE[s]).join(', ') + ')')
+} else fail('terrace strength does not grow: ' + terrNonMono.join('; '))
+
+const stats = measured.map((m) => api.fieldStats(TW, TH, m.stop))
+for (let i = 0; i < measured.length; i++) measured[i].flat = stats[i].flat
+for (let i = 0; i < measured.length; i++) measured[i].steep = stats[i].steep
+const flatFirst = measured[terrStops[0]].flat
+const flatLast = measured[stops - 1].flat
+const flatBase = measured[d].flat
+if (flatLast >= flatBase + 0.05) {
+  pass('the staircase really flattens the terrain: plateau share ' + (flatBase * 100).toFixed(1) + '% at the default stop -> '
+    + (flatLast * 100).toFixed(1) + '% at stop ' + (stops - 1))
+} else {
+  fail('the staircase barely reaches the field: plateau share ' + (flatBase * 100).toFixed(2) + '% -> ' + (flatLast * 100).toFixed(2)
+    + '% — flatShare must rise by 5 points between the default stop and the last one')
+}
+let flatShrink = []
+for (let k = 1; k < terrStops.length; k++) {
+  const a = terrStops[k - 1]
+  const b = terrStops[k]
+  if (!(measured[b].flat > measured[a].flat * 1.05)) {
+    flatShrink.push('stop ' + a + '->' + b + ' (' + (measured[a].flat * 100).toFixed(1) + '% -> ' + (measured[b].flat * 100).toFixed(1) + '%)')
+  }
+}
+if (flatShrink.length === 0) {
+  pass('plateau area grows at every terraced detent (' + terrStops.map((s) => (measured[s].flat * 100).toFixed(0) + '%').join(' -> ') + ')')
+} else fail('plateaus stop growing at: ' + flatShrink.join('; '))
+/* And the relief that is left is concentrated: of the terrain that is NOT plateau,
+   the share that is a cliff face has to climb. Raw steep share is the wrong metric
+   and is deliberately not used — a wide staircase replaces half the sheet with
+   flat ground, so the absolute number of steep cell pairs can fall while every
+   remaining slope is a cliff (measured: raw steep 33.6% -> 26.9% between the
+   default stop and the last one, but 35% -> 83% once plateau cells are excluded).
+   The ratio is the signature of a staircase: plateau or cliff, nothing in between.
+   Reported one-sided, not the raw steep count. */
+const cliffOfRelief = (m) => (m.flat < 1 ? m.steep / (1 - m.flat) : 0)
+for (let i = 0; i < measured.length; i++) measured[i].relief = cliffOfRelief(measured[i])
+if (measured[stops - 1].relief >= measured[d].relief + 0.15) {
+  pass('relief is concentrated into cliff faces: of the non-plateau terrain, ' + (measured[d].relief * 100).toFixed(0) + '% was steep at the default stop -> '
+    + (measured[stops - 1].relief * 100).toFixed(0) + '% at stop ' + (stops - 1))
+} else {
+  fail('the staircase did not steepen anything: non-plateau steep share ' + (measured[d].relief * 100).toFixed(0) + '% -> '
+    + (measured[stops - 1].relief * 100).toFixed(0) + '% (needs +15 points)')
+}
+let reliefShrink = []
+for (let k = 1; k < terrStops.length; k++) {
+  const a = measured[terrStops[k - 1]]
+  const b = measured[terrStops[k]]
+  if (!(b.relief > a.relief * 1.05)) {
+    reliefShrink.push('stop ' + a.stop + '->' + b.stop + ' (' + (a.relief * 100).toFixed(0) + '% -> ' + (b.relief * 100).toFixed(0) + '%)')
+  }
+}
+if (reliefShrink.length === 0) {
+  pass('cliff faces take over the relief at every terraced detent (' + terrStops.map((s) => (measured[s].relief * 100).toFixed(0) + '%').join(' -> ') + ')')
+} else fail('the staircase stops concentrating the relief at: ' + reliefShrink.join('; '))
+if (measured[terrStops[0]].flat < 0.5) {
+  pass('the first terraced stop stays mostly open terrain (plateau share ' + (measured[terrStops[0]].flat * 100).toFixed(1) + '%)')
+} else {
+  fail('the first terraced stop is already ' + (measured[terrStops[0]].flat * 100).toFixed(1) + '% flat — the sheet would lose its terrain')
+}
+
 /* Strictly more structure as the slider goes up. Measured on this fixed seed and
    size the smallest step is ~6% (rings) and ~5% of stroke length, so a 4% bar is
-   below every real step and above extraction noise. */
+   below every real step and above extraction noise.
+   FOR THE TERRACED STOPS STROKE LENGTH IS NOT THE MEASURE. A staircase trades many
+   short scattered contours for a few long bundles, so total stroke can move very
+   little while the picture changes completely (measured: 575k -> 569k px between
+   the last two plain stops and the first terraced one). What is asserted there is
+   the structure that actually changed: ring count and plateau area — both of which
+   do grow at every detent. */
 let flatPairs = []
 let smallPairs = []
 for (let i = 1; i < measured.length; i++) {
   const a = measured[i - 1]
   const b = measured[i]
-  if (!(b.total > a.total * 1.04)) flatPairs.push('stop ' + (i - 1) + '->' + i + ' (' + Math.round(a.total) + ' -> ' + Math.round(b.total) + ' px)')
   if (!(b.rings > a.rings)) smallPairs.push('stop ' + (i - 1) + '->' + i + ' rings ' + a.rings + ' -> ' + b.rings)
+  if (TE[i] > 0 || TE[i - 1] > 0) {
+    if (!(b.total > a.total * 0.85)) {
+      flatPairs.push('stop ' + (i - 1) + '->' + i + ' stroke collapsed ' + Math.round(a.total) + ' -> ' + Math.round(b.total) + ' px')
+    }
+    if (!(b.flat > a.flat * 1.02)) {
+      flatPairs.push('stop ' + (i - 1) + '->' + i + ' plateau share ' + (a.flat * 100).toFixed(1) + '% -> ' + (b.flat * 100).toFixed(1) + '%')
+    }
+  } else if (!(b.total > a.total * 1.04)) {
+    flatPairs.push('stop ' + (i - 1) + '->' + i + ' (' + Math.round(a.total) + ' -> ' + Math.round(b.total) + ' px)')
+  }
 }
-if (flatPairs.length === 0) pass('total contour length grows at every detent (roughness is monotone where the user can see it)')
-else fail('detents that change the terrain by less than 4%: ' + flatPairs.join('; '))
+if (flatPairs.length === 0) pass('terrain changes visibly at every detent (stroke grows below the staircase, plateau area through it)')
+else fail('detents that barely change the terrain: ' + flatPairs.join('; '))
 if (smallPairs.length === 0) pass('closed-ring count grows at every detent (' + measured[0].rings + ' -> ' + measured[stops - 1].rings + ')')
 else fail('ring count does not grow at: ' + smallPairs.join('; '))
 if (measured[stops - 1].total > measured[0].total * 3) {
@@ -311,9 +452,8 @@ else fail('a detent took ' + worstBuild + 'ms to build — dragging the slider w
 
 /* A readable summary, because the numbers ARE the evidence for this feature. */
 console.log('')
-console.log('  stop  cell  persist oct  paths  rings   stroke   finest-cell share')
-for (let i = 0; i < stops; i++) {
-  const L = api.ladder(TW, TH, i)
+console.log('  stop  cell  persist oct  paths  rings   stroke   finest-cell share  plateau  cliff')
+for (let i = 0; i < stops; i++) {  const L = api.ladder(TW, TH, i)
   let norm = 0
   for (let o = 0; o < L.n; o++) norm += Math.pow(L.persist, o)
   const share = Math.pow(L.persist, L.n - 1) / norm
@@ -321,7 +461,10 @@ for (let i = 0; i < stops; i++) {
   console.log('  ' + String(i).padStart(4) + String(T.base[i]).padStart(6) + String(T.persist[i]).padStart(9)
     + String(L.n).padStart(4) + String(measured[i].paths).padStart(7) + String(measured[i].rings).padStart(7)
     + String(Math.round(measured[i].total / 1000) + 'k').padStart(9) + String(cell.toFixed(0) + 'px').padStart(8)
-    + String((share * 100).toFixed(1) + '%').padStart(9))
+    + String((share * 100).toFixed(1) + '%').padStart(9)
+    + String((measured[i].flat * 100).toFixed(1) + '%').padStart(9)
+    + String((measured[i].relief * 100).toFixed(0) + '%').padStart(7)
+    + (TE[i] > 0 ? '   terrace ' + TE[i] : ''))
 }
 console.log('')
 

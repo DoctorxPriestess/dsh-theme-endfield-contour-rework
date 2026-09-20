@@ -72,11 +72,23 @@ function fieldName(rawKey) {
  * @param initial - initial stored section (field -> string). Undefined fields
  *                  resolve to FIELD_DEFAULTS during value resolution, exactly
  *                  like a schema `.default()` merges into a stored section.
- * @returns { binder, section, getSnapshot, setField, setSection, change }
+ * @param opts    - { deferWrites: true } makes `set()` behave like the REAL host
+ *                  scope: the write is queued and only lands in the served section
+ *                  when flush() is called. The synchronous default is convenient
+ *                  for tests that only assert the end state, but it is also exactly
+ *                  what hid the "click a setting twice" defect — any test about
+ *                  write-then-read ordering must use the deferred mode.
+ * @returns { binder, section, getSnapshot, setField, setSection, change, flush, pending }
  */
-function settingsScopeStub(initial = {}) {
+function settingsScopeStub(initial = {}, opts = {}) {
   // Merged defaults so `value` is never missing a key (mirrors schema defaults).
   const section = Object.assign({}, FIELD_DEFAULTS)
+  /* Queued writes of a deferred scope: field -> value, applied by flush(). A real
+     scope.set resolves over the wire, so between the call and the host echo the
+     served section is still the OLD one. */
+  const queued = new Map()
+  const waiters = []
+  const deferWrites = opts.deferWrites === true
   for (const k of Object.keys(initial)) {
     const field = fieldName(k)
     // A key the schema does not declare would be DROPPED by the real host
@@ -102,11 +114,31 @@ function settingsScopeStub(initial = {}) {
     mode: 'host',
   })
 
+  const applyWrite = (field, value) => { section[field] = String(value); notify() }
   const scope = {
     getSnapshot,
     subscribe(listener) { listeners.push(listener); return () => { const i = listeners.indexOf(listener); if (i >= 0) listeners.splice(i, 1) } },
-    set(field, value) { section[field] = String(value); notify(); },
-    unset(field) { section[field] = FIELD_DEFAULTS[field]; notify(); },
+    set(field, value) {
+      if (!deferWrites) { applyWrite(field, value); return Promise.resolve() }
+      // Deferred: the served section keeps its old value until flush(), exactly
+      // like a scope.set that resolves on a later host round-trip. The returned
+      // promise resolves when the write actually lands.
+      queued.set(field, String(value))
+      return new Promise((resolve) => { waiters.push(resolve) })
+    },
+    unset(field) { queued.delete(field); applyWrite(field, FIELD_DEFAULTS[field]) },
+  }
+  /* Land every queued write and fire ONE notification, the way the transport
+     pushes one new section. */
+  const flush = () => {
+    if (queued.size === 0) return Promise.resolve()
+    const entries = Array.from(queued)
+    queued.clear()
+    for (const [f, v] of entries) section[f] = v
+    notify()
+    const waiting = waiters.splice(0)
+    for (const resolve of waiting) { try { resolve() } catch (e) { /* test safety */ } }
+    return Promise.resolve()
   }
 
   const binder = {
@@ -122,6 +154,8 @@ function settingsScopeStub(initial = {}) {
     setField: (rawKey, value) => { section[fieldName(rawKey)] = String(value); notify() },
     getSnapshot,
     reset() { for (const k of Object.keys(FIELD_DEFAULTS)) section[k] = FIELD_DEFAULTS[k]; notify() },
+    flush,
+    pending: () => Array.from(queued.keys()),
   }
 }
 

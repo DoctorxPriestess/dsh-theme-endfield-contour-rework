@@ -162,6 +162,22 @@ function apply(ctx) {
     // only appears later, these are replayed so a pre-bind edit still persists
     // instead of silently living in page-only memory.
     const prefsDirty = new Set()
+    /* Write-through overlay: field -> the raw string this page last wrote, kept
+       only until the settings transport echoes the same value back.
+       WHY IT EXISTS. prefsGet prefers the scoped section (prefsFieldValue) over
+       prefsLocal, and a DSH scope.set is ASYNCHRONOUS — the section only comes back
+       on the next host round-trip. So with no overlay, a handler that writes and
+       then immediately re-reads acts on what the value was BEFORE the click:
+         density      -> contourRetune() re-extracts the OLD level count
+         direction/speed -> contourRefreshMotion() caches the OLD direction/speed
+         roughness    -> the debounced rebuild reads the OLD stop
+       Symptom in the app: "切换挡位需要点击两次, 第一次点击后不刷新" (the second
+       click then applies the first one's value). The unit tests never saw it
+       because their scope fixture applies a write synchronously.
+       The overlay is page-local by design: it is not persisted here, it is dropped
+       the moment the served section agrees, and the actual durable write still goes
+       through prefsCommit with its own readiness gate. */
+    const prefsWritten = new Map()
     let prefsFieldValue = null // last schema-resolved user+base+defaults section from the scope, if any
     let prefsScope = null // the bound ctx.settingsScope scope, or null while absent/not ready
     let prefsBindTimer = null // retry handle for a settingsScope that arrives late
@@ -198,9 +214,24 @@ function apply(ctx) {
     /** read one field as its raw stored string: <stored-or-default>, never null. */
     const prefsGet = (rawKey) => {
       const field = prefsFieldOf(rawKey)
+      // This page's newest intent wins until the transport echoes it back (see
+      // prefsWritten): a write must be readable by the very next reader, or every
+      // write-then-read handler is one click behind.
+      if (prefsWritten.has(field)) return prefsWritten.get(field)
       const sec = prefsGetValue()
       if (sec && Object.prototype.hasOwnProperty.call(sec, field)) return String(sec[field])
       return PREFS_FIELD_DEFAULTS[field]
+    }
+    /* Drop overlay entries the served section has caught up with. Called whenever
+       a new section arrives; a value the host never confirms (namespace unserved,
+       or a write the schema rejected) keeps its overlay, which is then exactly the
+       old prefsLocal behaviour rather than a lost setting. */
+    const prefsSettleWritten = () => {
+      if (prefsWritten.size === 0 || !prefsFieldValue) return
+      for (const [field, value] of Array.from(prefsWritten)) {
+        if (Object.prototype.hasOwnProperty.call(prefsFieldValue, field)
+          && String(prefsFieldValue[field]) === value) prefsWritten.delete(field)
+      }
     }
     /** subscribe to any change of the whole namespace (transport or local). */
     const prefsSubscribe = (listener) => {
@@ -352,6 +383,9 @@ function apply(ctx) {
     const prefsSet = (rawKey, encoded) => {
       const field = prefsFieldOf(rawKey)
       prefsLocal[field] = String(encoded)
+      // Publish the intent to this page's own readers first (see prefsWritten):
+      // the transport echo is asynchronous, the UI and the engine are not.
+      prefsWritten.set(field, prefsLocal[field])
       prefsCommit(field, prefsLocal[field])
     }
     /* Repeatedly try to obtain the settingsScope binder until it (and its mirror)
@@ -400,13 +434,17 @@ function apply(ctx) {
       if (initial) dbg('bound scope; initial status=', initial.status, 'writable=', initial.writable, 'mode=', initial.mode, 'valueKeys=', initial.value ? Object.keys(initial.value).length : 0)
       if (initial && initial.status === 'ready' && initial.value !== undefined) {
         prefsFieldValue = initial.value
+        prefsSettleWritten()
       }
       if (typeof scope.subscribe === 'function') {
         scope.subscribe(() => {
           let snap = null
           try { snap = scope.getSnapshot() } catch (e) { snap = null }
           if (snap && (snap.status === 'ready' || snap.status === 'unavailable')) {
-            if (snap.status === 'ready' && snap.value !== undefined) prefsFieldValue = snap.value
+            if (snap.status === 'ready' && snap.value !== undefined) {
+              prefsFieldValue = snap.value
+              prefsSettleWritten()
+            }
             // An unavailable/loading -> ready transition is precisely when an edit
             // we HELD (see prefsCommit) can finally be written: replay any dirty
             // fields the moment the namespace is durably served. prefsReplayDirty
@@ -428,6 +466,7 @@ function apply(ctx) {
       prefsListeners.length = 0
       prefsScope = null
       prefsFieldValue = null
+      prefsWritten.clear()
       if (prefsBindTimer !== null && typeof clearTimeout === 'function') clearTimeout(prefsBindTimer)
       prefsBindTimer = null
       if (prefsRetryTimer !== null && typeof clearTimeout === 'function') clearTimeout(prefsRetryTimer)
@@ -438,6 +477,7 @@ function apply(ctx) {
       prefsListeners.length = 0
       prefsScope = null
       prefsFieldValue = null
+      prefsWritten.clear()
     })
 
     const RADIUS_KEY = PREFS_NS + '-radius'
@@ -941,6 +981,37 @@ function apply(ctx) {
     const CONTOUR_ROUGHNESS_BASE = [960, 768, 640, 549, 480, 427, 384, CONTOUR_BASE_CELL, 274, 266, 258, 250]
     const CONTOUR_ROUGHNESS_PERSIST = [0.24, 0.28, 0.32, 0.36, 0.39, 0.42, 0.45, CONTOUR_PERSIST, 0.53, 0.56, 0.59, 0.62]
     const CONTOUR_ROUGHNESS_OCTAVES = [2, 3, 3, 4, 4, 4, 5, CONTOUR_OCTAVES, 5, 5, 6, 6]
+    /* PLATEAUS AND CLIFFS — the fourth table, and the reason stops 10..12 read as
+       mountain country rather than as "more of the same, only smaller".
+       A value here is the strength of a SOFT STAIRCASE applied to the height field
+       (see contourTerrace): the terrain is flattened into plateaus and the relief
+       is concentrated into narrow bands between them. On the sheet that is exactly
+       the ask — 高原 (a plateau crosses no iso-level, so it carries no lines at all)
+       and 悬崖 (the band between two plateaus crosses several levels over a few
+       tens of px, so the lines bunch into a near-parallel bundle up the face).
+       ZERO FOR STOPS 0..9 ON PURPOSE: everything up to and including the shipped
+       default must remain the terrain it has always been, and the ramps at 10..12
+       are what the request asked to add. The progression is deliberately steep at
+       the end (0.35 / 0.62 / 0.88) so the last three detents are visibly different
+       from each other. */
+    const CONTOUR_ROUGHNESS_TERRACE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0.35, 0.62, 0.88]
+    /* Staircase shape, derived from that strength:
+         STEPS     how many plateau levels the field is quantised into. Too few and
+                   the plateaus swallow the whole sheet (no contour anywhere); too
+                   many and the cliffs are single lines instead of bundles.
+         SOFT      half-width of the ramp, in step units. This is what makes an edge
+                   a cliff: the ramp carries the same height change over a fraction
+                   of the distance, so the local gradient — and therefore the line
+                   density — is multiplied by ~1/(2*SOFT*strength).
+       Tuned by rendering true-scale strips across candidate shapes and reading the
+       sheet back: the shipped 2 + round(4*strength) puts stops 10/11/12 at 4/5/6
+       levels with empty plateaus covering ~18 / 35 / 35 percent of the sheet and a
+       rising share of lines sitting on the ramps. Wider spans (7..9 levels) look
+       better on paper and worse on screen: the plateaus grow until a third of the
+       sheet is empty and the cliffs thin back out to single lines. */
+    const CONTOUR_TERRACE_STEPS_BASE = 2
+    const CONTOUR_TERRACE_STEPS_SPAN = 4
+    const CONTOUR_TERRACE_SOFT = 0.5
     const contourRoughnessIndex = () => contourReadIndex(
       CONTOUR_ROUGHNESS_KEY, CONTOUR_ROUGHNESS_BASE.length - 1, CONTOUR_ROUGHNESS_DEFAULT)
     /* The roughness stop as the generator needs it: the ladder of octaves is
@@ -950,7 +1021,37 @@ function apply(ctx) {
       const baseCell = CONTOUR_ROUGHNESS_BASE[i]
       const persist = CONTOUR_ROUGHNESS_PERSIST[i]
       const want = CONTOUR_ROUGHNESS_OCTAVES[i]
-      return { baseCell, persist, octaves: want }
+      const terrace = CONTOUR_ROUGHNESS_TERRACE[i]
+      return { baseCell, persist, octaves: want, terrace }
+    }
+    /* The soft staircase behind 高原 + 悬崖 (see CONTOUR_ROUGHNESS_TERRACE).
+       u is the position inside the field's own [min,max], strength is 0..1.
+       C1-CONTINUOUS ON PURPOSE: the step edges are smoothsteps, not a hard
+       floor(). A hard quantiser would put genuine slope discontinuities into the
+       field, and the contours crossing them carry corners no amount of Chaikin /
+       B-spline smoothing can remove — the cusp suite asserts that no turn above 8
+       degrees survives anywhere in its sweep, and it sweeps these stops too. Soft
+       edges are steep, not broken: the lines bunch up without kinking.
+       Pointwise, so tileability and determinism are untouched, and it fixes the
+       range's own endpoints (mn -> mn, mx -> mx), which keeps the iso-levels
+       derived from that range crossing the terrain. */
+    const contourTerrace = (u, strength) => {
+      if (!(strength > 0)) return u
+      const steps = CONTOUR_TERRACE_STEPS_BASE + Math.round(CONTOUR_TERRACE_STEPS_SPAN * strength)
+      const w = Math.min(0.45, CONTOUR_TERRACE_SOFT * strength)
+      const x = u * steps
+      const i = Math.floor(x)
+      const f = x - i
+      const t = f <= w ? 0 : (f >= 1 - w ? 1 : (f - w) / (1 - 2 * w))
+      const sm = t * t * (3 - 2 * t)
+      const y = (i + sm) / steps
+      return y < 0 ? 0 : (y > 1 ? 1 : y)
+    }
+    /* Apply the staircase in place over the field's actual range. */
+    const contourTerraceField = (F, mn, mx, strength) => {
+      const span = mx - mn
+      if (!(span > 0)) return
+      for (let i = 0; i < F.length; i++) F[i] = mn + span * contourTerrace((F[i] - mn) / span, strength)
     }
     /* How many octaves of that ladder are actually usable on a texture of tw x th
        CSS px: octave o has period (px0 * 2^o), and the lattice indices must stay
@@ -1214,6 +1315,11 @@ function apply(ctx) {
           if (v > mx) mx = v
         }
       }
+      /* Plateau/cliff shaping for the roughest stops. Applied to the finished fBm
+         (not per octave), so it acts on the landscape as a whole: it is a remap of
+         the height range, not another frequency. Stops 0..9 carry strength 0 and
+         therefore a field bit-for-bit identical to the pre-terrace one. */
+      if (prof.terrace > 0) contourTerraceField(F, mn, mx, prof.terrace)
       /* Marching-squares scratch buffers, allocation-free across levels (the
          stitched walk reuses them for every level of one extraction).
 
@@ -1652,6 +1758,12 @@ function apply(ctx) {
       if (cv === null) cv = document.createElement('canvas')
       cv.width = t.twDev
       cv.height = t.thDev
+      /* A degenerate backing store (0 or non-finite) would silently stroke nothing
+         and leave the sheet blank with no error anywhere — the one failure mode of
+         this pipeline that is invisible without a read-back. */
+      if (!(cv.width > 0) || !(cv.height > 0)) {
+        dbg('texture build got a degenerate canvas', cv.width, cv.height, 'viewport', wCss, hCss, 'dpr', contourDpr)
+      }
       contourTex = { cv, wCss: t.twCss, hCss: t.thCss }
       contourRenderCache()
       // Keep the scroll offset inside the (possibly new) texture period.

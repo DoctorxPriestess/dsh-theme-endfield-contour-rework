@@ -99,16 +99,17 @@ const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
   'contourBuildTexture', 'contourBlit', 'contourRetune', 'contourFrame',
   'contourTerrainProfile', 'contourOctaveLadder', 'contourRebuildForRoughness',
-  'contourReadIndex']
+  'contourReadIndex', 'contourTerrace', 'contourTerraceField']
 const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN',
   'CONTOUR_MIN_RING_BOX', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_GRAD_X',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
   'CONTOUR_TEX_QUANT', 'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
-  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY']
+  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY',
+  'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT']
 const LINE = ['CONTOUR_DENSITIES', 'CONTOUR_SPEEDS', 'CONTOUR_ROUGHNESS_BASE',
-  'CONTOUR_ROUGHNESS_PERSIST', 'CONTOUR_ROUGHNESS_OCTAVES']
+  'CONTOUR_ROUGHNESS_PERSIST', 'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE']
 
 let body
 let gateDecls

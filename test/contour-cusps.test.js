@@ -91,14 +91,16 @@ function grabOne(name) {
    track client.js; a missing one throws here instead of failing mysteriously. */
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder']
+  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder',
+  'contourTerrace', 'contourTerraceField']
   .map(grab).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
-  'CONTOUR_ROUGHNESS_DEFAULT']
+  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN',
+  'CONTOUR_TERRACE_SOFT']
   .map(grabNum).join('\n')
 const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
-  'CONTOUR_ROUGHNESS_OCTAVES'].map(grabLine).join('\n')
+  'CONTOUR_ROUGHNESS_OCTAVES', 'CONTOUR_ROUGHNESS_TERRACE'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
   'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
 /* The shipped roughness stop, read from client.js rather than typed here: these
@@ -155,6 +157,17 @@ function build(w, h, density) {
 
 return {
   build,
+  /* Roughness stop under test: the shipped default for the main sweep, the
+     terraced stops for the plateau/cliff sweep further down. */
+  setRoughness(i) { contourRoughnessIdx = i },
+  roughnessStop() { return ${ROUGH} },
+  terracedStops() {
+    const out = []
+    for (let i = 0; i < CONTOUR_ROUGHNESS_TERRACE.length; i++) {
+      if (CONTOUR_ROUGHNESS_TERRACE[i] > 0) out.push({ stop: i, strength: CONTOUR_ROUGHNESS_TERRACE[i] })
+    }
+    return out
+  },
   /* Terrain lifecycle. client.js keeps the permutation table as the single carrier
      of terrain randomness and refills it in place from a new seed on every mount,
      so "same seed => same landscape" and "new seed => new landscape" are both
@@ -290,56 +303,72 @@ let worstStep = 0
 let shortestContour = Infinity
 let smallestRingBox = Infinity
 
-for (const [w, h] of SIZES) {
-  for (const density of DENSITIES) {
-    const REC = api.build(w, h, density)
-    const subs = REC.subs
-    totalSubs += subs.length
-    if (REC.strokes === 0) { fail(w + 'x' + h + ' d' + density + ': nothing stroked at all'); continue }
-    if (subs.length < 3) { fail(w + 'x' + h + ' d' + density + ': only ' + subs.length + ' subpath(s) drawn'); continue }
-    // 5a. Extraction integrity: the same contour may not appear twice.
-    const seenPaths = new Set()
-    for (const p of REC.raw) {
-      const key = p.map((v) => v.toFixed(2)).join(',')
-      if (seenPaths.has(key)) duplicated++
-      seenPaths.add(key)
-    }
-    const allTurns = []
-    for (const sub of subs) {
-      const { turns, maxStep } = sampleTurns(sub, 6)
-      for (const t of turns) allTurns.push(t)
-      if (sub.closed) totalRings++
-      if (maxStep > worstStep) worstStep = maxStep
-      // Debris: how small is the smallest thing on screen?
-      const poly = polylineOf(sub, 6)
-      const len = arcLength(poly)
-      if (len < shortestContour) shortestContour = len
-      if (sub.closed) {
-        const box = boxSide(poly)
-        if (box < smallestRingBox) smallestRingBox = box
+/* Every stop that carries a staircase (the plateau/cliff stops) is swept as well,
+   at one representative viewport plus one clamped extreme, on both densities. A
+   soft staircase is the one edit that could put genuine corners into the terrain,
+   so the "no cusp / no debris" claims must be measured on the terraced stops and
+   not only on the shipped default. */
+const terracedStops = api.terracedStops()
+const SWEEPS = [{ stop: api.roughnessStop(), sizes: SIZES }]
+for (const t of terracedStops) SWEEPS.push({ stop: t.stop, sizes: [[1152, 648], [320, 240]] })
+const worstByStop = []
+
+for (const sweep of SWEEPS) {
+  api.setRoughness(sweep.stop)
+  let stopWorst = 0
+  for (const [w, h] of sweep.sizes) {
+    for (const density of DENSITIES) {
+      const REC = api.build(w, h, density)
+      const subs = REC.subs
+      totalSubs += subs.length
+      if (REC.strokes === 0) { fail('stop ' + sweep.stop + ' ' + w + 'x' + h + ' d' + density + ': nothing stroked at all'); continue }
+      if (subs.length < 3) { fail('stop ' + sweep.stop + ' ' + w + 'x' + h + ' d' + density + ': only ' + subs.length + ' subpath(s) drawn'); continue }
+      // 5a. Extraction integrity: the same contour may not appear twice.
+      const seenPaths = new Set()
+      for (const p of REC.raw) {
+        const key = p.map((v) => v.toFixed(2)).join(',')
+        if (seenPaths.has(key)) duplicated++
+        seenPaths.add(key)
       }
-      // 5b. A stitched contour walks cell to cell, so consecutive vertices are
-      // at most ~1.5 grid steps apart. Anything larger means the walk emitted a
-      // vertex it did not compute (the stale-vertex class of defect).
-      if (maxStep > 25) teleports++
-      // 4. Every recorded point must be finite and inside the tile + grid cell.
-      const bx = w + 11 /* CONTOUR_STEP - 1 + margin */
-      const by = h + 11
-      for (const p of sub.pts) {
-        const xs = [p.x, p.c1x, p.c2x].filter((v) => v !== undefined)
-        const ys = [p.y, p.c1y, p.c2y].filter((v) => v !== undefined)
-        for (const v of xs) if (!Number.isFinite(v) || v < -1 || v > bx) geometryBad++
-        for (const v of ys) if (!Number.isFinite(v) || v < -1 || v > by) geometryBad++
+      const allTurns = []
+      for (const sub of subs) {
+        const { turns, maxStep } = sampleTurns(sub, 6)
+        for (const t of turns) allTurns.push(t)
+        if (sub.closed) totalRings++
+        if (maxStep > worstStep) worstStep = maxStep
+        // Debris: how small is the smallest thing on screen?
+        const poly = polylineOf(sub, 6)
+        const len = arcLength(poly)
+        if (len < shortestContour) shortestContour = len
+        if (sub.closed) {
+          const box = boxSide(poly)
+          if (box < smallestRingBox) smallestRingBox = box
+        }
+        // 5b. A stitched contour walks cell to cell, so consecutive vertices are
+        // at most ~1.5 grid steps apart. Anything larger means the walk emitted a
+        // vertex it did not compute (the stale-vertex class of defect).
+        if (maxStep > 25) teleports++
+        // 4. Every recorded point must be finite and inside the tile + grid cell.
+        const bx = w + 11 /* CONTOUR_STEP - 1 + margin */
+        const by = h + 11
+        for (const p of sub.pts) {
+          const xs = [p.x, p.c1x, p.c2x].filter((v) => v !== undefined)
+          const ys = [p.y, p.c1y, p.c2y].filter((v) => v !== undefined)
+          for (const v of xs) if (!Number.isFinite(v) || v < -1 || v > bx) geometryBad++
+          for (const v of ys) if (!Number.isFinite(v) || v < -1 || v > by) geometryBad++
+        }
       }
+      allTurns.sort((a, b) => a - b)
+      const p99 = allTurns[Math.floor(allTurns.length * 0.99)]
+      const mx = allTurns[allTurns.length - 1]
+      worstP99s.push(p99)
+      if (mx > worstMax) worstMax = mx
+      if (mx > stopWorst) stopWorst = mx
+      console.log('  r' + sweep.stop + ' ' + w + 'x' + h + ' d' + density + ': subs ' + subs.length
+        + '  raw ' + REC.raw.length + '  p99 ' + p99.toFixed(1) + '  max ' + mx.toFixed(1) + ' deg')
     }
-    allTurns.sort((a, b) => a - b)
-    const p99 = allTurns[Math.floor(allTurns.length * 0.99)]
-    const mx = allTurns[allTurns.length - 1]
-    worstP99s.push(p99)
-    if (mx > worstMax) worstMax = mx
-    console.log('  ' + w + 'x' + h + ' d' + density + ': subs ' + subs.length
-      + '  raw ' + REC.raw.length + '  p99 ' + p99.toFixed(1) + '  max ' + mx.toFixed(1) + ' deg')
   }
+  worstByStop.push({ stop: sweep.stop, worst: stopWorst })
 }
 
 if (geometryBad === 0) ok('all recorded coordinates finite and inside the tile')
@@ -361,6 +390,20 @@ else fail(over90 + ' landscape(s) in the sweep have p99 turn >= 90 deg')
 const worstP99 = Math.max.apply(null, worstP99s)
 if (worstP99 < 12) ok('bulk stays smooth: worst p99 turn ' + worstP99.toFixed(1) + ' deg')
 else fail('p99 turn angle rose to ' + worstP99.toFixed(1) + ' deg — strokes are faceted again')
+
+/* The staircase is the only edit that can reintroduce corners, so its stops are
+   held to the same bound as the rest — separately reported, because a regression
+   there is a different bug from a regression on the plain terrain. */
+if (terracedStops.length === 0) fail('no roughness stop carries a staircase — the plateau/cliff stops are gone')
+else {
+  const bad = worstByStop.filter((s) => s.worst > 150)
+  if (bad.length === 0) {
+    ok('terraced stops stay smooth too: ' + terracedStops.map((t) => 'stop ' + t.stop
+      + ' (' + t.strength + ') max ' + (worstByStop.find((s) => s.stop === t.stop) || { worst: 0 }).worst.toFixed(1) + ' deg').join(', '))
+  } else {
+    fail('a terraced stop has a cusp: ' + bad.map((s) => 'stop ' + s.stop + ' max ' + s.worst.toFixed(1) + ' deg').join(', '))
+  }
+}
 
 if (totalRings > 0) ok('closed rings drawn as rings: ' + totalRings + ' across the sweep')
 else fail('no closed subpath in the whole sweep — rings are being drawn open again')
