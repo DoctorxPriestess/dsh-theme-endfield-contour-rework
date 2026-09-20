@@ -157,12 +157,12 @@ const buttons = nodes.filter((n) => n.type === 'button')
    happened when 大字入场动画 was added (the count stayed at 9 and the assertion
    passed while a tenth row was on screen). The independent total below is what
    makes that impossible now. */
-const ROW_KEYS = ['theme', 'palette', 'radius', 'contour', 'contour-anim', 'contour-dir', 'contour-speed', 'contour-density', 'contour-scroll-pause', 'watermark', 'watermark-persist', 'loader', 'thunder', 'thunder-anim']
+const ROW_KEYS = ['theme', 'palette', 'radius', 'contour', 'contour-anim', 'contour-dir', 'contour-speed', 'contour-density', 'contour-roughness', 'contour-scroll-pause', 'watermark', 'watermark-persist', 'loader', 'thunder', 'thunder-anim']
 const rows = nodes.filter((n) => n.type === 'div' && n.props && ROW_KEYS.includes(n.props.key))
 const groups = (tree.children || []).filter((c) => c && c.type === 'div' && c.props && /^group-/.test(c.props.key))
 
-if (rows.length === 14) pass('panel has all 14 setting rows')
-else fail('expected 14 rows, found ' + rows.length)
+if (rows.length === 15) pass('panel has all 15 setting rows')
+else fail('expected 15 rows, found ' + rows.length)
 
 /* Count the rows the way the PAGE defines them — every direct child of a group
    container — so an unlisted new row shows up as a mismatch instead of vanishing. */
@@ -249,6 +249,27 @@ if (densityButtons.length === 4 && densityButtons.map((b) => textOf(b)).join(','
 else fail('等高线密度 should provide exactly 稀疏/适中/密集/极密, found: ' + densityButtons.map((b) => textOf(b)).join(','))
 if (densityButtons.every((b) => b.props.disabled === true)) pass('等高线密度 disabled while layer off')
 else fail('等高线密度 should be disabled while the contour layer is off')
+/* 地形粗糙度 is the one SLIDER: a native range input, so the whole 12-stop
+   terrain range is reachable by dragging and by the keyboard. A row of twelve
+   buttons would technically offer the same states but not the same gesture, and
+   the assertion below pins the control SHAPE, not just its values. */
+const roughRow = rows.find((r) => r.props.key === 'contour-roughness')
+const roughSlider = roughRow ? walk(roughRow).find((n) => n.type === 'input') : null
+if (roughSlider && roughSlider.props.type === 'range') pass('地形粗糙度 renders a range slider')
+else fail('地形粗糙度 should render an <input type="range">, found: ' + (roughSlider ? roughSlider.type : 'no input'))
+if (roughSlider) {
+  const p = roughSlider.props
+  if (p.min === 0 && p.max === 11 && p.step === 1) pass('地形粗糙度 offers 12 discrete stops (0..11, step 1)')
+  else fail('地形粗糙度 should offer 12 stops (min 0, max 11, step 1), got min=' + p.min + ' max=' + p.max + ' step=' + p.step)
+  if (p.value === 7) pass('地形粗糙度 opens on stop 7 — the terrain the theme has always shipped')
+  else fail('地形粗糙度 should open on the shipped default stop 7, got ' + p.value)
+  if (p['aria-label'] && String(p['aria-valuetext'] || '').length > 0) pass('地形粗糙度 slider is labelled for screen readers (' + p['aria-label'] + ' / ' + p['aria-valuetext'] + ')')
+  else fail('地形粗糙度 slider needs both aria-label and aria-valuetext')
+  if (p.disabled === true) pass('地形粗糙度 disabled while layer off')
+  else fail('地形粗糙度 should be disabled while the contour layer is off')
+  if (textOf(roughRow).includes('8/12')) pass('地形粗糙度 shows its position in the range (8/12)')
+  else fail('地形粗糙度 row should read its stop as n/12, got: ' + textOf(roughRow))
+}
 const scrollPauseRow = rows.find((r) => r.props.key === 'contour-scroll-pause')
 const scrollPauseBtn = scrollPauseRow ? walk(scrollPauseRow).find((b) => b.type === 'button') : null
 if (scrollPauseBtn && textOf(scrollPauseRow).includes('滚动窗口动画暂停：开启')) pass('滚动窗口动画暂停默认开启')
@@ -341,6 +362,22 @@ if (sparseDensity && typeof sparseDensity.props.onClick === 'function') {
   if (prefStore.get('contour-density') === '0') pass('等高线密度 toggle writes contour-density=0 (稀疏/8 条等值线)')
   else fail('等高线密度 toggle wrote ' + JSON.stringify(prefStore.get('contour-density')) + ', expected "0"')
 } else fail('等高线密度 button has no onClick handler')
+const roughRow2 = walk(tree2).find((n) => n.type === 'div' && n.props && n.props.key === 'contour-roughness')
+const roughSlider2 = roughRow2 ? walk(roughRow2).find((n) => n.type === 'input') : null
+if (roughSlider2 && !roughSlider2.props.disabled) pass('地形粗糙度 enabled once the layer is on')
+else fail('地形粗糙度 should be enabled once the contour layer is on')
+if (roughSlider2 && typeof roughSlider2.props.onChange === 'function') {
+  try { roughSlider2.props.onChange({ target: { value: '0' } }) } catch (e) { fail('地形粗糙度 slider threw: ' + e.message) }
+  // The pref stores the stop INDEX (0..11), so dragging fully left is 0 = 平原.
+  if (prefStore.get('contour-roughness') === '0') pass('地形粗糙度 slider writes contour-roughness=0 (平原)')
+  else fail('地形粗糙度 slider wrote ' + JSON.stringify(prefStore.get('contour-roughness')) + ', expected "0"')
+  // A value outside the table (a hostile or stale stored index) must be refused
+  // rather than persisted into a field the engine would read as undefined.
+  prefStore.setField('contour-roughness', '0')
+  try { roughSlider2.props.onChange({ target: { value: '99' } }) } catch (e) { fail('地形粗糙度 slider threw on an out-of-range value: ' + e.message) }
+  if (prefStore.get('contour-roughness') === '0') pass('地形粗糙度 ignores an out-of-range stop')
+  else fail('地形粗糙度 accepted an out-of-range stop: ' + JSON.stringify(prefStore.get('contour-roughness')))
+} else fail('地形粗糙度 slider has no onChange handler')
 const scrollPauseRow2 = walk(tree2).find((n) => n.type === 'div' && n.props && n.props.key === 'contour-scroll-pause')
 const scrollPauseBtn2 = scrollPauseRow2 ? walk(scrollPauseRow2).find((b) => b.type === 'button') : null
 if (scrollPauseBtn2 && !scrollPauseBtn2.props.disabled) pass('滚动窗口动画暂停 enabled once the layer is on')

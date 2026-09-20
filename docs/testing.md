@@ -10,7 +10,7 @@ npm test           # 上面两项 + 配色 / 设置页 / 渲染 / 覆盖率 / �
 
 第二条原则：**每条断言都做过反向对照（变异验证）。** 故意把被测行为改坏，确认该断言真的会失败。一个从未被观察到失败过的校验，不能算证据。
 
-> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chromium 做无头渲染，需要本机安装 Chrome / Chromium / Edge。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`、`contour-cusps`、`contour-smoothness`、`contour-perf`、`prefs-key-mapping`、`migrate-prefs`、`fork-identity-check`、`browser-discovery`（它不启动浏览器，只验证发现逻辑本身）。
+> **运行环境。** 带「真实浏览器」字样的脚本会 spawn 本机 Chromium 做无头渲染，需要本机安装 Chrome / Chromium / Edge。以下脚本是**纯进程内**的，任何环境都能跑：`check.js`、`selftest.js`、`palette-contrast`、`settings-rows`、`settings-locale`、`thunder-edges`、`contour-cusps`、`contour-smoothness`、`contour-roughness`、`contour-perf`、`prefs-key-mapping`、`migrate-prefs`、`fork-identity-check`、`browser-discovery`（它不启动浏览器，只验证发现逻辑本身）。
 >
 > **浏览器怎么找、结果怎么取**（`test/lib/browser.js`，全仓唯一一处）。原先每个测试各自内联一份候选路径、只查机器级安装位置，也不校验存在性；Chrome 默认装在 `%LOCALAPPDATA%` 就找不到，于是「换一台机器」容易变成「一个测试都跑不起来，而且错误信息是空的」。现在顺序是：`CHROME_PATH` / `CHROME_BIN` / `EDGE_PATH` / `PUPPETEER_EXECUTABLE_PATH` → PATH 查询（`where` / `which`）→ 按用户安装 → 机器级安装 → `EdgeCore\<版本>`（Edge 152 起 Store 版布局里真实内核可能只在这里）。找不到时会打印**查过的全部路径**。
 >
@@ -162,6 +162,7 @@ node test/thunder-dismiss.test.js   # 点击关闭：真实指针事件 + 命中
 ```bash
 node test/contour-cusps.test.js       # 几何：尖点 / 重复提取 / 顶点跳变 / 碎屑 / seed 生命周期（Node）
 node test/contour-smoothness.test.js  # 几何：曲线 vs 原始折线的最大转角（Node）
+node test/contour-roughness.test.js   # 粗糙度阶梯：单调性 / 出厂档位 / 可读性上限 / 逐档出图（Node）
 node test/contour-perf.test.js        # 成本形状 + 实测量 + 滚动门控（Node）
 node test/contour-render.test.js      # 21 项行为断言（浏览器）
 node test/contour-specks.test.js      # 残渣过滤 + 随机种子 + 空白格（浏览器）
@@ -190,7 +191,9 @@ node test/shoot.js                    # 输出亮/暗 × 两配色共四张截�
 
 **`contour-coverage.test.js`** 直接读**画布本身**而非截图：截图里应用自己的卡片、输入区遮罩和正文会盖住图案，无法回答「场里有没有空白」。它把画布切成 8×5 分区并统计墨迹占比。
 
-**`contour-perf.test.js`** 量的是新架构**承诺的成本形状**，而且不靠计时：桩掉 context 后驱动 300 帧，断言这一过程中**地形生成 0 次、等值线提取 0 次、纹理渲染 0 次**；改密度只重新提取 / 重绘各 1 次且**不重新生成地形**；并**静态检查** `contourFrame()` 的源码里根本不出现建/提取/渲染三件套（帧函数在构造上就只能是「缓存平移」）。随后实测成本：
+**`contour-roughness.test.js`** 守的是「唯一会改变地形形状的那个设置」。它不检查有没有抛异常——粗糙度调错了不会抛异常，只会画出**坏地图**：某一档什么都不画、相邻两档画出来一模一样（滑块有半程是死的）、或者最粗糙那档糊成均匀噪点。现有套件全都发现不了：cusps / smoothness 只扫**出厂档**那一个地形，specks 只问单条线是不是碎屑。所以这个脚本按用户看到的方式量**整条阶梯**：三张参数表格式与单调性；出厂档**逐字等于出厂常量**（`280 / 0.5 / 5`，老用户升级后地图不变）；倍频阶梯在 5 种纹理尺寸下都不越过置乱表上限、且不会塌成 0 层；每一档都真的产出等高线；闭合环数与总笔长**逐档递增**（即每个档位都肉眼可辨，实测最小步进 +6%）；没有一档画出碎屑；以及那条实测出来的可读性上限——**最细倍频的振幅占比 ≤12%**（超过它，最细那层就落在 10px 采样网格附近，画面从地形退化成噪点；实测最差 10.6%，出现在 4096×384 纹理的第 12 档）。
+
+**`contour-perf.test.js`** 量的是新架构**承诺的成本形状**，而且不靠计时：桩掉 context 后驱动 300 帧，断言这一过程中**地形生成 0 次、等值线提取 0 次、纹理渲染 0 次**；改密度只重新提取 / 重绘各 1 次且**不重新生成地形**；改粗糙度则**恰恰相反**——必须重新生成 1 次、重新提取 1 次、重绘 1 次，且**用同一个 seed**（地形被重新调形而不是换地图；滑回出厂档必须逐字复原出发时的那张地形）。这里刻意让 `contourRoughnessIndex()` 走**真实的偏好读取路径**（与密度那个固定桩不同），所以「滑块 → 偏好 → 地形」这条链路也在测试范围内；沙箱里把 `setTimeout` 显式置空，引擎于是走「无定时器时同步重建」的分支，一次档位变更的成本才数得清。并**静态检查** `contourFrame()` 的源码里根本不出现建/提取/渲染三件套（帧函数在构造上就只能是「缓存平移」）。随后实测成本：
 
 - 一次性构建（地形 → 等值线 → 平滑纹理）：`320×240` 17ms、`1152×648` 82ms、`1432×753` 89ms、`1920×1080` 95ms、`2000×200` 22ms、`1920×1080@2x` 28ms；
 - 每帧：**1 次 `drawImage`**（大窗口跨接缝时最多 4 次）、约 0.001ms JS 时间，对照 120fps 的 8.3ms 预算；

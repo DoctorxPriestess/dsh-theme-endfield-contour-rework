@@ -112,6 +112,10 @@ function apply(ctx) {
       contourDir: '0',
       contourSpeed: '2',
       contourDensity: '1',
+      /* Index into the terrain-roughness tables (CONTOUR_ROUGHNESS_BASE /
+         _PERSIST / _OCTAVES). 7 is the stop the theme has always shipped --
+         the plains..extreme-mountains slider opens on the familiar landscape. */
+      contourRoughness: '7',
       contourScrollPause: '1',
       watermark: '1',
       watermarkPersist: '0',
@@ -140,7 +144,7 @@ function apply(ctx) {
         'watermark-persist', 'contour',
         'contour-anim', 'contour-dir',
         'contour-speed', 'contour-density',
-        'contour-scroll-pause', 'loader',
+        'contour-roughness', 'contour-scroll-pause', 'loader',
         'thunder', 'thunder-anim',
       ].map((suffix) => PREFS_NS + '-' + suffix)
       for (const k of raw) m[k] = prefsKeyToField(k)
@@ -834,6 +838,9 @@ function apply(ctx) {
     const CONTOUR_SPEED_KEY = PREFS_NS + '-contour-speed'
     const CONTOUR_DIR_KEY = PREFS_NS + '-contour-dir'
     const CONTOUR_DENSITY_KEY = PREFS_NS + '-contour-density'
+    /* Terrain roughness (index into CONTOUR_ROUGHNESS_*): the one setting that
+       changes the SHAPE of the landscape rather than how it is drawn. */
+    const CONTOUR_ROUGHNESS_KEY = PREFS_NS + '-contour-roughness'
     const CONTOUR_SCROLL_PAUSE_KEY = PREFS_NS + '-contour-scroll-pause'
     // Default OFF (=== '1'): a background pattern must be opt-in.
     const isContourOn = () => prefsGet(CONTOUR_KEY) === '1'
@@ -893,6 +900,76 @@ function apply(ctx) {
     const CONTOUR_OCTAVES = 5
     const CONTOUR_PERSIST = 0.5
     const CONTOUR_PERIOD_MAX = 240
+
+    /* Terrain ROUGHNESS — the fBm spectrum of the height field, from flat plains
+       (low) to extreme mountains (high). Twelve stops, one slider detent each.
+       Three parallel tables hold the whole terrain character:
+         BASE_CELL  CSS-px size of the LARGEST noise cell. Large = broad, gentle
+                    swells a few hundred px across (plains); small = short,
+                    closely packed hills (mountains).
+         PERSIST    amplitude ratio between successive octaves, i.e. how much
+                    energy the fine detail carries. Low = only the big shapes
+                    survive (smooth, wide-spaced contours); high = structure at
+                    every scale (nested rings, jagged-looking lines).
+         OCTAVES    upper bound for the ladder of scales. The ladder stops early
+                    when the next octave's lattice period would pass
+                    CONTOUR_PERIOD_MAX: such an octave can only re-add the already
+                    clamped coarsest-fine scale instead of a finer one, which
+                    piles near-grid noise onto the field for nothing (see
+                    contourOctaveLadder).
+       Every table must stay sorted from plains to mountains (asserted by
+       test/contour-roughness.test.js).
+       HOW THE 12 STOPS WERE TUNED. The tables come from a rendered sweep of the
+       whole ladder (extract every stop, rasterise the contours, compare). Two
+       limits showed up there and shaped the numbers:
+         - LEGIBILITY: once the finest octave of the ladder carries more than
+           roughly a tenth of the total amplitude AND sits near the 10px grid
+           pitch, the sheet stops reading as terrain and turns into uniform
+           speckle. That is why persistence is capped at 0.62 (the top stops also
+           pin the base cell so the ladder keeps its fifth octave, which spreads
+           the fine energy over a second scale instead of concentrating it).
+         - DISTINCT DETENTS: the base cell is quantised to an integer lattice
+           period per texture, so two adjacent stops whose cells round to the same
+           period look identical. The low half therefore steps through distinct
+           periods (ceil to 4..12 cells across the texture) and the top half, where
+           the period saturates, is carried by persistence alone.
+       CONTOUR_ROUGHNESS_DEFAULT is the stop the theme has always shipped: its
+       three entries ARE the CONTOUR_BASE_CELL / CONTOUR_PERSIST / CONTOUR_OCTAVES
+       constants above, so the long-standing landscape is literally those
+       numbers and can never drift away from them silently. */
+    const CONTOUR_ROUGHNESS_DEFAULT = 7
+    const CONTOUR_ROUGHNESS_BASE = [960, 768, 640, 549, 480, 427, 384, CONTOUR_BASE_CELL, 274, 266, 258, 250]
+    const CONTOUR_ROUGHNESS_PERSIST = [0.24, 0.28, 0.32, 0.36, 0.39, 0.42, 0.45, CONTOUR_PERSIST, 0.53, 0.56, 0.59, 0.62]
+    const CONTOUR_ROUGHNESS_OCTAVES = [2, 3, 3, 4, 4, 4, 5, CONTOUR_OCTAVES, 5, 5, 6, 6]
+    const contourRoughnessIndex = () => contourReadIndex(
+      CONTOUR_ROUGHNESS_KEY, CONTOUR_ROUGHNESS_BASE.length - 1, CONTOUR_ROUGHNESS_DEFAULT)
+    /* The roughness stop as the generator needs it: the ladder of octaves is
+       resolved HERE, once per build, not per sample. */
+    const contourTerrainProfile = () => {
+      const i = contourRoughnessIndex()
+      const baseCell = CONTOUR_ROUGHNESS_BASE[i]
+      const persist = CONTOUR_ROUGHNESS_PERSIST[i]
+      const want = CONTOUR_ROUGHNESS_OCTAVES[i]
+      return { baseCell, persist, octaves: want }
+    }
+    /* How many octaves of that ladder are actually usable on a texture of tw x th
+       CSS px: octave o has period (px0 * 2^o), and the lattice indices must stay
+       inside the 512-entry permutation table, so CONTOUR_PERIOD_MAX is a hard
+       ceiling. An octave that would exceed it on BOTH axes adds no new scale (it
+       repeats the clamped 240-period pattern), so the ladder ends there; at least
+       one octave is always kept so a degenerate size can never yield a flat
+       field. At the shipped default this yields exactly CONTOUR_OCTAVES. */
+    const contourOctaveLadder = (px0, py0, want) => {
+      let n = 0
+      let ox = px0
+      let oy = py0
+      while (n < want && Math.max(ox, oy) <= CONTOUR_PERIOD_MAX) {
+        n++
+        ox *= 2
+        oy *= 2
+      }
+      return n < 1 ? 1 : n
+    }
     /* Levels sit inside the field's ACTUAL [min, max] with this margin trimmed
        from both ends. This is what makes blank patches structurally impossible
        (the old accept-or-reroll machinery existed because gaussian bumps decayed
@@ -919,6 +996,10 @@ function apply(ctx) {
        actually changed; otherwise the existing texture keeps tiling the new
        viewport with zero work and zero visual change. */
     const CONTOUR_RESIZE_DEBOUNCE = 200
+    /* A roughness slider drag crosses several detents before it settles; this is
+       the settle window before the terrain is rebuilt once for the final value.
+       Long enough to swallow a drag, short enough to feel immediate on a click. */
+    const CONTOUR_ROUGHNESS_DEBOUNCE = 140
 
     /* ---- contour engine state ----------------------------------------------
        All mutable engine state lives here; the functions below read/write it.
@@ -943,6 +1024,7 @@ function apply(ctx) {
     let contourResizePending = false
     let contourScrollPaused = false
     let contourScrollTimer = null
+    let contourRoughTimer = null
     let contourLoaderActive = false
     let contourPaths = []
     let contourField = null
@@ -1090,13 +1172,20 @@ function apply(ctx) {
       const step = CONTOUR_STEP
       const cols = Math.ceil(tw / step) + 1
       const rows = Math.ceil(th / step) + 1
+      /* The terrain character is the ROUGHNESS stop (see CONTOUR_ROUGHNESS_*):
+         the largest cell, the octave-to-octave amplitude ratio and the octave
+         budget. Nothing below is per-sample; the profile is read once per build,
+         so a density change can still re-extract from the SAME field. */
+      const prof = contourTerrainProfile()
       /* Integer base periods. Rounding (not flooring) keeps the largest octave
-         near CONTOUR_BASE_CELL pixels; clamping keeps perm indexing safe. */
-      const px0 = Math.max(3, Math.min(CONTOUR_PERIOD_MAX, Math.round(tw / CONTOUR_BASE_CELL)))
-      const py0 = Math.max(3, Math.min(CONTOUR_PERIOD_MAX, Math.round(th / CONTOUR_BASE_CELL)))
+         near prof.baseCell CSS px; clamping keeps perm indexing safe. */
+      const px0 = Math.max(3, Math.min(CONTOUR_PERIOD_MAX, Math.round(tw / prof.baseCell)))
+      const py0 = Math.max(3, Math.min(CONTOUR_PERIOD_MAX, Math.round(th / prof.baseCell)))
+      const octaves = contourOctaveLadder(px0, py0, prof.octaves)
+      const persist = prof.persist
       const F = new Float32Array(cols * rows)
       let norm = 0
-      for (let o = 0, a = 1; o < CONTOUR_OCTAVES; o++) { norm += a; a *= CONTOUR_PERSIST }
+      for (let o = 0, a = 1; o < octaves; o++) { norm += a; a *= persist }
       let mn = Infinity, mx = -Infinity
       for (let j = 0; j < rows; j++) {
         const row = j * cols
@@ -1106,16 +1195,16 @@ function apply(ctx) {
           let v = 0
           let a = 1
           let ox = px0, oy = py0
-          for (let o = 0; o < CONTOUR_OCTAVES; o++) {
-            /* Per-octave period, clamped to the perm-safe maximum: octave o
-               doubles the base period, and an unclamped high octave could exceed
-               the 512-entry lookup table. Clamping keeps tileability EXACTLY --
-               the coordinate (x/tw)*opx still lands on opx when x reaches tw --
-               it only merges that octave's scale with the clamp size. */
+          for (let o = 0; o < octaves; o++) {
+            /* Per-octave period, clamped to the perm-safe maximum. The ladder
+               above already guarantees every octave used here stays inside it on
+               at least one axis, so the clamp only ever trims a mixed-scale
+               octave on its coarser axis; tileability stays EXACT because the
+               coordinate (x/tw)*opx still lands on opx when x reaches tw. */
             const opx = Math.min(CONTOUR_PERIOD_MAX, ox)
             const opy = Math.min(CONTOUR_PERIOD_MAX, oy)
             v += a * contourNoise((x / tw) * opx, (y / th) * opy, opx, opy)
-            a *= CONTOUR_PERSIST
+            a *= persist
             ox *= 2
             oy *= 2
           }
@@ -1658,6 +1747,39 @@ function apply(ctx) {
       contourBlit()
     }
 
+    /* Roughness change: the terrain ITSELF is regenerated -- the one setting that
+       does that (density only re-extracts, direction/speed only retime). The
+       build runs from the SAME seed, so the landscape is re-tuned, never re-rolled
+       (a slider drag must not shuffle the map on every detent). Coalesced through
+       a short timer because a drag fires one event per detent crossed and a full
+       build is ~90ms at 1920x1080: the last detent is what has to land, and the
+       intermediate ones would otherwise pile up as visible jank. */
+    const contourRebuildForRoughness = () => {
+      if (contourWrap === null || contourView === null) return
+      /* No timer service (a sliver of the test environments): rebuild now rather
+         than dropping the change on the floor. Normal browsers always have one. */
+      if (typeof setTimeout !== 'function') {
+        contourBuildTexture(contourView.w, contourView.h)
+        contourBlit()
+        return
+      }
+      if (contourRoughTimer !== null) clearTimeout(contourRoughTimer)
+      contourRoughTimer = setTimeout(() => {
+        contourRoughTimer = null
+        if (contourWrap === null || contourView === null) return
+        contourBuildTexture(contourView.w, contourView.h)
+        contourBlit()
+      }, CONTOUR_ROUGHNESS_DEBOUNCE)
+    }
+    /* Drop a pending roughness rebuild (unmount, or a second change landing
+       first). The callbacks above re-check the mount state, so this is only about
+       not doing the work at all. */
+    const contourCancelRoughnessRebuild = () => {
+      if (contourRoughTimer === null) return
+      if (typeof clearTimeout === 'function') clearTimeout(contourRoughTimer)
+      contourRoughTimer = null
+    }
+
     /* Rebuild the texture if (and only if) the quantised target size for the
        CURRENT viewport differs from the cached one -- the deterministic rebuild
        keeps the same seed, so the landscape's character is stable while its
@@ -1678,6 +1800,7 @@ function apply(ctx) {
 
     const contourTeardown = () => {
       contourStopLoop()
+      contourCancelRoughnessRebuild()
       if (contourResizeTimer !== null) {
         clearTimeout(contourResizeTimer)
         contourResizeTimer = null
@@ -4074,6 +4197,21 @@ function apply(ctx) {
       contourDensityMedium: '适中',
       contourDensityDense: '密集',
       contourDensityVeryDense: '极密',
+      contourRoughnessRow: '地形粗糙度',
+      contourRoughnessHint: '低=平原（线条宽阔平缓），高=极端山地（等高线密集、多峰多谷）；改变地形本身，不是线距',
+      contourRoughnessNeedLayer: '请先开启等高线背景',
+      contourRoughPlains: '平原',
+      contourRoughSlope: '缓坡',
+      contourRoughHills: '丘陵',
+      contourRoughKnolls: '缓丘',
+      contourRoughUpland: '高地',
+      contourRoughSloping: '坡地',
+      contourRoughFoothills: '浅山',
+      contourRoughHighland: '山地',
+      contourRoughSteep: '陡山',
+      contourRoughRidges: '峻岭',
+      contourRoughCraggy: '险峰',
+      contourRoughExtreme: '极峰',
       contourScrollPauseRow: '滚动窗口动画暂停',
       contourScrollPauseOn: '开启暂停',
       contourScrollPauseOff: '关闭暂停',
@@ -4156,6 +4294,21 @@ function apply(ctx) {
       contourDensityMedium: 'Medium',
       contourDensityDense: 'Dense',
       contourDensityVeryDense: 'Very dense',
+      contourRoughnessRow: 'Terrain roughness',
+      contourRoughnessHint: 'Low = plains (wide, gentle lines); high = extreme mountains (dense contours, many peaks and valleys). This changes the terrain itself, not the line spacing',
+      contourRoughnessNeedLayer: 'Turn on the contour background first',
+      contourRoughPlains: 'Plains',
+      contourRoughSlope: 'Gentle slope',
+      contourRoughHills: 'Hills',
+      contourRoughKnolls: 'Knolls',
+      contourRoughUpland: 'Upland',
+      contourRoughSloping: 'Sloping land',
+      contourRoughFoothills: 'Foothills',
+      contourRoughHighland: 'Highland',
+      contourRoughSteep: 'Steep hills',
+      contourRoughRidges: 'Ridges',
+      contourRoughCraggy: 'Craggy peaks',
+      contourRoughExtreme: 'Extreme peaks',
       contourScrollPauseRow: 'Pause animation while scrolling',
       contourScrollPauseOn: 'Pause on scroll',
       contourScrollPauseOff: 'Keep animating',
@@ -4250,6 +4403,7 @@ function apply(ctx) {
           const [contourDir, setContourDir] = R.useState(contourDirIndex())
           const [contourSpeed, setContourSpeed] = R.useState(contourSpeedIndex())
           const [contourDensity, setContourDensity] = R.useState(contourDensityIndex())
+          const [contourRoughness, setContourRoughness] = R.useState(contourRoughnessIndex())
           const [contourScrollPause, setContourScrollPause] = R.useState(isContourScrollPauseOn())
           const [thunderOn, setThunderOn] = R.useState(isThunderOn())
           const [thunderAnim, setThunderAnim] = R.useState(isThunderAnimOn())
@@ -4259,6 +4413,9 @@ function apply(ctx) {
              same order as the engine's CONTOUR_DIRS) and the 4 density names. */
           const CONTOUR_DIR_LABELS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖']
           const CONTOUR_DENSITY_KEYS = ['contourDensitySparse', 'contourDensityMedium', 'contourDensityDense', 'contourDensityVeryDense']
+          /* Names for the 12 roughness stops, plains -> extreme mountains, in the
+             same order as the engine's CONTOUR_ROUGHNESS_* tables. */
+          const CONTOUR_ROUGHNESS_KEYS = ['contourRoughPlains', 'contourRoughSlope', 'contourRoughHills', 'contourRoughKnolls', 'contourRoughUpland', 'contourRoughSloping', 'contourRoughFoothills', 'contourRoughHighland', 'contourRoughSteep', 'contourRoughRidges', 'contourRoughCraggy', 'contourRoughExtreme']
           const rowStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '12px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' }
           const labelStyle = { color: 'var(--dsw-alias-label-primary)', fontSize: '13px', fontWeight: 500, lineHeight: '1.5' }
           // Sub-label explaining what a switch does, so the row is self-describing.
@@ -4356,6 +4513,14 @@ function apply(ctx) {
             setContourDensity(index)
             // Same field, new iso-levels: re-extract + re-render the cache once.
             contourRetune()
+          }
+          const setContourRoughnessValue = (value) => {
+            const next = Number(value)
+            if (!Number.isInteger(next) || next < 0 || next >= CONTOUR_ROUGHNESS_BASE.length) return
+            prefsSet(CONTOUR_ROUGHNESS_KEY, String(next))
+            setContourRoughness(next)
+            // New terrain (same seed): rebuild field + contours + cache once.
+            contourRebuildForRoughness()
           }
           const toggleContourScrollPause = () => {
             const next = !contourScrollPause
@@ -4585,6 +4750,41 @@ function apply(ctx) {
                     title: contourOn ? '' : t('contourAnimNeedLayer'),
                   }, t(CONTOUR_DENSITY_KEYS[index])))
                 )
+              ]),
+              row('contour-roughness', false, [
+                R.createElement('span', { style: labelStyle },
+                  t('contourRoughnessRow') + t('sep') + t(CONTOUR_ROUGHNESS_KEYS[contourRoughness])
+                    + ' ' + (contourRoughness + 1) + '/' + CONTOUR_ROUGHNESS_KEYS.length,
+                  R.createElement('span', { style: hintStyle }, t('contourRoughnessHint'))
+                ),
+                /* A real slider: 12 detents, so the middle of the terrain range is
+                   reachable by dragging and by the keyboard (a native range input
+                   is arrow-key operable and announces its value), which fourteen
+                   buttons would not give. Only this rail is styled, and only with
+                   tokens that exist whether or not the theme stylesheet is mounted
+                   (--edge-accent falls back to the app ink with the theme off). */
+                R.createElement('input', {
+                  type: 'range',
+                  min: 0,
+                  max: CONTOUR_ROUGHNESS_KEYS.length - 1,
+                  step: 1,
+                  value: contourRoughness,
+                  onChange: (e) => setContourRoughnessValue(e && e.target ? e.target.value : e),
+                  disabled: !contourOn,
+                  'aria-label': t('contourRoughnessRow'),
+                  'aria-valuetext': t(CONTOUR_ROUGHNESS_KEYS[contourRoughness]),
+                  title: contourOn ? t('contourRoughnessHint') : t('contourRoughnessNeedLayer'),
+                  style: {
+                    flex: '0 0 auto',
+                    width: '156px',
+                    height: '18px',
+                    margin: 0,
+                    accentColor: 'var(--edge-accent, currentColor)',
+                    // Same disabled affordance as the switches (see btnStyleFor).
+                    cursor: contourOn ? 'pointer' : 'not-allowed',
+                    opacity: contourOn ? 1 : 0.45,
+                  },
+                }),
               ]),
               row('contour-scroll-pause', true, [
                 R.createElement('span', { style: labelStyle },

@@ -34,6 +34,7 @@ const FIELD_DEFAULTS = {
   contourDir: '0',
   contourSpeed: '2',
   contourDensity: '1',
+  contourRoughness: '7',
   contourScrollPause: '1',
   watermark: '1',
   watermarkPersist: '0',

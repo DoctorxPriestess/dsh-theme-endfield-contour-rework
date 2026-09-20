@@ -97,14 +97,18 @@ function grabArray(name) {
 const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
-  'contourBuildTexture', 'contourBlit', 'contourRetune', 'contourFrame']
+  'contourBuildTexture', 'contourBlit', 'contourRetune', 'contourFrame',
+  'contourTerrainProfile', 'contourOctaveLadder', 'contourRebuildForRoughness',
+  'contourReadIndex']
 const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN',
   'CONTOUR_MIN_RING_BOX', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_GRAD_X',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
-  'CONTOUR_TEX_QUANT', 'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY']
-const LINE = ['CONTOUR_DENSITIES', 'CONTOUR_SPEEDS']
+  'CONTOUR_TEX_QUANT', 'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
+  'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY']
+const LINE = ['CONTOUR_DENSITIES', 'CONTOUR_SPEEDS', 'CONTOUR_ROUGHNESS_BASE',
+  'CONTOUR_ROUGHNESS_PERSIST', 'CONTOUR_ROUGHNESS_OCTAVES']
 
 let body
 let gateDecls
@@ -152,6 +156,11 @@ ${grabArray('CONTOUR_DIRS')}
    polarity (the anim switch is on-by-default: prefsGet(...) !== '0'). */
 const prefs = {}
 const prefsGet = (k) => (k in prefs ? prefs[k] : '')
+/* The roughness rebuild coalesces through a timer in the browser. There is no
+   timer service here ON PURPOSE (shadowing Node's global setTimeout), so the
+   engine takes its no-timer path and rebuilds synchronously — which is what lets
+   the assertions below count what one slider detent actually costs. */
+const setTimeout = undefined
 /* window stub whose reduced-motion answer can be flipped, so the gate's LIVE read
    (not a value cached at load) is what gets asserted. */
 let reducedMotionMatches = false
@@ -162,6 +171,10 @@ const contourPerm = new Uint16Array(512)
 let contourSeed = contourReseed(0x5eed4242)
 let contourDensityIdx=1
 const contourDensityIndex=()=>contourDensityIdx
+/* Roughness reads the real preference store (unlike the density stub above):
+   the assertions below drive the slider through prefsGet() and expect the
+   terrain to follow, which is exactly the wiring worth testing here. */
+const contourRoughnessIndex=()=>contourReadIndex(CONTOUR_ROUGHNESS_KEY, CONTOUR_ROUGHNESS_BASE.length - 1, CONTOUR_ROUGHNESS_DEFAULT)
 
 const counts = { generate: 0, extract: 0, render: 0 }
 const OP_KEYS = ['setTransform', 'clearRect', 'beginPath', 'moveTo', 'lineTo',
@@ -203,6 +216,11 @@ function snapshot() {
 return {
   build(w, h, dpr) {
     contourDpr = dpr
+    /* Mark the layer as mounted at this size: the engine only rebuilds the
+       terrain while it is on screen, and contourRebuildForRoughness() reads the
+       viewport back from here. */
+    contourView = { w, h, dpr }
+    contourWrap = contourWrap || {}
     contourLineCv = Object.assign({}, canvas, { _ctx: null })
     contourLineCv.width = Math.round(w * dpr)
     contourLineCv.height = Math.round(h * dpr)
@@ -210,6 +228,10 @@ return {
   },
   blit() { return contourBlit() },
   retune() { return contourRetune() },
+  rebuildForRoughness() { return contourRebuildForRoughness() },
+  roughKey: CONTOUR_ROUGHNESS_KEY,
+  seed: () => contourSeed,
+  fieldRange: () => (contourField === null ? 'none' : contourField.mn.toFixed(6) + '..' + contourField.mx.toFixed(6)),
   reset, blankOps, snapshot,
   frameSource: () => String(contourFrame),
   /* Scroll gate controls, for the reduced-motion / switch-off assertions. */
@@ -304,6 +326,34 @@ if (retune.counts.generate !== 0) {
 } else {
   ok('density change: 0 generations, 1 extraction, 1 render')
 }
+
+/* A roughness change is the ONE setting that regenerates the terrain — and it must
+   do so from the same seed, so dragging the slider re-tunes the same landscape
+   instead of shuffling the map on every detent. */
+const seedBefore = api.seed()
+const rangeBefore = api.fieldRange()
+api.setPref(api.roughKey, '11')
+api.reset()
+api.rebuildForRoughness()
+const rough = api.snapshot()
+if (rough.counts.generate !== 1) {
+  fail('a roughness change should regenerate the terrain exactly once (got ' + rough.counts.generate + ')')
+} else if (rough.counts.extract !== 1 || rough.counts.render !== 1) {
+  fail('a roughness rebuild should extract + render exactly once (got extract='
+    + rough.counts.extract + ' render=' + rough.counts.render + ')')
+} else if (api.seed() !== seedBefore) {
+  fail('a roughness change re-rolled the seed (terrain shuffled instead of re-tuned)')
+} else if (api.fieldRange() === rangeBefore) {
+  fail('a roughness change left the height field identical — the setting does nothing')
+} else {
+  ok('roughness change: 1 generation + 1 extraction + 1 render, same seed, different terrain')
+}
+/* Sliding back must return the shipped terrain exactly (determinism, both ways). */
+api.setPref(api.roughKey, '7')
+api.rebuildForRoughness()
+if (api.fieldRange() === rangeBefore) ok('sliding back to the default stop reproduces the shipped terrain exactly')
+else fail('the default stop no longer reproduces the terrain it started from ('
+  + api.fieldRange() + ' != ' + rangeBefore + ')')
 
 /* The frame function's own source may not touch the expensive trio. */
 const frameSrc = api.frameSource()

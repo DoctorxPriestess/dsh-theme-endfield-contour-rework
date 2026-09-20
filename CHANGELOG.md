@@ -4,6 +4,39 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.1.0 — terrain roughness slider
+
+### 地形粗糙度：一个 12 档滑块，低=平原、高=极端山地
+
+The contour sheet now has one more setting, and it is the only one that changes the **shape** of
+the landscape rather than how it is drawn:
+
+- `client.js` gains `CONTOUR_ROUGHNESS_BASE` / `_PERSIST` / `_OCTAVES` (12 stops each) plus
+  `contourTerrainProfile()` and `contourOctaveLadder()`. The fBm field generator reads the stop
+  instead of fixed constants, so roughness drives the largest noise cell (960 → 250 px), the
+  octave-to-octave amplitude ratio (0.24 → 0.62) and the octave budget (2 → 6).
+- The default stop is index `7`, and its three entries **are** the shipped constants
+  (`CONTOUR_BASE_CELL` / `CONTOUR_PERSIST` / `CONTOUR_OCTAVES`), so existing installs keep the map
+  they already have. `test/contour-roughness.test.js` asserts that equality, so it cannot drift.
+- The setting row is a real `<input type="range">` (12 detents), not twelve buttons: the same
+  states plus drag and keyboard operation, with `aria-label`/`aria-valuetext` naming the stop.
+  It writes `contour-roughness` (index) and follows the contour layer's on/off like its siblings.
+- Changing it **regenerates the terrain from the same seed**, so the map is re-tuned rather than
+  re-rolled (the same determinism rule resize already followed), and the rebuild is coalesced —
+  a drag crosses several detents and only the last one is built.
+- The octave ladder is now truncated at the permutation table's period ceiling instead of clamping
+  individual octaves: a clamped octave re-adds a scale that is already present instead of adding a
+  finer one. At the shipped stop (and every size the perf suite covers) the ladder is unchanged.
+
+Why the top end is not "as rough as possible": rendering all twelve stops and comparing them showed
+the sheet turns into uniform speckle once the finest octave carries more than roughly a tenth of
+the amplitude at a near-grid cell size. The tables therefore stop at 0.62 persistence, and the top
+stops keep the base cell high enough for the ladder to retain its fifth octave, which spreads the
+fine energy instead of concentrating it. `test/contour-roughness.test.js` sweeps all twelve stops
+(field → marching squares) and asserts: every stop draws contours, ring count and total stroke
+length grow at **every** detent, no stop draws debris, and the finest-octave share stays under 12%
+on five different texture sizes.
+
 ## 1.0.0 — fork release
 
 Based on upstream `main` (the rolling `refs/heads/main` tarball, fetched 2026-09-10).

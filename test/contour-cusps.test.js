@@ -91,14 +91,20 @@ function grabOne(name) {
    track client.js; a missing one throws here instead of failing mysteriously. */
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache']
+  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourOctaveLadder']
   .map(grab).join('\n')
 const nums = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
-  'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX']
+  'CONTOUR_PERSIST', 'CONTOUR_PERIOD_MAX', 'CONTOUR_MIN_LEN', 'CONTOUR_MIN_RING_BOX',
+  'CONTOUR_ROUGHNESS_DEFAULT']
   .map(grabNum).join('\n')
-const lines = ['CONTOUR_DENSITIES'].map(grabLine).join('\n')
+const lines = ['CONTOUR_DENSITIES', 'CONTOUR_ROUGHNESS_BASE', 'CONTOUR_ROUGHNESS_PERSIST',
+  'CONTOUR_ROUGHNESS_OCTAVES'].map(grabLine).join('\n')
 const exprs = ['CONTOUR_GRAD_X', 'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN',
   'CONTOUR_KEEP_RING', 'CONTOUR_LEVEL_MARGIN'].map(grabOne).join('\n')
+/* The shipped roughness stop, read from client.js rather than typed here: these
+   geometry checks must always measure the terrain the theme actually ships. */
+const ROUGH = (src.match(/const CONTOUR_ROUGHNESS_DEFAULT = ([0-9]+)/) || [])[1]
+if (ROUGH === undefined) throw new Error('client.js declares no CONTOUR_ROUGHNESS_DEFAULT')
 
 let api
 try {
@@ -116,6 +122,10 @@ let contourSeed = contourReseed(0x5eed4242)
 // Density switch stub: the sweep mutates this to re-extract at another density.
 let contourDensityIdx=1
 const contourDensityIndex=()=>contourDensityIdx
+// Roughness switch stub: the shipped default stop, read out of client.js so a
+// retuned default cannot silently move these geometry checks onto another terrain.
+let contourRoughnessIdx=${ROUGH}
+const contourRoughnessIndex=()=>contourRoughnessIdx
 const isDarkScheme=()=>false
 const isWulingPalette=()=>false
 
