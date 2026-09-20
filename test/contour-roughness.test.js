@@ -339,6 +339,40 @@ else fail('悬崖 does not grow monotonically: ' + cliffBad.join('; '))
 if (T.cliff[stops - 1] === Math.max.apply(null, T.cliff)) pass('the last stop has the strongest cliffs (' + T.cliff[stops - 1] + ')')
 else fail('the strongest cliffs are at stop ' + (T.cliff.indexOf(Math.max.apply(null, T.cliff)) + 1) + ', not the last')
 
+/* ---------- 4b. the landform growth is CONVEX: it accelerates up the ladder ----------
+   The requirement is "整体抬升，且越来越快": the plains/hills stops keep their
+   landform budget nearly unchanged while each step near the top buys more than the
+   one below it. That is a property of the table SHAPE, so it is asserted on the
+   increments (second differences >= 0) rather than on any single value — a table
+   that grew by a constant amount per stop would be linear and would fail here.
+   Measured gains in feature coverage over 1.3.1 are 0 / 0 / +2.4 / +2.7 / +5.7 /
+   +8.4 / +17.4 points at stops 6-12, which is this convexity seen on the field.
+   RELIEF is deliberately NOT in the list: its stop-10 value is pinned by the
+   roughness-dip fix (it must not fall back below stop 9), which is a different
+   constraint from the growth curve, and it is asserted monotone just below. */
+const GROWTH_TABLES = ['cliff', 'cliffBand', 'blobs', 'blobScale', 'ridge', 'valley', 'shape']
+/* Start where the growth starts: stops 1-5 are the plains/hills range, whose
+   landform budget is deliberately left alone (and is mostly the water plane). */
+const GROWTH_FROM = 5
+let concave = []
+for (const k of GROWTH_TABLES) {
+  const row = T[k]
+  let firstNZ = 0
+  while (firstNZ < stops && row[firstNZ] === 0) firstNZ++
+  /* Skip the ENTRY step (0 -> first value) for a table that starts switched off
+     (cliffs are off below stop 8): that jump is the feature being turned on, not a
+     growth step to be compared against the one below it. */
+  const from = Math.max(GROWTH_FROM + 2, firstNZ + 2)
+  for (let i = from; i < stops; i++) {
+    const d0 = row[i - 1] - row[i - 2]
+    const d1 = row[i] - row[i - 1]
+    if (d1 < d0 - 1e-9) concave.push(k + ': stop ' + (i + 1) + ' (step ' + d1.toFixed(3) + ' < ' + d0.toFixed(3) + ')')
+  }
+}
+if (concave.length === 0) {
+  pass('the landform growth accelerates up the ladder (convex increments on ' + GROWTH_TABLES.length + ' tables from stop ' + (GROWTH_FROM + 1) + ')')
+} else fail('the growth curve is not convex: ' + concave.slice(0, 6).join('; '))
+
 /* 尖锐山峰/深谷 and the water pattern: shape asserted, not values. */
 let reliefBad = []
 for (let i = 1; i < stops; i++) if (!(T.relief[i] >= T.relief[i - 1])) reliefBad.push(i + 1)
@@ -433,6 +467,22 @@ if (overCap.length === 0) {
 const tooPlain = measured.filter((m) => m.feat < 0.02)
 if (tooPlain.length === 0) pass('and every stop really carries landforms (least ' + pct(Math.min.apply(null, measured.map((m) => m.feat))) + ')')
 else fail('stops with (almost) no feature terrain — the landform layer is off there: ' + tooPlain.map((m) => m.stop + 1).join(', '))
+
+/* The TOP stop has a stated target of its own: feature terrain must cover 55-65%
+   of the sheet there (raised from the 44.0% of 1.3.1), so the roughest detent is
+   dominated by cliffs and primitives while still leaving a third of the sheet as
+   base terrain. Asserted on the MEASURED field: it is the number the requirement
+   is stated in, and no table can be trusted to deliver it (see the stop-10 dip). */
+const TOP_COVERAGE_MIN = 0.55
+const TOP_COVERAGE_MAX = 0.65
+const topFeat = measured[stops - 1].feat
+if (topFeat >= TOP_COVERAGE_MIN && topFeat <= TOP_COVERAGE_MAX) {
+  pass('the top stop carries the stated share of feature terrain (' + pct(topFeat) + ', window '
+    + pct(TOP_COVERAGE_MIN) + '-' + pct(TOP_COVERAGE_MAX) + ', up from 44.0% in 1.3.1)')
+} else {
+  fail('the top stop covers ' + pct(topFeat) + ' of the sheet with feature terrain, outside the stated '
+    + pct(TOP_COVERAGE_MIN) + '-' + pct(TOP_COVERAGE_MAX) + ' window')
+}
 
 /* 高原 as MEASURED on the field: it has to shrink from stop 6 to stop 9 and be
    absent from stop 10 on, not merely be smaller in the table. */

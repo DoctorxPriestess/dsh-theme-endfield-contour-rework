@@ -1126,14 +1126,14 @@ function apply(ctx) {
     /* Slope shape: the exponent of u^k follows a low frequency mask, so the same
        stop carries 凹坡 (k > 1, lines bunch at the top) in one region and 凸坡
        (k < 1, lines bunch at the bottom) in another. 均坡 is what remains. */
-    const CONTOUR_TERRAIN_SHAPE = [0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30]
+    const CONTOUR_TERRAIN_SHAPE = [0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.21, 0.24, 0.27, 0.31, 0.35, 0.39]
     /* 山脊线 / 分水岭: how much ridged noise (1 - |n|) is added. Kept a MINORITY
        of the range: ridge noise multiplies the number of local maxima, and the
        measured legibility ceiling (level lines no finer than the 10px sampling
        grid) is set by however many extrema the terrain has per tile. */
-    const CONTOUR_TERRAIN_RIDGE = [0, 0.01, 0.02, 0.03, 0.05, 0.07, 0.09, 0.11, 0.14, 0.16, 0.18, 0.20]
+    const CONTOUR_TERRAIN_RIDGE = [0, 0.01, 0.02, 0.03, 0.05, 0.07, 0.09, 0.12, 0.15, 0.19, 0.23, 0.28]
     /* 山谷线 / 冲沟: how deep the troughs cut along those zero crossings. */
-    const CONTOUR_TERRAIN_VALLEY = [0, 0, 0.01, 0.02, 0.02, 0.03, 0.04, 0.06, 0.07, 0.09, 0.11, 0.13]
+    const CONTOUR_TERRAIN_VALLEY = [0, 0, 0.01, 0.02, 0.02, 0.03, 0.04, 0.06, 0.08, 0.11, 0.15, 0.19]
     /* 高原: the staircase strength inside PLATEAU BANDS. A landform is a REGION,
        not a filter over the whole sheet: applying the staircase everywhere turned
        the map into a quilt of mesas (measured: 73% of the sheet flat at stop 6,
@@ -1146,7 +1146,7 @@ function apply(ctx) {
        A cliff is the OTHER staircase shape: many steps with thin ramps, so the
        level lines bunch into a bundle up the face, where a plateau wants few steps
        with wide treads. Ramps up to the maximum at stop 12. */
-    const CONTOUR_TERRAIN_CLIFF = [0, 0, 0, 0, 0, 0, 0, 0.10, 0.22, 0.40, 0.62, 0.90]
+    const CONTOUR_TERRAIN_CLIFF = [0, 0, 0, 0, 0, 0, 0, 0.10, 0.22, 0.40, 0.64, 0.92]
     /* Band width, per stop: the COVERAGE has to grow towards the top as well, or
        "the cliffs are strongest at 12" would only be true of their steepness.
        Measured, not guessed: |Perlin| is heavily concentrated near zero (|n| < 0.3
@@ -1156,7 +1156,7 @@ function apply(ctx) {
        inside the <75% ceiling, with natural terrain left in the gaps. */
     const CONTOUR_PLATEAU_BAND = 0.13
     const CONTOUR_CLIFF_BAND = 0.11
-    const CONTOUR_TERRAIN_CLIFFBAND = [0, 0, 0, 0, 0, 0, 0, 0.09, 0.10, 0.12, 0.14, 0.17]
+    const CONTOUR_TERRAIN_CLIFFBAND = [0, 0, 0, 0, 0, 0, 0, 0.09, 0.11, 0.14, 0.18, 0.25]
     const CONTOUR_CLIFF_STEPS_BASE = 3
     const CONTOUR_CLIFF_STEPS_SPAN = 5
     const CONTOUR_CLIFF_SOFT_BASE = 0.22
@@ -1165,15 +1165,15 @@ function apply(ctx) {
        sharp ends on a gentle middle slope -- high mountains at the top stops.
        Capped well below 1: the warp's own middle flattens as 1 - r, so a large r
        would buy sharp summits by turning the mid-slope into yet another plateau. */
-    const CONTOUR_TERRAIN_RELIEF = [0, 0, 0, 0, 0, 0, 0.03, 0.07, 0.14, 0.34, 0.36, 0.50]
+    const CONTOUR_TERRAIN_RELIEF = [0, 0, 0, 0, 0, 0, 0.03, 0.08, 0.18, 0.34, 0.46, 0.58]
     /* Water level as a share of the range, NEGATIVE = no water at this stop. The
        plains and basins keep lakes and rivers; the high mountains keep cirque
        lakes and a fjord; the mid stops stay dry so the contour structure reads. */
     const CONTOUR_TERRAIN_WATER = [0.34, 0.28, 0.22, 0.18, 0.12, 0.08, -1, -1, -1, -1, 0.16, 0.22]
     /* Blob density: the share of the 4x4 feature slots that spawn a primitive. */
-    const CONTOUR_TERRAIN_BLOBS = [0.30, 0.34, 0.38, 0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.58, 0.68, 0.78]
+    const CONTOUR_TERRAIN_BLOBS = [0.30, 0.34, 0.38, 0.42, 0.44, 0.47, 0.50, 0.53, 0.58, 0.66, 0.80, 0.94]
     /* How large a primitive is, as a share of its slot. */
-    const CONTOUR_TERRAIN_BLOBSCALE = [0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95, 0.95, 1.00, 1.05, 1.10, 1.15]
+    const CONTOUR_TERRAIN_BLOBSCALE = [0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95, 0.98, 1.02, 1.08, 1.16, 1.26]
     /* Feature palettes per terrain class. Ids repeated to weight them. */
     const CONTOUR_PALETTE_0 = [3, 3, 9, 9, 6, 6, 7, 8]
     const CONTOUR_PALETTE_1 = [3, 3, 11, 11, 10, 9, 6, 7]

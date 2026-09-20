@@ -73,7 +73,7 @@ Everything lives in **Settings › Endfield Theme Settings**:
 Behaviour worth knowing:
 
 - scroll speed is in **pixels per second** and advances with the real frame interval, so it looks the same at 60 / 120 / 144 / 240 Hz;
-- changing direction or speed only updates two cached numbers; changing density re-extracts contours from the **same** terrain; changing terrain roughness regenerates the terrain from the **same seed** (low stops are flat plains, high stops are rugged high mountains; plateaus appear at stop 6 and shrink to none by stop 10, cliffs start at stop 8 and are heaviest at stop 12, and no landform layer covers more than 75% of the sheet);
+- changing direction or speed only updates two cached numbers; changing density re-extracts contours from the **same** terrain; changing terrain roughness regenerates the terrain from the **same seed** (low stops are flat plains, high stops are rugged high mountains; plateaus appear at stop 6 and shrink to none by stop 10, cliffs start at stop 8 and are heaviest at stop 12; landform strengths grow along a convex curve so the steps near the top buy the most, and stop 12 covers about 61% of the sheet while no landform layer ever passes the 75% ceiling);
 - a new random terrain is generated each time the contour background is switched on, and the same seed and size always reproduce the same terrain within a session;
 - `prefers-reduced-motion` is read live: with it on, the pattern renders statically.
 

@@ -4,6 +4,55 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.4.0 — the whole ladder rougher, accelerating: stop 12 now 61% feature terrain
+
+### 需求：12 档的陡峭特征地形占比 55%–65%，整条阶梯按越来越快的曲线抬升
+
+The top stop carried 44.0% feature terrain; the target is 55–65%, reached by raising the whole ladder
+along a **convex** curve — the plains/hills stops keep their landform budget, and each step near the
+top buys more than the one below it.
+
+- Seven growth tables (cliff, cliff band, primitive density, primitive scale, ridge, valley, slope
+  form) are now convex from stop 6 on. Measured gain in feature coverage over 1.3.1, stops 6 → 12:
+  **0 / 0 / +2.4 / +2.7 / +5.7 / +8.4 / +17.4** points.
+- Stop 12: feature terrain 44.0% → **61.4%**, cliffs 26.7% → **42.3%**; stops 1–5 (plains, hills,
+  lakes) measure unchanged.
+- Still under the 75% ceiling at every stop, plateaus still fall to nothing by stop 10, cliff share
+  still rises at every later stop, and the high-mountain tail still carries increasing ink
+  (467k → 473k → 480k → 491k).
+
+### 量出来的取舍：占比靠带宽买，陡峭度反而会掉
+
+Feature coverage is bought almost entirely with the cliff **band width**, because cliff *strength* is
+already saturated at the top stops (0.90 → 0.98 changes coverage by 0.1 points at an unchanged band).
+Widening the band spreads the same staircase over more area, so per-cell steepness and total ink fall
+slightly instead of rising. Measured at stop 12:
+
+| candidate | band | coverage | cliff | grad RMS | steep cells | stroke |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1.3.1 | 0.17 | 44.0% | 26.7% | .0365 | 31.5% | 507k |
+| narrow | 0.20 | 55.5% | 33.0% | .0361 | 30.2% | 492k |
+| **shipped** | **0.25** | **61.4%** | **42.3%** | .0366 | 30.8% | 491k |
+| wide | 0.26 | 63.2% | 43.6% | .0370 | 30.9% | 495k |
+| wider | 0.27 | 67.5% | 45.9% | .0359 | 29.2% | 471k |
+
+The shipped point is mid-window (61.4%) with steepness essentially unchanged from before (~31%); if a
+future request wants every cell steeper rather than more of the sheet covered, the lever is the
+relief / ridge / valley tails, not the band width. Recorded in the engineering notes.
+
+### 测试
+
+Two new assertions, both mutation-verified:
+
+- **the growth is convex** — increments must be non-decreasing across the seven growth tables from
+  stop 6 (the "0 → first value" entry step is skipped, since cliffs switch on at stop 8); a linear
+  ladder fails. Replacing the cliff row with a concave one fails with
+  `cliff: stop 10 (step 0.220 < 0.300)`.
+- **the top stop's measured coverage is inside 55–65%** — asserted on the field, not the tables;
+  restoring the old band fails with `the top stop covers 48.5% … outside the stated 55.0%-65.0% window`.
+
+Full CI 29/29 green.
+
 ## 1.3.1 — stop 10 was a roughness dip: the slider went UP and the sheet went calmer
 
 ### 修掉一个逐表断言抓不到的缺陷
