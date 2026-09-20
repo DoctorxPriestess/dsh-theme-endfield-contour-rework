@@ -474,6 +474,37 @@ if (cliffAtLast >= cliffMax * 0.999 && cliffAtLast > 0.05) {
   pass('the last stop carries the most cliff terrain (' + pct(cliffAtLast) + ' of the sheet)')
 } else fail('cliffs peak at ' + pct(cliffMax) + ' but the last stop has ' + pct(cliffAtLast))
 
+/* The high-mountain tail has to keep escalating in INK. This is the assertion the
+   file was missing when stop 10 shipped as the calmest of stops 8-12: every table
+   looked right (cliffs grew, plateaus were gone) yet that stop carried 431k px of
+   stroke against 471k/480k on the stops either side of it, so dragging the slider
+   up made the sheet visibly calmer — a mid-ladder local minimum, which the eye
+   reads as the slider being broken. The tabulated strengths cannot catch it: it
+   took a basin-biased macro layer (-0.16 where the stops above it ran +0.20/+0.26),
+   which no per-table range or monotonicity check can see. So it is asserted on the
+   measured field, as an interior stop that may not sit more than 5% below the
+   mean of its two neighbours. The 8 -> 9 step is deliberately exempt: that is the
+   mid-to-high-mountain transition, where the design trades mountain COUNT for
+   landform drama (cells grow from 280px to 600px), measured at 489k -> 471k px. */
+const tailInk = measured.map((m) => m.total)
+let inkDips = []
+for (let i = 9; i <= stops - 2; i++) {
+  const neighbours = (tailInk[i - 1] + tailInk[i + 1]) / 2
+  if (tailInk[i] < neighbours * 0.95) {
+    inkDips.push('stop ' + (i + 1) + ' ' + Math.round(tailInk[i] / 1000) + 'k vs '
+      + Math.round(neighbours / 1000) + 'k around it ('
+      + Math.round(100 * (1 - tailInk[i] / neighbours)) + '% calmer)')
+  }
+}
+if (inkDips.length === 0) {
+  pass('no stop in the high-mountain tail is a roughness dip (stops 9-12: '
+    + tailInk.slice(8).map((t) => Math.round(t / 1000) + 'k').join(' -> ') + ')')
+} else fail('the sheet gets CALMER at a mid-ladder stop: ' + inkDips.join('; '))
+const tailMax = Math.max.apply(null, tailInk.slice(8))
+if (tailInk[stops - 1] >= tailMax * 0.999) {
+  pass('the top stop carries the most ink in the tail (' + Math.round(tailInk[stops - 1] / 1000) + 'k px)')
+} else fail('the tail peaks at stop ' + (tailInk.indexOf(tailMax) + 1) + ' (' + Math.round(tailMax / 1000) + 'k), not the last one')
+
 /* Water is an EXACT plane: every clamped cell carries the identical height. */
 const wet = measured.filter((m) => m.waterCells > 0)
 if (wet.length === 0) fail('no stop produced any water cells — the water plane never fired')

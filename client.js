@@ -1122,7 +1122,7 @@ function apply(ctx) {
     /* Broad elevation trend (a very low frequency layer). POSITIVE lifts the
        middle of the tile into a plateau/massif, NEGATIVE carves a basin ringed by
        higher ground -- which is what makes a 盆地 read as one. */
-    const CONTOUR_TERRAIN_MACRO = [0.16, 0.12, 0.14, 0.16, 0.18, 0.22, 0.24, 0.26, -0.20, -0.16, 0.20, 0.26]
+    const CONTOUR_TERRAIN_MACRO = [0.16, 0.12, 0.14, 0.16, 0.18, 0.22, 0.24, 0.26, -0.20, 0.00, 0.20, 0.26]
     /* Slope shape: the exponent of u^k follows a low frequency mask, so the same
        stop carries 凹坡 (k > 1, lines bunch at the top) in one region and 凸坡
        (k < 1, lines bunch at the bottom) in another. 均坡 is what remains. */
@@ -1165,7 +1165,7 @@ function apply(ctx) {
        sharp ends on a gentle middle slope -- high mountains at the top stops.
        Capped well below 1: the warp's own middle flattens as 1 - r, so a large r
        would buy sharp summits by turning the mid-slope into yet another plateau. */
-    const CONTOUR_TERRAIN_RELIEF = [0, 0, 0, 0, 0, 0, 0.03, 0.07, 0.14, 0.24, 0.36, 0.50]
+    const CONTOUR_TERRAIN_RELIEF = [0, 0, 0, 0, 0, 0, 0.03, 0.07, 0.14, 0.34, 0.36, 0.50]
     /* Water level as a share of the range, NEGATIVE = no water at this stop. The
        plains and basins keep lakes and rivers; the high mountains keep cirque
        lakes and a fjord; the mid stops stay dry so the contour structure reads. */

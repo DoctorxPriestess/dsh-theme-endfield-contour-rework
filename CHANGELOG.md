@@ -4,6 +4,37 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.3.1 — stop 10 was a roughness dip: the slider went UP and the sheet went calmer
+
+### 修掉一个逐表断言抓不到的缺陷
+
+Every parameter table was in order after 1.3.0 — cliffs growing stop by stop, plateaus gone from
+stop 10, every strength within range, the whole suite green. Rendering the ladder side by side showed
+it anyway: **stop 10 carried 429k px of stroke where the stops around it carried 467k and 477k**, so
+dragging the slider up made the sheet visibly *calmer*. A mid-ladder local minimum reads to the user
+as the slider being broken.
+
+Cause: stop 10 was the only high-mountain stop with a **basin bias** — the macro elevation table ran
+−0.20 / −0.16 at stops 9 and 10 (lowland) against +0.20 / +0.26 at stops 11 and 12 (mountain), so a
+stop labelled high mountain sagged into lowland. No per-table range check and no monotonicity check can
+see that by construction; it takes measuring the **field**.
+
+- 第 10 档宏观高程 −0.16 → **0.00**（高山段不该带盆地偏向）、起伏尾部强度 0.24 → **0.34**。
+- Measured: 429k → **473k** px of stroke, landing between stop 9 (467k) and stop 11 (477k); steep cells
+  26.7% → 31.2%; cliffs 19.0% → 20.0%, still below stop 11's 20.6% so cliff monotonicity holds.
+- All other stops measure **byte-for-byte unchanged**.
+- New assertion, checked against the measured field rather than the tables: **no stop in the
+  high-mountain tail (9–12) may carry less than 95% of the mean ink of its two neighbours**, and the
+  last stop must be the tail's maximum. Mutation-verified — restoring the old values makes it fail with
+  `stop 10 429k vs 472k around it (9% calmer)`. The 8 → 9 step stays exempt on purpose: that is the
+  mid-to-high-mountain transition, where the design trades mountain count for landform drama
+  (486k → 467k, cells growing from 280px to 600px).
+
+Also recorded in the engineering notes: gradient-RMS roughness is normalised by the value range, so it
+**cannot** be compared across stops with different water — clamping water to a plane cuts the range's
+low tail and inflates the metric (stop 10 measured .0325, and .0383 with an added water plane at
+unchanged relief). Cross-stop roughness comparisons use ink instead.
+
 ## 1.3.0 — landform layer: terrain types, plateaus, cliffs and a feature catalogue
 
 ### 地貌层：每个档位是一种地形 + 一组解析式特征地形
