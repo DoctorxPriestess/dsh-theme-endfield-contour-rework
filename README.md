@@ -1,5 +1,4 @@
 # dsh-theme-endfield-contour-rework
-[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/doctorxpriestess/dsh-cache-safe-tool-result)
 
 A fork of `dsh-theme-endfield` with a reworked contour animation engine, for DeepSeek Harness (DSH) Web.
 
