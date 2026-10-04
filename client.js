@@ -199,6 +199,7 @@ function apply(ctx) {
        status 'ready'. Both are subscribed; a late transition on either can
        promote it to active. */
     const prefsScopes = []
+    const prefsScopeNs = [] // namespace each bound scope was bound under (diagnostics)
     let prefsScope = null // the active bound ctx.settingsScope scope, or null while absent/not ready
     /** Promote the first scope the mirror serves (`status:'ready'`); keep the
         current active scope while it stays ready so a ready pair never flaps. */
@@ -247,19 +248,29 @@ function apply(ctx) {
       if (typeof svc.get === 'function') return { bind: ({ namespace }) => svc.get(namespace) }
       return undefined
     }
+    /* Last binder probe's findings, surfaced by prefsDiagnostics(): what the
+       context actually answered for each service face, so the panel can show
+       WHY no transport bound without opening devtools. */
+    let prefsBinderProbe = 'never probed'
     const getSettingsScopeBinder = () => {
+      /* IMPORTANT: read services through Context#get ONLY. A property read
+         (ctx.configForms) goes through cordis's injection-enforcing proxy and
+         THROWS "cannot get property X without inject" for any service this
+         plugin did not declare in `inject` — even when the service EXISTS and
+         is active. Context#get is the injection-free lookup: provide() marks
+         the key on the ROOT isolate map, so it resolves tree-wide and returns
+         undefined only while the service is genuinely absent. */
+      if (typeof ctx.get !== 'function') { prefsBinderProbe = 'ctx.get missing'; return undefined }
       try {
-        const cf = ctx.configForms !== undefined && ctx.configForms !== null
-          ? ctx.configForms
-          : ctx.get('configForms')
-        const adapted = asPrefsBinder(cf)
-        if (adapted !== undefined) return adapted
-      } catch (e) { /* service not mounted (0.1.x builds) — fall through */ }
+        const adapted = asPrefsBinder(ctx.get('configForms'))
+        if (adapted !== undefined) { prefsBinderProbe = 'bound configForms'; return adapted }
+      } catch (e) { prefsBinderProbe = 'cf throw: ' + String(e && e.message || e).slice(0, 60) }
       try {
-        if (ctx.settingsScope !== undefined && ctx.settingsScope !== null
-          && typeof ctx.settingsScope.bind === 'function') return ctx.settingsScope
-      } catch (e) { /* property may be a getter that throws when not available */ }
-      try { return asPrefsBinder(ctx.get('settingsScope')) } catch (e) { return undefined }
+        const adapted = asPrefsBinder(ctx.get('settingsScope'))
+        if (adapted !== undefined) { prefsBinderProbe = 'bound settingsScope'; return adapted }
+      } catch (e) { prefsBinderProbe = 'ss throw: ' + String(e && e.message || e).slice(0, 60) }
+      if (prefsBinderProbe === 'never probed') prefsBinderProbe = 'cf=absent ss=absent'
+      return undefined
     }
     const prefsGetValue = () => {
       // A schema-accepted section from the transport, else in-memory defaults
@@ -454,6 +465,75 @@ function apply(ctx) {
       prefsWritten.set(field, prefsLocal[field])
       prefsCommit(field, prefsLocal[field])
     }
+    /* One-line transport diagnosis, surfaced as a muted row at the top of the
+       theme's settings panel: which service face bound, how many scopes, each
+       bound scope's mirror status, and how many edits are still held. Reads
+       live state at render time — no devtools needed to see why a write did
+       not persist. */
+    let prefsAudit = null // last host/mirror audit: why nothing is ready yet
+    let prefsAuditBusy = false
+    let prefsDiagBump = null // panel re-render hook, wired by the settings render
+    /* Ask BOTH layers what they serve: the browser mirror's held view, and —
+       decisively — a FRESH describe straight off the remote transport (which
+       bypasses the mirror entirely). That single difference separates "the host
+       does not serve our namespace" from "the mirror is holding a stale view
+       fetched before the namespace appeared". */
+    const prefsRunAudit = () => {
+      if (prefsAuditBusy) return
+      prefsAuditBusy = true
+      const out = { mirror: 'n/a', mirrorNs: 'n/a', fresh: 'pending', scopes: [] }
+      const names = (view) => (view && Array.isArray(view.namespaces) ? view.namespaces.map((v) => v.ns) : null)
+      const mark = (list) => (list === null ? 'no-view'
+        : (list.indexOf(PREFS_NS_ENTRY) >= 0 ? 'entry✓' : 'entry✗') + (list.indexOf(PREFS_NS) >= 0 ? ' legacy✓' : ' legacy✗'))
+      try {
+        const cf = typeof ctx.get === 'function' ? ctx.get('configForms') : undefined
+        if (cf && typeof cf.describe === 'function') {
+          const snap = cf.describe().getSnapshot()
+          out.mirror = String(snap.status) + (snap.error ? '(' + String(snap.error).slice(0, 30) + ')' : '')
+          out.mirrorNs = mark(names(snap.view))
+        } else { out.mirror = 'no configForms' }
+      } catch (e) { out.mirror = 'throw:' + String(e && e.message).slice(0, 30) }
+      out.scopes = prefsScopes.map((s, i) => {
+        let v = null
+        try { v = s.getSnapshot() } catch (e) { v = null }
+        return (prefsScopeNs[i] || '?') + '=' + (v ? v.status : '?')
+      })
+      prefsAudit = out
+      let remote = null
+      try { remote = typeof ctx.get === 'function' ? ctx.get('remote') : undefined } catch (e) { remote = undefined }
+      if (remote && remote.settings && typeof remote.settings.describe === 'function') {
+        Promise.resolve(remote.settings.describe()).then((r) => {
+          out.fresh = (r && r.ok) ? mark(names(r.value)) : ('fail:' + String(r && r.error && r.error.message || 'unknown').slice(0, 40))
+          prefsAudit = Object.assign({}, out)
+          prefsAuditBusy = false
+          if (typeof prefsDiagBump === 'function') { try { prefsDiagBump() } catch (e) { /* render-less env */ } }
+        }, (e) => {
+          out.fresh = 'throw:' + String(e && e.message || e).slice(0, 40)
+          prefsAudit = Object.assign({}, out)
+          prefsAuditBusy = false
+          if (typeof prefsDiagBump === 'function') { try { prefsDiagBump() } catch (e) { /* render-less env */ } }
+        })
+        return
+      }
+      out.fresh = 'no remote'
+      prefsAuditBusy = false
+    }
+    const prefsDiagnostics = () => {
+      let snap = null
+      try { snap = prefsScope ? prefsScope.getSnapshot() : null } catch (e) { snap = null }
+      const base = 'face=' + (prefsScopes.length > 0 ? 'configForms/settingsScope' : 'none')
+        + ' scopes=' + prefsScopes.length
+        + ' status=' + (snap ? snap.status : 'unbound')
+        + ' mode=' + (snap ? snap.mode : '?')
+        + ' writable=' + (snap ? String(snap.writable) : '?')
+        + ' dirty=' + prefsDirty.size
+      if (prefsScopes.length === 0) return base + ' | ' + prefsBinderProbe
+      if (snap !== null) return base
+      prefsRunAudit() // opening the panel refreshes the audit even if timers are idle
+      const a = prefsAudit
+      return base + ' | mirror=' + (a ? a.mirror : '?') + ' ns=' + (a ? a.mirrorNs : '?')
+        + ' fresh=' + (a ? a.fresh : '?') + ' scopes=[' + (a ? a.scopes.join(' ') : '?') + ']'
+    }
     /* Repeatedly try to obtain the settingsScope binder until it (and its mirror)
        are actually available. DSH web mounts plugin rows concurrently, so the
        settings scope / shared describe mirror can legitimately settle AFTER this
@@ -492,23 +572,15 @@ function apply(ctx) {
         prefsEmit()
       }
     }
-    const rebindPrefs = (attempt) => {
-      if (prefsScopes.length > 0) return
-      if (attempt > 40) { dbg('gave up binding settingsScope after retries; staying in-memory'); return }
-      const binder = getSettingsScopeBinder()
-      if (binder === undefined || binder === null || typeof binder.bind !== 'function') {
-        // Retry until a reasonable ceiling; mirrors the theme's own sessions/late-
-        // service retry used elsewhere in this file.
-        if (typeof setTimeout === 'function') {
-          if (attempt % 8 === 0) dbg('waiting for settingsScope binder (attempt', attempt, ')')
-          prefsBindTimer = setTimeout(() => rebindPrefs(attempt + 1), 250)
-        }
-        return
-      }
-      // Bind EVERY candidate identity. On 0.2.0+ only the profile-entry-id
-      // namespace is served (the legacy one answers 'unavailable'); on 0.1.x it
-      // is the reverse. A mirror that rejects an unknown namespace at bind time
-      // just yields no scope for that candidate.
+    /* Bind both candidate identities through one acquired binder. Idempotent:
+       the first binder that yields a scope wins (inject callback, retry loop
+       and the legacy probe all funnel here). */
+    const bindPrefsBinder = (binder) => {
+      if (prefsScopes.length > 0) return true
+      if (binder === undefined || binder === null || typeof binder.bind !== 'function') return false
+      // On 0.2.0+ only the profile-entry-id namespace is served (the legacy one
+      // answers 'unavailable'); on 0.1.x it is the reverse. A mirror that
+      // rejects an unknown namespace at bind time just yields no scope.
       for (const ns of PREFS_NS_CANDIDATES) {
         let scope = null
         try {
@@ -519,12 +591,10 @@ function apply(ctx) {
         }
         if (scope === null) continue
         prefsScopes.push(scope)
+        prefsScopeNs.push(ns)
         if (typeof scope.subscribe === 'function') scope.subscribe(() => prefsOnScopeEvent())
       }
-      if (prefsScopes.length === 0) {
-        if (typeof setTimeout === 'function') prefsBindTimer = setTimeout(() => rebindPrefs(attempt + 1), 250)
-        return
-      }
+      if (prefsScopes.length === 0) return false
       prefsRefreshActive()
       const initial = prefsScope && prefsScope.getSnapshot ? prefsScope.getSnapshot() : null
       if (initial) dbg('bound', prefsScopes.length, 'scope(s); active status=', initial.status, 'writable=', initial.writable, 'mode=', initial.mode, 'valueKeys=', initial.value ? Object.keys(initial.value).length : 0)
@@ -536,7 +606,84 @@ function apply(ctx) {
       // only genuinely user-changed fields (those prefsSet recorded as dirty) that
       // now differ from a freshly-fetched, durably-served host section.
       prefsReplayDirty()
+      // Bound but not yet served: keep converging (see prefsScheduleNudge).
+      if (prefsScope === null) prefsScheduleNudge()
+      return true
     }
+    /* Convergence loop for "service bound, namespace not served (yet)".
+       The browser mirror fetches the Host's describe view on mount and then only
+       on invalidation events, so a view taken before the Host had registered
+       our namespace can stay stale indefinitely — the scopes then report
+       'loading'/'unavailable' forever and every edit is held. Two cheap moves
+       fix that: ask the mirror to re-read (its own public load()), and audit
+       what the Host really serves straight off the remote transport.
+       Cadence: 1s while it looks like a boot-time race, then a slow 15s poll so
+       a genuinely unserved namespace costs almost nothing. Stops as soon as a
+       scope goes ready. */
+    let prefsNudgeTimer = null
+    let prefsNudgeCount = 0
+    const prefsStopNudge = () => {
+      if (prefsNudgeTimer !== null && typeof clearTimeout === 'function') clearTimeout(prefsNudgeTimer)
+      prefsNudgeTimer = null
+    }
+    const prefsScheduleNudge = () => {
+      if (prefsScopes.length === 0 || prefsScope !== null) { prefsStopNudge(); return }
+      if (prefsNudgeTimer !== null || typeof setTimeout !== 'function') return
+      const tick = () => {
+        prefsNudgeTimer = null
+        prefsNudgeCount += 1
+        prefsRefreshActive()
+        if (prefsScope !== null) { prefsStopNudge(); prefsEmit(); return }
+        prefsRunAudit()
+        try {
+          const cf = typeof ctx.get === 'function' ? ctx.get('configForms') : undefined
+          if (cf && typeof cf.describe === 'function') {
+            const mirror = cf.describe()
+            if (mirror && typeof mirror.load === 'function') mirror.load()
+          }
+        } catch (e) { /* nudge is best-effort */ }
+        const wait = prefsNudgeCount < 10 ? 1000 : 15000
+        prefsNudgeTimer = setTimeout(tick, wait)
+      }
+      prefsNudgeTimer = setTimeout(tick, 1000)
+    }
+    const rebindPrefs = (attempt) => {
+      if (prefsScopes.length > 0) return
+      if (bindPrefsBinder(getSettingsScopeBinder())) return
+      if (attempt > 40) {
+        // The fast window (10s) covers a boot-time settle; after that, keep a
+        // SLOW (2s) retry alive indefinitely. A settings service that mounts
+        // late (lazy UI composition, service restart) must still be picked up,
+        // and a once-per-2s property probe costs nothing. The probe findings
+        // stay visible in the panel's diagnostics row.
+        if (attempt === 41) dbg('settings service not found in the fast window; retrying every 2s')
+        if (typeof setTimeout === 'function') prefsBindTimer = setTimeout(() => rebindPrefs(attempt + 1), 2000)
+        return
+      }
+      // Retry until a reasonable ceiling; mirrors the theme's own sessions/late-
+      // service retry used elsewhere in this file.
+      if (typeof setTimeout === 'function') {
+        if (attempt % 8 === 0) dbg('waiting for settingsScope binder (attempt', attempt, ')')
+        prefsBindTimer = setTimeout(() => rebindPrefs(attempt + 1), 250)
+      }
+    }
+    /* 0.2.0-rc.2: the browser settings service (`configForms`) may be provided
+       AFTER this fiber starts — and a cordis fiber's service store is a COPY
+       taken at creation, so plain ctx.get() can never see a later provide.
+       ctx.inject registers a waiting child: the callback fires exactly when the
+       service exists, and the child's own store then contains it. On 0.1.x
+       builds the service never appears; the child simply stays pending (no
+       timers, no cost) while the legacy settingsScope retry loop above binds
+       instead. This mirrors how the app's own plugins consume optional-setting
+       services (see dsh-client-ui-settings' host half). */
+    try {
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['configForms'], (child) => {
+          const svc = typeof child.get === 'function' ? child.get('configForms') : undefined
+          if (!bindPrefsBinder(asPrefsBinder(svc))) dbg('inject(configForms) fired but binding did not yield scopes')
+        })
+      }
+    } catch (e) { dbg('inject(configForms) setup threw', e && e.message) }
     // Kick off the (re)trying binder acquisition.
     rebindPrefs(0)
     // Dispose on run teardown (mirrors ctx.effect owned resources).
@@ -550,6 +697,7 @@ function apply(ctx) {
       prefsBindTimer = null
       if (prefsRetryTimer !== null && typeof clearTimeout === 'function') clearTimeout(prefsRetryTimer)
       prefsRetryTimer = null
+      prefsStopNudge()
     })
     // Dispose on run teardown (mirrors ctx.effect owned resources).
     ctx.effect(() => () => {
@@ -5189,6 +5337,9 @@ function apply(ctx) {
           const [thunderOn, setThunderOn] = R.useState(isThunderOn())
           const [thunderAnim, setThunderAnim] = R.useState(isThunderAnimOn())
           const [palette, setPalette] = R.useState(readPalette())
+          /* diagnostics row: re-render once the async host audit lands */
+          const [, setDiagRev] = R.useState(0)
+          prefsDiagBump = () => setDiagRev((n) => n + 1)
           const [mode, setMode] = R.useState(prefsGet(RADIUS_KEY) || 'square')
           /* UI-only labels for the 8 scroll directions (clockwise from up, the
              same order as the engine's CONTOUR_DIRS) and the 4 density names. */
@@ -5409,6 +5560,9 @@ function apply(ctx) {
           const stateOf = (on) => t(on ? 'on' : 'off')
           const row = (key, last, children) => R.createElement('div', { key, style: last ? { ...rowStyle, borderBottom: 'none' } : rowStyle }, children)
           return R.createElement('div', { style: pageStyle }, [
+            /* --- 00 持久化诊断：prefs 传输的实时状态（临时排查行） --- */
+            R.createElement('div', { key: 'prefs-diag', style: { padding: '8px 0 2px', color: 'var(--dsw-alias-label-tertiary)', fontSize: '11px', lineHeight: '1.5', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+              'prefs: ' + prefsDiagnostics()),
             /* --- 01 主题：总开关在最前，随后是配色与圆角 --- */
             R.createElement('div', { key: 'group-theme' }, [
               groupTitle('01', 'groupTheme', true),
