@@ -4,6 +4,63 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.5.3 — fix: 宿主侧 `Config` 从未构建成功（1.5.1 / 1.5.2 为何都无效）
+
+### 真正的原因不在客户端
+
+1.5.1 让宿主半侧导出带 `.volatile()` 的 `Config`，1.5.2 又把客户端对接面从 `settingsScope` 改到
+`configForms` —— 两者都是必要的，但「重启后设置回退默认」依旧复现，因为 **宿主侧 `Config` 从没被
+成功构建过**：`Config` 在模块加载那一刻由 `buildConfigSchema()` 算出，而那一刻加载器正处在 import
+schemastery 自己依赖图的中间，schemastery 的 CJS 构建反过来 `require` 的
+`@deepseek-ai/cosmokit` ESM 还在求值。这一次 require 抛错，`Config` 就**永久**是 `undefined`
+（它只算一次，从不重试）：
+
+```
+load @deepseek-ai/schemastery
+ -> Cannot require() ES Module …\@deepseek-ai\cosmokit\lib\index.js
+    because it is not yet fully loaded
+```
+
+而 0.2.0-rc.2 的 `@deepseek-ai/dsh-settings` 对每条 entry 有一串**静默跳过**的闸门
+（`entry.fiber.runtime.Config` 必须存在且带 `toJSON`、`fiber.runtime !== null`、`fiber.state === 2`、
+且 `volatileForm(schema)` 非空）。任何一条不满足，这条 entry 直接从 `describe()` 里消失，浏览器侧
+连报错都看不到 —— 面板上的样子就是 `face=configForms scopes=2 status=unbound`：服务绑上了，两个
+候选命名空间谁都不 ready。
+
+### 另一半：修好的文件从没进到应用里
+
+profile 的 `pnpm-lock.yaml` 把本包（`github:` 形式）钉在 `faba417` = **1.4.0**，而 1.4.0 的
+`index.js` **根本没有 `Config` 导出**。手工把工作区文件同步进
+`profiles\desktop\node_modules\dsh-theme-endfield-contour-rework` 之后，Plugin Hub 的任何一次安装
+（`.plugin-manager/logs/operation-*/pnpm.log`，本机上 00:33:52 那次）都会按 lockfile 从 pnpm store
+重新链接，把文件覆盖回 1.4.0。于是「刷新页面偶尔能看到新诊断行、一重启又回到默认」其实是**两个
+问题叠在一起**：客户端改动只在同步后、重装前的窗口里跑过，宿主半侧则从头到尾都是 1.4.0。
+
+### 修复
+
+- **`index.js`**：`loadSchemastery()` 改为一条有记录的解析链 —— ① 常规 `require`；② **显式 retry**
+  （专门对付上面那个重入失败：同一个 require 在几微秒后就会成功）；③ `Module._load`（宿主包装可能
+  根本不提供可用的 `require`）；④ `createRequire` 的多个显式基座（插件自身目录、`DSH_HOME`、
+  `profiles/*`）；⑤ 磁盘上真实存在的模块根（`profiles/*/node_modules`、`app.asar/dsh/node_modules`、
+  随包 runtime）绝对路径扫描。每一步的成败都记进 `__schemaResolution` 供测试与真机探针读取。
+- **新增 `test/host-config-resolution.test.js`**（5 条断言）：把 `index.js` 放进 `vm` 按 CJS 求值，
+  可故意**不提供可用的 `require`**，从而在没有真机的情况下复现宿主环境；含「完全没有 schemastery
+  时优雅降级」与「重入失败必须重试成功」两条反向对照。
+- 该脚本已并入 `npm run test:ci` / `test:node`（CI 全绿）。
+
+### 真机证据（宿主侧探针，非截图推断）
+
+| 项目 | 修复前（1.5.2 代码 + 1.4.0 实装宿主） | 修复后 |
+| --- | --- | --- |
+| `entry.fiber.runtime.Config` | `undefined`（`hasConfig=false`） | `function`（15 个字段全 volatile） |
+| `settings.describe()` 命名空间 | **不含** `theme-endfield-contour-rework` | **包含**，`revision 0 / applies live` |
+| 读回的 `value` | —（未上架，客户端只能读默认） | `radius=round, thunder=1, loader=1, contourRoughness=11, contourDensity=3, contourSpeed=0, contourScrollPause=0, contour=1, thunderAnim=1` |
+| 同一条的 `base`（出厂默认） | — | `radius=square, thunder=0, …`（确认读到的是用户层而非默认） |
+
+工艺细节（为什么「本地 require 明明有 Config」与「应用里没有」并不矛盾、探针怎么装、store 冻结如何
+骗过 mtime）记在 [engineering-notes.md](docs/engineering-notes.md) 的「0.2.0 宿主侧设置链路的时序
+陷阱」与 [testing.md](docs/testing.md) 的「宿主侧 Config 解析 / 先核对实装产物，再谈结论」。
+
 ## 1.5.2 — fix: 1.5.1 missed the browser-side rename (`settingsScope` → `configForms`)
 
 ### 1.5.1 只修了一半

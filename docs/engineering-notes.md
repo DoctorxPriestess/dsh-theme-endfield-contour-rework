@@ -479,6 +479,42 @@ background: var(--dsw-alias-interactive-bg-hover-solid);   /* :hover */
 
 亮色青色无需像黄色那样另配一个压暗值（`#beaf00`），因为 `#14d0d0` 并不接近纸白。
 
+### 七类：0.2.0 宿主侧设置链路的时序陷阱
+
+「重启后设置回退默认」从 1.5.1 修到 1.5.2 都没生效，原因**不在客户端**，而在宿主半侧的 `Config` 从没被成功构建过。0.2.0-rc.2 的 `@deepseek-ai/dsh-settings` 直接从插件模块导出的 `Config` 派生要服用的设置表单（`settings.register()` 已被删除），而 `describe()` 对每条 entry 有一串**静默跳过**的闸门：
+
+```js
+const schema = this.schema(entry);                     // entry.fiber?.runtime?.Config 且带 toJSON
+if (schema === void 0 || entry.fiber === void 0
+    || entry.fiber.runtime === null || entry.fiber.state !== 2) return [];
+const form = volatileForm(schema);                     // 没有任何 .volatile() 字段 → 也不上架
+```
+
+任何一条不满足，这条 entry **直接从 describe() 里消失**，浏览器侧连报错都看不到——`scopes=2 status=unbound` 就是它的样子：服务绑上了，两个候选 ns 谁都不 ready。
+
+**真正的报错（由宿主侧探针从真实进程里捞出来的原文）：**
+
+```
+load @deepseek-ai/schemastery
+ -> Cannot require() ES Module …\node_modules\@deepseek-ai\cosmokit\lib\index.js
+    because it is not yet fully loaded
+```
+
+`Config` 是在**模块加载那一刻**由 `buildConfigSchema()` 算出来的，而那一刻加载器正处在 import schemastery 自己的依赖图中间：schemastery 的 CJS 构建反过来 `require('@deepseek-ai/cosmokit')`，而 cosmokit 的 ESM 还在求值。这一次 require 抛错，`Config` 就永久是 `undefined`——它**只算一次，从不重试**。同一个 require 在几微秒后（或在一个普通 node 进程里）完全正常，所以「本地 require 一下明明有 Config」与「应用里没有」并不矛盾。宿主进程是 **node v24.18.1**（桌面版内嵌），而 profile 的 runtime 是 v24.21.0，两者对 require(ESM) 的重入处理并不一样。
+
+修法是给解析加**显式 retry**（并把候选基座、`Module._load`、createRequire、app.asar 与 runtime 根目录扫描串成一条链，每一步的成败都记进 `__schemaResolution`），见 [testing.md](testing.md#宿主侧-config-解析)。
+
+**另一半坑：修复根本没进到应用里。** 本地把 `client.js` / `index.js` 同步进 profile 的 `node_modules` 后，只要 Plugin Hub 跑一次 pnpm 安装，包就被从 store 重新链接回 lockfile 钉住的那个 commit：
+
+| 证据 | 值 |
+| --- | --- |
+| `pnpm-lock.yaml` | `dsh-theme-endfield-contour-rework@…tar.gz/faba417…` → `version: 1.4.0` |
+| 实装 `index.js`（188 行） | **没有 `Config` 导出**（1.4.0 时代） |
+| 实装 `package.json` | `"version": "1.4.0"` |
+| `.plugin-manager/logs/operation-oXOFxF/pnpm.log` | 00:33:52 的一次安装，正是它把当时同步进去的 1.5.2 覆盖回 1.4.0 |
+
+所以「刷新页面偶尔能看到新诊断行、重启后又回到默认」是**两个不同的问题叠在一起**：客户端改动只在同步后未重装的窗口里跑过，而宿主半侧从头到尾都是 1.4.0。此后凡是要在真机上验证，都先核对实装文件哈希（见 [testing.md](testing.md#先核对实装产物再谈结论)）。
+
 ---
 
 ## 验证方法论
@@ -550,3 +586,19 @@ background: var(--dsw-alias-interactive-bg-hover-solid);   /* :hover */
 ### 无头环境的 rAF 不能用来采样性能
 
 headless 会挂起 / 合并 rAF，导致无论怎么设虚拟时钟都只采到 **n=1**，而没有分布支撑的数字不算测量。`contour-perf.test.js` 因此按函数名把算法源码从 `client.js` 里**原样切出**后在紧循环里计时，并丢弃前两次采样（冷启动含 JIT 预热，否则会把启动成本报成稳态成本）。
+
+### 探针要装在**宿主**进程里，而不是在浏览器侧猜
+
+「命名空间没上架」这个结论不能从浏览器侧推出来：`status=unbound` 只能说明 scope 不 ready，说不出是 host 没服务、mirror 过期还是 schema 解码失败。真正给出答案的是**宿主半侧自己写文件**的探针：在 `index.js` 的 `apply()` 里立刻、以及 1/3/8/20 秒后各写一份 JSON，内容包括
+
+- `ctx.fiber.state`、`ctx.fiber.runtime` 的键、`runtime.Config` 是否存在；
+- `ctx.get('configEditor').configuration()` 每行的 `id`、`fiber.state`、`hasConfig`、`override` 键；
+- `ctx.get('settings').describe()` 的 ns 列表，以及我们这条的 `value` / `base` / `user` 三段。
+
+有了 `user` / `base` 两段就能一眼分清「读到的是用户层」还是「读的是出厂默认」，不必再靠面板 UI 截图推断。探针全程 try/catch，只写文件、不抛错，且**不放进仓库**：`index.js` 保持干净，探针以 `_probe.cjs` 连同挂钩只存在于实装目录。
+
+运行中的宿主无法被外部探测（renderer 走自建 scheme `dsh-app://`，19387 的 Web 面板还要 token），所以这类结论只能靠「让宿主自己说」或重启一次再看探针。
+
+### 冻结的 store 会把本地同步悄悄抹掉
+
+profile 里 `github:` 形式的依赖在 lockfile 里被钉死在某个 commit 上；Plugin Hub 的任何一次安装都会按 lockfile 从 store 重新链接，把手工同步进去的文件覆盖回那个 commit 的版本（文件 mtime 还会显示成装进 store 的时刻，而不是覆盖发生的时刻，很容易误判成「文件没被动过」）。因此真机验证前必须哈希比对，并且**不要用「面板里看到了新文案」当作代码已生效的证明**——那可能只是同步后、重装前的那个窗口。

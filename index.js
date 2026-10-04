@@ -91,59 +91,208 @@ const FIELD_DEFAULTS = {
   thunderAnim: '0',         // 大字入场动画 —— default off
 };
 
-/* Resolve a Schemastery namespace builder lazily.
-   1) Published profile installs put schemastery / @deepseek-ai/schemastery on
-      this package's OWN require path (real bundles like dsh-better-sidebar do
-      `import z from "schemastery"` and it resolves). Those are covered by the
-      first two tries below.
-   2) A DEV-LINK bundle (this repo symlinked into the profile's node_modules,
-      e.g. `"dsh-theme-endfield-contour-rework": "link:E:/..."`) does NOT: its files resolve
-      from the repo path, where no schemastery lives — so bare/scoped require
-      throws MODULE_NOT_FOUND and (with the old loader) registration silently
-      would never happen (the "settings won't save" symptom). So when those
-      requires miss we additionally DISCOVER the builder from the DSH module
-      roots that physically exist on disk.
+/* Schemastery resolution — see loadSchemastery() below for the strategy order
+   and the DSH 0.2.0-rc.2 host behaviour that makes the fallbacks necessary.
    Kept guarded throughout: a profile with no schemastery anywhere degrades to
    a no-op rather than crashing the host half. */
-function loadSchemastery() {
-  let found = null;
-  // 1) conventional require-path placement
-  for (const spec of ['@deepseek-ai/schemastery', 'schemastery']) {
-    try { found = require(spec); break; } catch (e) { found = null; }
-  }
-  // 2) DEV-LINK fallback: scan the DSH module roots that actually exist.
-  if (found === null || found === undefined) {
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const os = require('os');
-      const dshHome = (typeof process !== 'undefined' && process.env && process.env.DSH_HOME)
-        || path.join(typeof os.homedir === 'function' ? os.homedir() : '', '.dsh');
-      const roots = [];
-      // per-profile node_modules, then the shared profiles-level node_modules
-      for (const p of [
-        path.join(dshHome, 'profiles', 'node_modules', '@deepseek-ai', 'schemastery'),
-        path.join(dshHome, 'profiles', 'node_modules', 'schemastery'),
-      ]) roots.push(p);
-      const profileDir = path.join(dshHome, 'profiles');
-      if (fs.existsSync(profileDir)) {
-        for (const name of fs.readdirSync(profileDir)) {
-          roots.push(path.join(profileDir, name, 'node_modules', '@deepseek-ai', 'schemastery'));
-          roots.push(path.join(profileDir, name, 'node_modules', 'schemastery'));
-        }
-      }
-      for (const p of roots) {
-        if (!p) continue;
-        try { if (fs.existsSync(path.join(p, 'package.json'))) { found = require(p); if (found) break; } }
-        catch (e) { found = null; }
-      }
-    } catch (e) { /* ignore discovery errors */ }
-  }
-  // Normalize a CJS default-export wrapper to a plain { string, object } API.
+/* Resolution diagnostics: every strategy this module tried and how it ended.
+   Read by tests / support only — DSH itself never looks at it. */
+const SCHEMA_RESOLUTION = { attempts: [], host: {} };
+
+/** The Host loads plugin entries through its own internal importer, which may
+    wrap this module WITHOUT exposing `require` (observed on DSH 0.2.0-rc.2
+    desktop: node v24.18.1, `runtime.Config` came out undefined while the same
+    require worked from a plain node process). `module` and the Module class
+    behind it always exist in a CJS module, so rebuild a working loader from
+    `Module._load` when `require` is not available. */
+function hostLoader() {
+  try { if (typeof require === 'function') return { load: require, how: 'require' }; } catch (e) { /* not exposed */ }
+  try {
+    const Mod = module.constructor;
+    if (Mod && typeof Mod._load === 'function') return { load: (id) => Mod._load(id, module, false), how: 'Module._load' };
+  } catch (e) { /* fall through */ }
+  return { load: undefined, how: 'none' };
+}
+
+/** require.resolve-style lookup built on createRequire so it works even when
+    this module's own `require` is missing. */
+function resolveFrom(load, spec, base) {
+  try {
+    const Mod = module.constructor;
+    if (Mod && typeof Mod.createRequire === 'function') return Mod.createRequire(base).resolve(spec);
+  } catch (e) { /* fall back to the plain loader */ }
+  try { return load(spec); } catch (e) { return undefined; }
+}
+
+/** Normalize a CJS/ESM/Schema-CJS module shape into the { string, object } API. */
+function asSchemaBuilder(mod) {
+  let found = mod;
   if (found && found.default && !found.object && found.default.object && found.default.string) {
     found = { string: (v) => found.default.string(v), object: (o) => found.default.object(o) };
   }
   return (found && typeof found.object === 'function' && typeof found.string === 'function') ? found : undefined;
+}
+
+/** Try one candidate location, recording the outcome for diagnosis. */
+function tryCandidate(load, how, target, get) {
+  try {
+    const z = asSchemaBuilder(get());
+    SCHEMA_RESOLUTION.attempts.push(how + ' ' + target + ' -> ' + (z ? 'ok' : 'no schema API'));
+    return z;
+  } catch (e) {
+    SCHEMA_RESOLUTION.attempts.push(how + ' ' + target + ' -> ' + String((e && e.message) || e).slice(0, 160));
+    return undefined;
+  }
+}
+
+/** Load a Node core module through the same loader (never schema-checked). */
+function tryCore(load, name) {
+  try {
+    const mod = load(name);
+    SCHEMA_RESOLUTION.attempts.push('core ' + name + ' -> ' + (mod ? 'ok' : 'empty'));
+    return mod || undefined;
+  } catch (e) {
+    SCHEMA_RESOLUTION.attempts.push('core ' + name + ' -> ' + String((e && e.message) || e).slice(0, 160));
+    return undefined;
+  }
+}
+
+/* Resolve a Schemastery namespace builder.
+   1) Published profile installs put schemastery / @deepseek-ai/schemastery on
+      this package's OWN require path (real bundles like dsh-better-sidebar do
+      `import z from "schemastery"` and it resolves).
+   2) A DEV-LINK bundle (this repo symlinked into the profile's node_modules)
+      does not: its files resolve from the repo path, where no schemastery
+      lives.
+   3) The desktop Host may wrap this module so that `require` itself is absent
+      or rebound away from the profile's node_modules — then `Module._load`,
+      createRequire search bases, the app archive and the bundled runtimes are
+      tried in turn, and each attempt is recorded in SCHEMA_RESOLUTION.
+   Kept guarded throughout: a profile with no schemastery anywhere degrades to
+   a no-op rather than crashing the host half. */
+function loadSchemastery() {
+  let load;
+  try {
+    const host = hostLoader();
+    load = host.load;
+    SCHEMA_RESOLUTION.host.loader = host.how;
+    SCHEMA_RESOLUTION.host.node = typeof process !== 'undefined' && process.version;
+    SCHEMA_RESOLUTION.host.execPath = typeof process !== 'undefined' && process.execPath;
+    SCHEMA_RESOLUTION.host.resourcesPath = typeof process !== 'undefined' && process.resourcesPath;
+    SCHEMA_RESOLUTION.host.mainModule = !!(typeof process !== 'undefined' && process.mainModule);
+    SCHEMA_RESOLUTION.host.file = typeof __filename === 'string' ? __filename : null;
+  } catch (e) { /* keep going with a null loader */ }
+  if (typeof load !== 'function') { SCHEMA_RESOLUTION.host.loader = 'none'; return undefined; }
+
+  const specs = ['@deepseek-ai/schemastery', 'schemastery'];
+
+  // 1) plain module-relative resolution (a normal profile install)
+  for (const spec of specs) {
+    const z = tryCandidate(load, 'load', spec, () => load(spec));
+    if (z) return z;
+  }
+
+  // Everything else needs a filesystem: build one through the same loader.
+  const core = {};
+  for (const name of ['fs', 'path', 'os']) {
+    const mod = tryCore(load, name);
+    if (mod) core[name] = mod;
+  }
+  const fs = core.fs, path = core.path, os = core.os;
+
+  // 2) Retry the plain specs before walking the disk. The first attempt can fail
+  //    RE-ENTRANTLY on DSH 0.2.0-rc.2: this module is imported from inside the
+  //    loader's import of the schema builder's own dependency graph, so the CJS
+  //    build's `require('@deepseek-ai/cosmokit')` meets the ESM module while it
+  //    is still evaluating —
+  //      "Cannot require() ES Module …/cosmokit/lib/index.js because it is not
+  //       yet fully loaded"
+  //    — and the very same require succeeds a moment later. `Config` is computed
+  //    once, at module load, so missing this retry leaves the settings namespace
+  //    unserved for the entire app run (the 1.5.x "settings never persist" bug).
+  for (const spec of specs) {
+    const z = tryCandidate(load, 'retry', spec, () => load(spec));
+    if (z) return z;
+  }
+
+  if (!fs || !path) return undefined;
+  const join = (...parts) => path.join(...parts);
+
+  // 3) explicit search bases: this plugin's dir, its DSH roots, DSH_HOME and
+  //    every profile in it.
+  const bases = [];
+  const pushBase = (b) => { if (b && bases.indexOf(b) < 0) bases.push(b); };
+  try { pushBase(join(__dirname, 'noop.js')); } catch (e) { /* ignore */ }
+  const dshHome = (typeof process !== 'undefined' && process.env && process.env.DSH_HOME)
+    || (os && typeof os.homedir === 'function' ? join(os.homedir(), '.dsh') : null);
+  const profileNames = [];
+  if (dshHome) {
+    pushBase(join(dshHome, 'noop.js'));
+    pushBase(join(dshHome, 'profiles', 'noop.js'));
+    pushBase(join(dshHome, 'node_modules', 'noop.js'));
+    try {
+      const profDir = join(dshHome, 'profiles');
+      if (fs.existsSync(profDir)) {
+        for (const name of fs.readdirSync(profDir)) {
+          profileNames.push(name);
+          pushBase(join(profDir, name, 'noop.js'));
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }
+  for (const spec of specs) {
+    for (const base of bases) {
+      const z = tryCandidate(load, 'createRequire', spec + ' from ' + base, () => {
+        const resolved = resolveFrom(load, spec, base);
+        if (resolved === undefined) throw new Error('not resolvable from this base');
+        return load(resolved);
+      });
+      if (z) return z;
+    }
+  }
+
+  // 3) absolute-path scan of the module roots that physically exist on disk,
+  //    including the running app's archive and its bundled runtimes.
+  const appRoots = [];
+  const pushAppRoot = (p) => { if (p && appRoots.indexOf(p) < 0) appRoots.push(p); };
+  try {
+    if (typeof process !== 'undefined' && process.resourcesPath) pushAppRoot(process.resourcesPath);
+    if (typeof process !== 'undefined' && process.execPath) {
+      const dir = path.dirname(process.execPath);
+      pushAppRoot(join(dir, 'resources'));
+      pushAppRoot(dir);
+    }
+  } catch (e) { /* ignore */ }
+  const roots = [];
+  for (const spec of specs) {
+    const tail = spec.split('/');
+    if (dshHome) {
+      roots.push(join(dshHome, 'profiles', 'node_modules', ...tail));
+      for (const name of profileNames) roots.push(join(dshHome, 'profiles', name, 'node_modules', ...tail));
+    }
+    for (const res of appRoots) {
+      roots.push(join(res, 'app.asar', 'dsh', 'node_modules', ...tail));
+      roots.push(join(res, 'app.asar', 'node_modules', ...tail));
+      roots.push(join(res, 'node_modules', ...tail));
+      try {
+        const rt = join(res, 'runtime');
+        if (fs.existsSync(rt)) {
+          for (const name of fs.readdirSync(rt)) {
+            roots.push(join(rt, name, 'node_modules', ...tail));
+            roots.push(join(rt, name, 'dependencies', 'node_modules', ...tail));
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+  }
+  for (const root of roots) {
+    let present = false;
+    try { present = fs.existsSync(join(root, 'package.json')); } catch (e) { present = false; }
+    if (!present) continue;
+    const z = tryCandidate(load, 'absolute', root, () => load(root));
+    if (z) return z;
+  }
+  return undefined;
 }
 
 function apply(ctx) {
@@ -231,4 +380,7 @@ module.exports = {
   // Exposed for tests/documentation.
   NAMESPACE,
   FIELD_DEFAULTS,
+  // Resolution trace of the schema builder (empty attempts = resolved on the
+  // very first try). Diagnostics only.
+  __schemaResolution: SCHEMA_RESOLUTION,
 };

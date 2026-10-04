@@ -251,3 +251,44 @@ npm run shots:verify   # 上面 + 解码统计强调色像素
 ```
 
 这两个不是断言，是给肉眼复核用的。数值化的那一半在 `verify-shots.js` 里。
+
+---
+
+## 宿主侧 Config 解析
+
+```bash
+node test/host-config-resolution.test.js
+```
+
+「重启后设置回退默认」真正的成因在**宿主半侧**：`Config` 在模块加载那一刻由 `buildConfigSchema()` 算出，而那一刻加载器正处在 import schemastery 依赖图的中间，schemastery 的 CJS 构建反过来 require 的 `@deepseek-ai/cosmokit` ESM 还没求值完 ——
+
+```
+Cannot require() ES Module …\@deepseek-ai\cosmokit\lib\index.js because it is not yet fully loaded
+```
+
+—— 于是 `Config` 永久是 `undefined`，`@deepseek-ai/dsh-settings` 的 `describe()` 直接把这条 entry 跳过（它要求 `entry.fiber.runtime.Config` 存在、`fiber.state === 2`、且至少有一个 `.volatile()` 字段），浏览器侧连一条报错都看不到。
+
+这个脚本把 `index.js` 放进 `vm` 里、**按 CJS 模块**求值，并且可以**故意不提供可用的 `require`**，从而在没有真机的情况下复现宿主环境：
+
+- **没有 `require`**：必须退到 `Module._load`，并沿 DSH_HOME 下的 profile `node_modules` 找到 schema 构建器，`Config` 不能是 `undefined`；
+- **每个字段都必须 volatile**（否则 `describe()` 会静默丢弃整条 entry）；
+- **完全没有 schemastery**：优雅降级成空导出，不许抛错；
+- **普通 `require`**：`Config` 依然要建成，且字段数与 `FIELD_DEFAULTS` 一致；
+- **重入失败要重试**：第一处 require 抛「not yet fully loaded」、第二处成功时，`Config` 必须活下来（`__schemaResolution.attempts` 里要能看到 `retry … -> ok`）。
+
+`index.js` 会把每一步解析的成败记进 `__schemaResolution`（宿主侧探针就是靠它一眼看出「是哪个基座成功了」）。
+
+---
+
+## 先核对实装产物，再谈结论
+
+真机验证前先比对**实装目录**的文件哈希，不要用工作区里的文件：
+
+```powershell
+$inst = "$env:DSH_HOME\profiles\desktop\node_modules\dsh-theme-endfield-contour-rework"
+Get-FileHash "$inst\client.js","$inst\index.js" | Select-Object Hash,Path
+```
+
+原因见[工程笔记](engineering-notes.md#冻结的-store-会把本地同步悄悄抹掉)：profile 里 `github:` 形式的依赖被 lockfile 钉在某个 commit 上，Plugin Hub 的任何一次安装（`.plugin-manager/logs/operation-*/`）都会按它从 store 重新链接，把手工同步进去的文件覆盖回那个版本，而**文件 mtime 显示的是装进 store 的时刻**，看上去像「没被动过」。
+
+「面板里出现了新文案」也因此不能当作代码已生效：那可能只是同步之后、重装之前的一个窗口。1.5.3 的排查就是因为这个窗口的存在，把宿主侧 1.4.0 的问题误读了整整两轮。
