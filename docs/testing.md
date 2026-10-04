@@ -169,7 +169,8 @@ node test/contour-smoothness.test.js  # 几何：曲线 vs 原始折线的最大
 node test/contour-roughness.test.js   # 地形阶梯：12 张地貌表 / 出厂档 / 高原递减 / 悬崖递增 / 特征占比 <75% / 水面平面 / 接缝 / 可读性（Node）
 node test/prefs-write-latency.test.js # 设置写入的时序：写后立刻回读 / 回相退役 / 未确认写不回滚（Node）
 node test/contour-perf.test.js        # 成本形状 + 实测量 + 滚动门控（Node）
-node test/contour-render.test.js      # 21 项行为断言（浏览器）
+node test/contour-render.test.js      # 21 项行为断言（浏览器，0.1.x 形状 DOM）
+node test/contour-render-020.test.js  # 0.2.0-rc.2 形状 DOM 的可见性回归（浏览器）
 node test/contour-specks.test.js      # 残渣过滤 + 随机种子 + 空白格（浏览器）
 node test/contour-a11y.test.js        # prefers-reduced-motion 行为（浏览器）
 node test/contour-coverage.test.js    # 8×5 分区墨迹覆盖率（浏览器）
@@ -181,6 +182,8 @@ node test/shoot.js                    # 输出亮/暗 × 两配色共四张截�
 **`contour-render.test.js`** 覆盖：关闭时不创建节点且**不改动应用底色**；开启时画布挂进应用外框、图层确实上色、不透明底色已让位；正文颜色不变且仍可命中测试（图层在其**之下**）；滚动开启时像素随时间变化、关闭后**完全静止**、**重新开启后再次变化**；暗色仍上色；拆除后节点归零。
 
 > 这套脚本抓到了三个真实 bug，都不是解析错误：子开关在已挂载时失效、TDZ 崩溃隐患、重启动画的首帧是空转。详见[工程笔记](engineering-notes.md#等高线背景)。
+
+**`contour-render-020.test.js`** 是 0.2.0-rc.2 的可见性回归：应用重新哈希 css-module 后（`wSkVaW_root` → `Dc7zOa_root` 等），透明化规则一度全部落空——图层挂载、画布绘制、主题样式全部正常，**唯独背景被新哈希的不透明底色盖住**，控制台零报错。该测试用 0.2.0-rc.2 形状的 DOM 跑真实 client.js，断言中列/右列/对话根的底色在挂载期间必须透明、画布必须有墨迹、正文仍在其上。修复前它抓到三个 FAIL（`centre column bg cleared -> rgb(232, 232, 226)` 等）。
 
 **`contour-specks.test.js`** 守四件事，并逐一做了反向对照：改回写死种子 → 报「5 次加载地形完全相同」；关掉过滤器 → 报 9 条全画布外、15 条短描边、7 个小环；空白格门槛调回 1 → 空白格重现。（同样的碎屑属性在 Node 侧由 `contour-cusps` 复核：最短绘制等高线与最小环包围盒都必须高于过滤阈值。）
 

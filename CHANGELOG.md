@@ -4,6 +4,43 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.4.1 — fix: the contour sheet was invisible on DSH 0.2.0-rc.2
+
+### 根因：透明化规则锚在 0.1.x 的 css-module 哈希上，0.2.0 重新哈希后全部落空
+
+The sheet was never missing — the layer mounted, the canvas painted, the theme styles applied.
+It was **covered**: DSH 0.2.0-rc.2 rehashed every css-module, so the background-clearance rules that
+made the app's own opaque fills transparent matched NOTHING:
+
+| element painting opaque `--dsw-alias-bg-base` | 0.1.x (what 1.4.0 pinned) | 0.2.0-rc.2 |
+| --- | --- | --- |
+| conversation column root | `wSkVaW_root` | `Dc7zOa_root` |
+| details column root | `ydkMvW_root` | gone (the column is `BynINW_rightbarCol`, and the **centre column now paints bg-base too** — `BynINW_centerCol`) |
+| hero root / headline | `pXSMma_root` / `pXSMma_headline` | `_2WTFBq_root` / `_2WTFBq_headline` |
+
+So on 0.2.0-rc.2 the background was drawn behind three opaque fills: 对话背景 fully blank, with no
+error anywhere. Reproduced headlessly with a 0.2.0-shaped fixture (`test/contour-render-020.test.js`):
+layer mounts, canvas paints, but centre/right column and conversation root keep `rgb(232, 232, 226)`.
+
+### 修法：结构后缀锚定，哈希只作 0.1.x 回退
+
+Same policy the codebase already used for `_heroGlow` ("matched on the CSS-module suffix so an app
+rebuild that rehashes the module cannot silently regress"):
+
+- The conversation root is the one `*_root` that **contains a composer seat** — matched with
+  `[class$='_root']:has([class$='_composerSeat'])`, true on every build seen (the seat itself is
+  already matched structurally).
+- The centre and right columns are cleared on their stable `_centerCol` / `_rightbarCol` suffixes,
+  joining `_sidebarCol`.
+- The pinned 0.1.x hashes stay as fallbacks so old builds keep working.
+- The watermark's hero/persist anchors move to the same scheme: hero visibility now rides the
+  stable `_headline` suffix, and the watermark-isolation rule keys on `_root` scoped by our own
+  element being its direct child.
+
+New regression test `test/contour-render-020.test.js` runs the real client.js against the
+0.2.0-rc.2-shaped DOM and asserts computed background colours + canvas pixels; it failed before the
+fix and passes after. The 0.1.x fixture suite (`test/contour-render.test.js`) still passes.
+
 ## 1.4.0 — the whole ladder rougher, accelerating: stop 12 now 61% feature terrain
 
 ### 需求：12 档的陡峭特征地形占比 55%–65%，整条阶梯按越来越快的曲线抬升

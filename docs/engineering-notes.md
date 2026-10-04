@@ -84,7 +84,9 @@
 
 ### 等高线：应用外框内部
 
-从应用自身 CSS 实测：**三个元素会用不透明的 `--dsw-alias-bg-base` 盖住任何 body 级图层**——应用外框、对话列、详情列。所以图层挂进外框内部，并在挂载期间把这几处底色置为透明（`:has()` 守卫使功能关闭时全部规则失效）。
+从应用自身 CSS 实测：**好几个元素会用不透明的 `--dsw-alias-bg-base` 盖住任何 body 级图层**——应用外框、对话列、详情列（0.2.0 起中列自己也涂 bg-base）。所以图层挂进外框内部，并在挂载期间把这几处底色置为透明（`:has()` 守卫使功能关闭时全部规则失效）。
+
+**锚定必须用结构后缀，不能用构建哈希（0.2.0-rc.2 的教训）。** 这些透明化规则最初锚在 0.1.x 构建的 css-module 哈希上（`wSkVaW_root` / `ydkMvW_root`）；0.2.0-rc.2 把所有模块重新哈希（对话列根变成 `Dc7zOa_root`，详情列变成 `BynINW_rightbarCol`，且 `BynINW_centerCol` 开始自涂 bg-base），规则一条不剩地落空——于是**图层照常挂载、画布照常绘制、主题样式照常生效，唯独背景被三块不透明底色盖得严严实实**，控制台无任何报错。修复后锚定改为结构后缀：对话列根 = 「包含 composer 座的唯一的 `*_root`」（`[class$='_root']:has([class$='_composerSeat'])`），中列/右列 = `_centerCol` / `_rightbarCol` 后缀，与早已这么做的 `_sidebarCol`、`_heroGlow` 一致；0.1.x 的哈希保留为回退。回归防护：`test/contour-render-020.test.js` 用 0.2.0-rc.2 形状的 DOM 跑真实 client.js，逐项断言底色透明与画布墨迹。
 
 外框本身已是 `position: relative` 且**不产生层叠上下文**，因此 `inset:0; z-index:0` 的子元素正好落在「外框底色之上、所有定位子元素之下」。
 

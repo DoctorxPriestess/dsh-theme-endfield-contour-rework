@@ -547,7 +547,10 @@ function apply(ctx) {
     const isWatermarkPersistOn = () => prefsGet(WATERMARK_PERSIST_KEY) === '1'
     const isHeroVisible = () => {
       if (typeof document === 'undefined') return false
-      const hero = document.querySelector('[class*="pXSMma_root"]')
+      /* The hero root's hash moves every app build (0.1.x 'pXSMma_root' -> 0.2.0
+         '_2WTFBq_root'); the headline inside it is a stable suffix, and the hero
+         is on screen exactly when its headline is. */
+      const hero = document.querySelector('[class$="_headline"], [class*="pXSMma_root"]')
       if (!hero) return false
       const r = hero.getBoundingClientRect()
       return r.width > 0 && r.height > 0
@@ -555,7 +558,11 @@ function apply(ctx) {
     /** The visible conversation column — the persist-mode anchor and mount parent. */
     const findConversationRoot = () => {
       if (typeof document === 'undefined') return null
-      const all = document.querySelectorAll('[class*="wSkVaW_root"]')
+      /* The one *_root that CONTAINS a composer seat is the conversation column,
+         on every build seen so far (0.1.x 'wSkVaW_root', 0.2.0 'Dc7zOa_root').
+         The pinned hash stays as a fallback for builds where the seat lives
+         elsewhere than under the root. */
+      const all = document.querySelectorAll('[class$="_root"]:has([class$="_composerSeat"]), [class*="wSkVaW_root"]')
       for (const el of all) {
         const r = el.getBoundingClientRect()
         if (r.width > 0 && r.height > 0) return el
@@ -564,7 +571,7 @@ function apply(ctx) {
     }
     const findVisibleHeadline = () => {
       if (typeof document === 'undefined') return null
-      const all = document.querySelectorAll('[class*="pXSMma_headline"]')
+      const all = document.querySelectorAll('[class$="_headline"], [class*="pXSMma_headline"]')
       for (const h of all) {
         const r = h.getBoundingClientRect()
         if (r.width > 0 && r.height > 0) return h
@@ -651,7 +658,8 @@ function apply(ctx) {
         s.height = '110px'
         /* z-index 0, NOT 1 — this is the fix for the wordmark painting on top of
            the app's own popovers, and the cause was a z-index TIE:
-             .wSkVaW_composerHero is position:relative + z-index:1, so it IS a
+             the composer hero (0.1.x '.wSkVaW_composerHero', 0.2.0
+             '.Dc7zOa_composerHero') is position:relative + z-index:1, so it IS a
              stacking context and the model-select menu's z-index:20 is trapped
              inside it; that 20 never competes at body level.
            The mark used to be z-index:1 too — the same level as composerHero in
@@ -849,12 +857,14 @@ function apply(ctx) {
        statically and no rAF loop is ever started.
 
        WHERE IT IS MOUNTED, and why this specific parent. Measured from the app's
-       own CSS, three elements paint an OPAQUE --dsw-alias-bg-base over any
-       body-level layer: the app frame ([class*='_frame']), the conversation column
-       ([class*='wSkVaW_root']) and the details column. A fixed <body> child would
-       therefore be invisible on every real page. The layer is instead a child of
-       the app FRAME, with those descendant fills neutralised to transparent while
-       the layer is mounted (the :has() guard makes all of it vanish when off).
+       own CSS, several elements paint an OPAQUE --dsw-alias-bg-base over any
+       body-level layer: the app frame ([class*='_frame']), the centre column and
+       (0.2.0) the right column, and the conversation column (the *_root that
+       contains the composer seat — 0.1.x 'wSkVaW_root', 0.2.0 'Dc7zOa_root'). A
+       fixed <body> child would therefore be invisible on every real page. The
+       layer is instead a child of the app FRAME, with those descendant fills
+       neutralised to transparent while the layer is mounted (the :has() guard
+       makes all of it vanish when off).
        The frame is already position:relative and creates NO stacking context, so
        an inset:0 z-index:0 child sits above the frame's own background and below
        every positioned descendant. The sidebar keeps its own colour because in
@@ -3441,7 +3451,10 @@ function apply(ctx) {
          Every absolute descendant the app itself renders (header:after, tab:after,
          heroGlow, the overlay composer seat) already has a positioned ancestor
          nearer than this column, so their containing blocks are unchanged. */
-      [class*='wSkVaW_root']:has(> [data-endfield-watermark]) {
+      /* Anchored on the structural '_root' suffix (scoped by our own watermark
+         being a DIRECT child), not the build's hash: 0.1.x was 'wSkVaW_root',
+         0.2.0 is 'Dc7zOa_root', and the rule must survive the next rehash. */
+      [class$='_root']:has(> [data-endfield-watermark]) {
         isolation: isolate;
         position: relative;
       }
@@ -3519,19 +3532,36 @@ function apply(ctx) {
         left: 0;
         pointer-events: none;
       }
-      /* Why these three transparency rules exist. Measured from the app's own
-         stylesheets: the frame, the conversation column and the details column each
-         paint an OPAQUE var(--dsw-alias-bg-base). Any of them left opaque hides the
-         sheet completely on a real page, which is exactly why the existing
-         watermark has to mount INSIDE the conversation column instead.
+      /* Why these transparency rules exist. Measured from the app's own
+         stylesheets: the frame, the centre column (0.2.0), the right column and
+         the conversation column each paint an OPAQUE var(--dsw-alias-bg-base).
+         Any of them left opaque hides the sheet completely on a real page, which
+         is exactly why the existing watermark has to mount INSIDE the
+         conversation column instead.
          Clearing them is safe and colour-neutral: the frame itself still supplies
          bg-base underneath, so the composited result is unchanged except that the
-         contour is now visible through it. */
+         contour is now visible through it.
+
+         Anchoring policy (learned the hard way in 0.2.0-rc2): the app rehashes its
+         css-modules on every build — 0.1.x's 'wSkVaW_root'/'ydkMvW_root' became
+         'Dc7zOa_root'/nothing, and the dead hash rules left the sheet covered
+         behind three opaque fills with NO error anywhere. So structural shapes
+         come first and pinned hashes stay only as 0.1.x fallbacks:
+           - the conversation root is the one *_root that CONTAINS a composer seat
+             (:has, evaluated by the engine, no JS bookkeeping);
+           - the centre/right columns are matched on their stable '_centerCol' /
+             '_rightbarCol' suffixes (the same policy as '_sidebarCol' below and
+             '_heroGlow' further down). */
       [class*='_frame']:has(> [data-endfield-contour]) {
         background: transparent !important;
       }
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_root']:has([class$='_composerSeat']),
       [class*='_frame']:has(> [data-endfield-contour]) [class*='wSkVaW_root'],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='ydkMvW_root'] {
+        background: transparent !important;
+      }
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_centerCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_rightbarCol'] {
         background: transparent !important;
       }
       /* The sidebar reads --dsw-specific-sidebar-fill, which this theme sets to the
