@@ -62,7 +62,7 @@ const MOCK = `<!doctype html><html><head><meta charset="utf-8"><style>
 <script src="./client.js"></script>
 <script>
 /* 0.2.0-rc2 mirror simulation.
-   - bind({namespace}) records every bind attempt.
+   - get(ns) records every namespace request.
    - The ENTRY-id namespace ('theme-endfield-contour-rework') starts 'loading'
      and turns 'ready' 400ms later with the seeded section (the real mirror
      settles after the first describe round-trip).
@@ -81,19 +81,24 @@ function scope020(ns, kind, section, delay){
   if(kind==='ready-delayed') setTimeout(()=>{ status='ready'; listeners.forEach(l=>l()) }, delay)
   return { getSnapshot:snap,
     subscribe:(l)=>{ listeners.push(l); return ()=>{ const i=listeners.indexOf(l); if(i>=0)listeners.splice(i,1) } },
-    set:(field,value)=>{ window.__SETS__.push([ns,field,String(value)]); return Promise.resolve() } }
+    set:(field,value)=>{ window.__SETS__.push([ns,field,String(value)]); return Promise.resolve(true) } }
 }
 const SEED={ enabled:'1', radius:'round', contour:'1', 'contour-anim':'1',
   palette:'valley', watermark:'1', loader:'0', thunder:'0' }
-window.__prefs={ binder:{
-  bind:({namespace})=>{
-    window.__BINDS__.push(namespace)
-    if(namespace===ENTRY_NS) return scope020(namespace,'ready-delayed',SEED,400)
-    return scope020(namespace,'unavailable',{enabled:'0'})
+/* The REAL 0.2.0-rc2 service face: the provider registers a "configForms"
+   service (settingsScope no longer exists on this build) whose per-namespace
+   face is configForms.get(entryId) → a ConfigFormController with
+   getSnapshot/subscribe/set (set RESOLVES false on a refused write). The theme
+   must find the service under its new name and adapt it. */
+window.__prefs={ configForms:{
+  get:(ns)=>{
+    window.__BINDS__.push(ns)
+    if(ns===ENTRY_NS) return scope020(ns,'ready-delayed',SEED,400)
+    return scope020(ns,'unavailable',{enabled:'0'})
   } } }
 const mod=window.__MOD__.factory(()=>null)
 const ctx={
-  get:(n)=>n==='theme'?{overrideTokens:()=>()=>{}}:(n==='settingsScope'?window.__prefs.binder:undefined),
+  get:(n)=>n==='theme'?{overrideTokens:()=>()=>{}}:(n==='configForms'?window.__prefs.configForms:undefined),
   effect:(f)=>{window.__dispose__=f()},
 }
 window.__apply__=()=>mod.apply(ctx)

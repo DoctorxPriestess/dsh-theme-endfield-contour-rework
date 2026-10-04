@@ -4,6 +4,33 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.5.2 — fix: 1.5.1 missed the browser-side rename (`settingsScope` → `configForms`)
+
+### 1.5.1 只修了一半
+
+1.5.1 correctly made the Host serve the namespace (Config schema with volatile fields under the
+entry id), but the CLIENT still looked for the **0.1.x browser service name** `ctx.settingsScope`.
+0.2.0-rc.2's `@deepseek-ai/dsh-client-ui-settings` registers the service as **`configForms`**
+(`new ConfigForms(ctx, …)`, consumed by `dsh-client-locale` as `ctx.configForms.get(entryId)`);
+the string `settingsScope` no longer appears anywhere in that bundle. Result: the binder lookup
+failed all 40 retries, `prefsScope` stayed `null`, every toggle stayed page-local — the exact
+same "nothing persists" symptom, now with the namespace actually being served.
+
+### 修复
+
+- **client.js** `getSettingsScopeBinder()` now resolves the 0.2.0 face first: `ctx.configForms`
+  (injected property or `ctx.get('configForms')`), adapted to this module's binder shape —
+  `bind({ namespace })` → `configForms.get(namespace)`. No decode is passed there:
+  ConfigFormController validates the served section against the Host schema itself, and the
+  theme's fields are plain strings. The legacy `ctx.settingsScope.bind` path stays for 0.1.x.
+- Write-failure handling: `ConfigFormController.set()` **resolves `false`** on a refused write
+  (it never rejects). `prefsCommit`/`prefsReplayDirty` now re-dirty the field and re-arm the
+  bounded retry on a `false` resolution, exactly as for a rejection — a refused write can no
+  longer be mistaken for a committed one.
+- `test/settings-scope-020.test.js` now simulates the REAL service face (`configForms.get(ns)`
+  returning a ConfigFormController-shaped object) instead of the retired `bind()` shape, and
+  keeps all seven assertions. Full CI 31/31.
+
 ## 1.5.1 — fix: settings fell back to defaults after a restart on DSH 0.2.0-rc.2
 
 ### 根因（0.2.0-rc.2 的设置服务换掉了对接面）

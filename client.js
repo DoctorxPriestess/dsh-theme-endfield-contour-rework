@@ -231,15 +231,35 @@ function apply(ctx) {
     /* Theme layers install *their* reconcile here once they exist (updated from
        the bottom of apply) so a transport event can live-apply a real change. */
     let reconcileFromPrefs = null
-    // Try the idiomatic injected-property access first (how DSH client plugins like
-    // dsh-client-locale consume settingsScope — exports.inject plus `ctx.xxx`), then
-    // the lookup form this module has historically used for optional services.
+    // 0.2.0-rc.2 renamed the browser settings service: `settingsScope` is gone,
+    // the provider is now `configForms` (see @deepseek-ai/dsh-client-ui-settings:
+    // `new ConfigForms(ctx, …)` registers the "configForms" service, and
+    // dsh-client-locale consumes it as `ctx.configForms.get(entryId)`). Adapt it
+    // to the binder shape this module already speaks: bind({namespace}) → a scope
+    // with getSnapshot / subscribe / set. ConfigFormController implements exactly
+    // those (snapshot {status, writable, mode, value}; set(field, value) →
+    // Promise<boolean>), so the shim is a pure rename — the schema-validated
+    // section needs no decode there (the legacy settingsScope mirror, if present,
+    // keeps receiving our decode).
+    const asPrefsBinder = (svc) => {
+      if (svc === undefined || svc === null) return undefined
+      if (typeof svc.bind === 'function') return svc
+      if (typeof svc.get === 'function') return { bind: ({ namespace }) => svc.get(namespace) }
+      return undefined
+    }
     const getSettingsScopeBinder = () => {
+      try {
+        const cf = ctx.configForms !== undefined && ctx.configForms !== null
+          ? ctx.configForms
+          : ctx.get('configForms')
+        const adapted = asPrefsBinder(cf)
+        if (adapted !== undefined) return adapted
+      } catch (e) { /* service not mounted (0.1.x builds) — fall through */ }
       try {
         if (ctx.settingsScope !== undefined && ctx.settingsScope !== null
           && typeof ctx.settingsScope.bind === 'function') return ctx.settingsScope
       } catch (e) { /* property may be a getter that throws when not available */ }
-      try { return ctx.get('settingsScope') } catch (e) { return undefined }
+      try { return asPrefsBinder(ctx.get('settingsScope')) } catch (e) { return undefined }
     }
     const prefsGetValue = () => {
       // A schema-accepted section from the transport, else in-memory defaults
@@ -341,8 +361,13 @@ function apply(ctx) {
           try {
             let p = null
             try { p = scope.set(field, local) } catch (e) { dbg('replay set threw', field, e && e.message); p = null }
-            if (p && typeof p.catch === 'function') {
-              p.catch((e) => { dbg('replay set REJECTED', field, local, String(e && e.message || e)); prefsDirty.add(field) })
+            if (p && typeof p.then === 'function') {
+              // 0.2.0 ConfigFormController.set RESOLVES false on a refused write
+              // (it never rejects): a `false` must keep the field dirty for a
+              // later replay, exactly like a rejection.
+              p.then((ok) => {
+                if (ok === false) { dbg('replay set not accepted', field, local); prefsDirty.add(field) }
+              }, (e) => { dbg('replay set REJECTED', field, local, String(e && e.message || e)); prefsDirty.add(field) })
             }
             dbg('replayed held', field, '=', local)
             prefsDirty.delete(field)
@@ -402,7 +427,13 @@ function apply(ctx) {
             dbg('commit', field, '=', encoded, 'status=', snap.status, 'mode=', snap.mode)
             let p = null
             try { p = scope.set(field, String(encoded)) } catch (e) { dbg('set threw', field, e && e.message); p = null }
-            if (p && typeof p.catch === 'function') p.catch((e) => dbg('set REJECTED', field, encoded, String(e && e.message || e)))
+            if (p && typeof p.then === 'function') {
+              // 0.2.0 ConfigFormController.set RESOLVES false on a refused write:
+              // re-dirty so the bounded retry loop replays it.
+              p.then((ok) => {
+                if (ok === false) { dbg('set not accepted', field, encoded); prefsDirty.add(field); prefsScheduleRetry() }
+              }, (e) => { dbg('set REJECTED', field, encoded, String(e && e.message || e)); prefsDirty.add(field); prefsScheduleRetry() })
+            }
             prefsDirty.delete(field)
             return true
           }

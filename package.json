@@ -1,6 +1,6 @@
 {
   "name": "dsh-theme-endfield-contour-rework",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Fork of dsh-theme-endfield (Arknights: Endfield industrial editorial theme for DeepSeek Harness) with a redesigned contour animation engine: precomputed tileable Perlin terrain, marching-squares contours, cached-texture scrolling. AI-assisted fork; tested on DSH 0.1.1-rc.2 through 0.2.0-rc.2.",
   "keywords": [
     "deepseek-harness",
