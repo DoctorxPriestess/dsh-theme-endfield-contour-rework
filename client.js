@@ -68,12 +68,17 @@ function apply(ctx) {
        changed and the saved settings silently reset to defaults.
 
        The durable authority is now DSH's own user-settings service. The HOST
-       half of this plugin (index.js) registers the `dsh-theme-endfield-contour-rework`
-       namespace through `ctx.settings`, which the settings provider persists
-       to the profile harness home (<dshHome>/settings.yaml) — a path owned by
-       DSH, entirely independent of the web origin/port. Here on the client we
-       read/write that same namespace over the browser `ctx.settingsScope`
-       service (the mirror of the host seam), so:
+       half of this plugin (index.js) makes its preference namespace visible
+       to that service two ways, per build era:
+       on 0.2.0-rc.2+ by exporting a Config schema (volatile fields; served
+       under the profile entry id `theme-endfield-contour-rework`), and on
+       0.1.x builds through `ctx.settings.register(ns, schema)` under the
+       package name. Either way the values persist to a DSH-owned store (the
+       profile's cordis patch / settings.yaml) — a path owned by DSH, entirely
+       independent of the web origin/port. Here on the client we read/write
+       the served namespace over the browser `ctx.settingsScope` service (the
+       mirror of the host seam), binding every candidate identity and using
+       whichever the mirror serves, so:
 
          dsh web     (browser, fixed loopback port)  -> host persistence
          DSH Desktop (browser, random loopback port) -> host persistence
@@ -99,6 +104,16 @@ function apply(ctx) {
        kept session-local so toggles still work in place but do not persist
        (there is no durable backend to persist to — and no localStorage). */
     const PREFS_NS = 'dsh-theme-endfield-contour-rework'
+    /* 0.2.0-rc.2 changed WHO the settings mirror serves. The service no longer
+       accepts host-side namespace registrations: it derives each served
+       namespace from the plugin entry's exported Config schema and names it
+       after the profile ENTRY id (cordis.patch.yml), not the package name. On
+       such builds the legacy package-name namespace below is never served, so
+       the client binds BOTH identities and prefers whichever scope the mirror
+       actually reports `ready`. Order matters for determinism only; on any real
+       build at most one of them can be ready. */
+    const PREFS_NS_ENTRY = 'theme-endfield-contour-rework'
+    const PREFS_NS_CANDIDATES = [PREFS_NS, PREFS_NS_ENTRY]
     const PREFS_FIELD_DEFAULTS = {
       enabled: '1',
       palette: 'valley',
@@ -179,7 +194,27 @@ function apply(ctx) {
        through prefsCommit with its own readiness gate. */
     const prefsWritten = new Map()
     let prefsFieldValue = null // last schema-resolved user+base+defaults section from the scope, if any
-    let prefsScope = null // the bound ctx.settingsScope scope, or null while absent/not ready
+    /* Every successfully bound scope (one per candidate namespace). `prefsScope`
+       stays the ACTIVE one: the first candidate whose mirror snapshot reports
+       status 'ready'. Both are subscribed; a late transition on either can
+       promote it to active. */
+    const prefsScopes = []
+    let prefsScope = null // the active bound ctx.settingsScope scope, or null while absent/not ready
+    /** Promote the first scope the mirror serves (`status:'ready'`); keep the
+        current active scope while it stays ready so a ready pair never flaps. */
+    const prefsRefreshActive = () => {
+      if (prefsScope !== null) {
+        let snap = null
+        try { snap = prefsScope.getSnapshot() } catch (e) { snap = null }
+        if (snap && snap.status === 'ready') return
+      }
+      prefsScope = null
+      for (const s of prefsScopes) {
+        let snap = null
+        try { snap = s.getSnapshot() } catch (e) { snap = null }
+        if (snap && snap.status === 'ready') { prefsScope = s; break }
+      }
+    }
     let prefsBindTimer = null // retry handle for a settingsScope that arrives late
     let prefsRetryTimer = null // bounded retry for held edits whose ready cue has not arrived
     // Max held-edit retry passes. The ready transition is normally the cue; this
@@ -394,8 +429,40 @@ function apply(ctx) {
        theme's apply() runs; without this retry a single synchronous attempt that
        raced would leave prefsScope null forever and every subsequent toggle would
        silently stay page-local — the exact "works now, gone on refresh" symptom. */
+    const decodePrefsSection = (section) => {
+      // Section arrives already schema-validated by the shared mirror: it
+      // carries the merged defaults + base + stored user values, typed to our
+      // schema (all fields are strings). Fall back to schema defaults for a
+      // field the mirror has not resolved yet.
+      if (section === null || typeof section !== 'object') return Object.assign({}, PREFS_FIELD_DEFAULTS)
+      const out = Object.assign({}, PREFS_FIELD_DEFAULTS)
+      for (const k of Object.keys(PREFS_FIELD_DEFAULTS)) {
+        if (Object.prototype.hasOwnProperty.call(section, k)) out[k] = String(section[k])
+      }
+      return out
+    }
+    /* Shared subscription body for every bound scope. A transition on ANY
+       candidate can promote it to active (prefsRefreshActive), adopt its served
+       section, and replay edits held while no namespace was served yet. */
+    const prefsOnScopeEvent = () => {
+      prefsRefreshActive()
+      let snap = null
+      try { snap = prefsScope ? prefsScope.getSnapshot() : null } catch (e) { snap = null }
+      if (snap && (snap.status === 'ready' || snap.status === 'unavailable')) {
+        if (snap.status === 'ready' && snap.value !== undefined) {
+          prefsFieldValue = snap.value
+          prefsSettleWritten()
+        }
+        // An unavailable/loading -> ready transition is precisely when an edit
+        // we HELD (see prefsCommit) can finally be written: replay any dirty
+        // fields the moment the namespace is durably served. prefsReplayDirty
+        // is a no-op when nothing is held or the scope is not yet served.
+        prefsReplayDirty()
+        prefsEmit()
+      }
+    }
     const rebindPrefs = (attempt) => {
-      if (prefsScope !== null) return
+      if (prefsScopes.length > 0) return
       if (attempt > 40) { dbg('gave up binding settingsScope after retries; staying in-memory'); return }
       const binder = getSettingsScopeBinder()
       if (binder === undefined || binder === null || typeof binder.bind !== 'function') {
@@ -407,52 +474,32 @@ function apply(ctx) {
         }
         return
       }
-      let scope = null
-      try {
-        scope = binder.bind({ namespace: PREFS_NS, decode: (section) => {
-          // Section arrives already schema-validated by the shared mirror: it
-          // carries the merged defaults + base + stored user values, typed to our
-          // schema (all fields are strings). Fall back to schema defaults for a
-          // field the mirror has not resolved yet.
-          if (section === null || typeof section !== 'object') return Object.assign({}, PREFS_FIELD_DEFAULTS)
-          const out = Object.assign({}, PREFS_FIELD_DEFAULTS)
-          for (const k of Object.keys(PREFS_FIELD_DEFAULTS)) {
-            if (Object.prototype.hasOwnProperty.call(section, k)) out[k] = String(section[k])
-          }
-          return out
-        } })
-      } catch (e) {
-        scope = null
-        dbg('bind threw', e && e.message)
+      // Bind EVERY candidate identity. On 0.2.0+ only the profile-entry-id
+      // namespace is served (the legacy one answers 'unavailable'); on 0.1.x it
+      // is the reverse. A mirror that rejects an unknown namespace at bind time
+      // just yields no scope for that candidate.
+      for (const ns of PREFS_NS_CANDIDATES) {
+        let scope = null
+        try {
+          scope = binder.bind({ namespace: ns, decode: decodePrefsSection })
+        } catch (e) {
+          scope = null
+          dbg('bind threw', ns, e && e.message)
+        }
+        if (scope === null) continue
+        prefsScopes.push(scope)
+        if (typeof scope.subscribe === 'function') scope.subscribe(() => prefsOnScopeEvent())
       }
-      if (scope === null) {
+      if (prefsScopes.length === 0) {
         if (typeof setTimeout === 'function') prefsBindTimer = setTimeout(() => rebindPrefs(attempt + 1), 250)
         return
       }
-      prefsScope = scope
-      const initial = scope.getSnapshot ? scope.getSnapshot() : null
-      if (initial) dbg('bound scope; initial status=', initial.status, 'writable=', initial.writable, 'mode=', initial.mode, 'valueKeys=', initial.value ? Object.keys(initial.value).length : 0)
+      prefsRefreshActive()
+      const initial = prefsScope && prefsScope.getSnapshot ? prefsScope.getSnapshot() : null
+      if (initial) dbg('bound', prefsScopes.length, 'scope(s); active status=', initial.status, 'writable=', initial.writable, 'mode=', initial.mode, 'valueKeys=', initial.value ? Object.keys(initial.value).length : 0)
       if (initial && initial.status === 'ready' && initial.value !== undefined) {
         prefsFieldValue = initial.value
         prefsSettleWritten()
-      }
-      if (typeof scope.subscribe === 'function') {
-        scope.subscribe(() => {
-          let snap = null
-          try { snap = scope.getSnapshot() } catch (e) { snap = null }
-          if (snap && (snap.status === 'ready' || snap.status === 'unavailable')) {
-            if (snap.status === 'ready' && snap.value !== undefined) {
-              prefsFieldValue = snap.value
-              prefsSettleWritten()
-            }
-            // An unavailable/loading -> ready transition is precisely when an edit
-            // we HELD (see prefsCommit) can finally be written: replay any dirty
-            // fields the moment the namespace is durably served. prefsReplayDirty
-            // is a no-op when nothing is held or the scope is not yet served.
-            prefsReplayDirty()
-            prefsEmit()
-          }
-        })
       }
       // Catch up: an edit made before the scope settled must still persist. Replay
       // only genuinely user-changed fields (those prefsSet recorded as dirty) that
@@ -464,6 +511,7 @@ function apply(ctx) {
     // Dispose on run teardown (mirrors ctx.effect owned resources).
     ctx.effect(() => () => {
       prefsListeners.length = 0
+      prefsScopes.length = 0
       prefsScope = null
       prefsFieldValue = null
       prefsWritten.clear()
@@ -475,6 +523,7 @@ function apply(ctx) {
     // Dispose on run teardown (mirrors ctx.effect owned resources).
     ctx.effect(() => () => {
       prefsListeners.length = 0
+      prefsScopes.length = 0
       prefsScope = null
       prefsFieldValue = null
       prefsWritten.clear()

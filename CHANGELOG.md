@@ -4,6 +4,50 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.5.1 — fix: settings fell back to defaults after a restart on DSH 0.2.0-rc.2
+
+### 根因（0.2.0-rc.2 的设置服务换掉了对接面）
+
+The user's values were never lost — `cordis.patch.yml` still held them. What broke was the
+handoff. 0.2.0-rc.2's `@deepseek-ai/dsh-settings` no longer accepts host-side
+`ctx.settings.register(ns, schema)` calls: it derives each served namespace from the plugin
+entry's **exported `Config` schema**, serves it under the **profile ENTRY id**
+(`theme-endfield-contour-rework`, from cordis.patch.yml — not the package name), and skips any
+entry whose schema has no `.volatile()` field. Three facts compounded:
+
+- the old `settings.register()` call no longer exists → our try/catch swallowed the failure
+  silently, so the namespace was never served;
+- the package exported no `Config` at all → `describe()` could not have served one anyway;
+- the client bound only the package-name namespace → the browser mirror answered
+  `'unavailable'` forever → the durable-write gate held every edit session-local and every
+  restart started from the shipped defaults. Toggles worked in-page, which made the bug look
+  like "lost on restart" rather than "never persisted".
+
+### 修复
+
+- **index.js** exports a `Config` Schemastery schema: the same 15 fields/defaults, every field
+  declared `.volatile()` (guarded for schemastery builds without the method). The legacy
+  `settings.register()` path stays for 0.1.x builds, now guarded by an existence check instead
+  of a silent catch. With no schemastery resolvable, `Config` is `undefined` and the theme
+  degrades to a no-op exactly as before.
+- **client.js** binds BOTH candidate namespaces — the profile entry id and the legacy package
+  name — and adopts whichever scope the mirror reports `'ready'` (sticky while it stays ready;
+  each bound scope is subscribed so a late transition can promote it). On any real build at
+  most one identity can be served, so selection is deterministic.
+- **test/settings-scope-020.test.js** simulates the 0.2.0 mirror: entry-id namespace starts
+  `'loading'` and turns `'ready'` later, the legacy namespace answers `'unavailable'` while
+  carrying a poisoned `enabled:'0'` section the client must NOT read. Asserts defaults during
+  loading, both binds, adoption of the served section (radius + contour) after the ready
+  transition, and that the poisoned section is ignored. Full CI now 31/31.
+
+### 已知边界
+
+- The entry id is fixed by the shipped `cordis.patch.yml` (`theme-endfield-contour-rework`).
+  An install that renames the entry id in the profile would leave only the legacy candidate,
+  which 0.2.0 never serves — the settings page would degrade to session-local again.
+- The native Settings GUI now also shows these fields (auto-generated from the Config schema);
+  editing either surface writes the same entry config.
+
 ## 1.5.0 — full 0.2.0-rc.2 re-anchor: every remaining 0.1.x hash rule rebuilt structurally
 
 ### 1.4.1 只修了背景；这一轮把审计出的全部 8 组哈希锚定规则重建

@@ -46,6 +46,12 @@
 
 **写后立刻回读：写透层（2026-09 修复）。** 上面第 2/3 条合起来有一个时序陷阱：`scope.set()` 是**异步**提交的，写完之后本段快照在同一个 tick 里仍是旧值。于是任何「写完立刻 `prefsGet` 再决策」的处理器都会拿到**上一次**的值——用户看到的现象就是「挡位要点两次才生效，第一次点击只是刷新了面板」。受影响的正是那几处：密度要读回新值才能重新提取、方向/速度要读回新值才能更新缓存、粗糙度要读回新值才能决定重建哪一档。修法是加一层**写透覆盖**（`prefsWritten`）：`prefsSet` 把刚写的值记在页面内，`prefsGet` 若命中该字段就先返回它，等 Host 的回相（`scope.subscribe` 快照里该字段真的变成新值）到达后由 `prefsSettleWritten()` 退役这条记录，此后仍以 scope 快照为准。取消挂载时清空，不留跨会话状态。回归测试 `test/prefs-write-latency.test.js` 用一个**延迟回写**的 scope 桩复现原始时序（去掉那行 `if (prefsWritten.has(field)) return ...` 即失败），并断言未确认的写不会被回相撤回（页面内保持有效，不出现「写了又被悄悄还原」）。
 
+### 0.2.0-rc.2 换掉了对接面：register() 没了，namespace = profile entry id（2026-10 修复）
+
+上面「声明」一条描述的是 0.1.x 的世界。0.2.0-rc.2 的 `@deepseek-ai/dsh-settings` **删掉了 `settings.register()`**：它直接从插件模块导出的 `Config` Schemastery schema 派生可服务的表单，namespace 用的是 **profile entry id**（我们由 cordis.patch.yml 声明为 `theme-endfield-contour-rework`，不是包名），并且 **schema 里没有一个 `.volatile()` 字段的条目完全不进服务目录**。1.5.1 之前三件事叠加：`register()` 调用被 try/catch 静默吞掉（该 API 已不存在）、包没导出任何 `Config`、client 只绑定包名 namespace——于是浏览器 mirror 对本命名空间永远回答 `'unavailable'`，持久化写闸把所有编辑按住只留在会话内，**每次重启都从出厂默认值开始**（而用户旧值其实完好地躺在 cordis.patch.yml 里，只是读不回来）。面板当场生效，所以症状看起来像「重启后丢」，实际是「从未写成功」。
+
+修复分两半。**Host（index.js）**：导出 `Config` schema（同样的 15 个字段与默认值，每个字段 `.volatile()`——无该方法的老 schemastery 退化为普通字段），旧的 `register()` 路径保留给 0.1.x 并改为先判存在再调用。**Client（client.js）**：同时绑定**两个候选 namespace**（entry id + 旧包名），采用 mirror 报 `'ready'` 的那个 scope（保持粘性，避免 ready 双活时抖动；每个绑定的 scope 都订阅，迟到的 ready 转换也能接管）。真实构建里两个身份至多一个被服务，选择是确定的。回归测试 `test/settings-scope-020.test.js` 模拟 0.2.0 mirror：entry id namespace 先 `'loading'` 后 `'ready'`，旧包名 namespace 永远 `'unavailable'` 且带一段**有毒的** `enabled:'0'`——断言加载期用默认值、两个身份都被绑定、ready 后采纳被服务段（圆角 + 等高线）、有毒段被忽略。
+
 ## 变量必须声明在 body 而不是 :root
 
 **应用把主题令牌写成 `<body>` 的行内样式**（`dsh-client-ui-layout` 对每个令牌调用 `body.style.setProperty`）。

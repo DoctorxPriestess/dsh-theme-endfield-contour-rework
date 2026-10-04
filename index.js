@@ -164,6 +164,12 @@ function apply(ctx) {
     // the theme a no-op instead of crashing on require.
     const z = loadSchemastery();
     if (z === undefined || typeof z.object !== 'function' || typeof z.string !== 'function') return;
+    // 0.2.0-rc.2 removed settings.register(): the settings service serves forms
+    // straight from each entry's exported Config schema (see buildConfigSchema
+    // below), so on 0.2.0+ this legacy registration is simply a no-op. On 0.1.x
+    // builds this call is still THE way the browser mirror learns the namespace,
+    // so it must keep running there.
+    if (typeof settingsCtx.settings.register !== 'function') return;
     const fields = {};
     for (const [field, fallback] of Object.entries(FIELD_DEFAULTS)) {
       fields[field] = z.string().default(fallback);
@@ -179,9 +185,49 @@ function apply(ctx) {
   });
 }
 
+/**
+ * 0.2.0-rc.2 settings integration (the `settings.register` replacement).
+ *
+ * The 0.2.0 settings service (`@deepseek-ai/dsh-settings`) no longer accepts
+ * runtime registrations. It derives the served form of a plugin DIRECTLY from
+ * the module's exported `Config` Schemastery schema, and serves it to the
+ * browser mirror under the profile ENTRY id (ours: `theme-endfield-contour-
+ * rework`, declared by cordis.patch.yml) — see `describe()` in that package:
+ * an entry whose schema has no `.volatile()` field is not served AT ALL, and
+ * only volatile fields are projected into the served section. Writes persist
+ * through the active profile's cordis patch (cordis.patch.yml), which is
+ * origin-independent exactly like the old settings.yaml was.
+ *
+ * Every theme field is therefore declared `.volatile()` (guarded: a schemastery
+ * without the method keeps the plain field, and an older DSH simply ignores
+ * this export and keeps using the register() path above). The field set and
+ * defaults are the same FIELD_DEFAULTS the client half mirrors, so a section
+ * written by either era reads back identically.
+ */
+function buildConfigSchema() {
+  const z = loadSchemastery();
+  if (z === undefined || typeof z.object !== 'function' || typeof z.string !== 'function') return undefined;
+  const fields = {};
+  for (const [field, fallback] of Object.entries(FIELD_DEFAULTS)) {
+    let f = z.string().default(fallback);
+    try {
+      if (f && typeof f.volatile === 'function') f = f.volatile();
+    } catch (e) { /* keep the plain field */ }
+    fields[field] = f;
+  }
+  return z.object(fields);
+}
+
+const Config = buildConfigSchema();
+
 module.exports = {
   name: NAME,
   apply,
+  // 0.2.0+: the loader reads this export (fiber.runtime.Config) and the
+  // settings service serves it under the profile entry id. Undefined when no
+  // schemastery could be resolved — the theme then degrades to a no-op exactly
+  // as it always did on a profile without a settings service.
+  Config,
   // Exposed for tests/documentation.
   NAMESPACE,
   FIELD_DEFAULTS,

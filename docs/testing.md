@@ -187,6 +187,8 @@ node test/shoot.js                    # 输出亮/暗 × 两配色共四张截�
 
 **`settings-buttons.test.js`**（见[设置页](#设置页)）自 1.5.0 起在夹具里同时渲染**两套拼写的孪生按钮**：0.1.x 哈希命名的（`zGbnIq_secondaryButton` 等，验证旧版回退仍有效）与 0.2.0-rc.2 命名的（`_3nPmjq_secondaryButton`、`p_wyXq_inspectButton`、`_3nPmjq_dangerButton`，验证语义名锚点命中新构建），两套拼写都要在两套配色、明暗两种方案下通过合成对比度断言（共 49 条）；「轨迹/工作区箭头未被误改」两条防过度匹配的守卫保持不变。
 
+**`settings-scope-020.test.js`** 是 1.5.1 的「重启后设置回退默认」回归：模拟 0.2.0-rc.2 的设置 mirror——entry id namespace（`theme-endfield-contour-rework`）先 `'loading'` 后异步转 `'ready'`，旧包名 namespace 永远 `'unavailable'` 且藏一段有毒的 `enabled:'0'`。断言：加载期主题按默认值安装、两个候选 namespace 都被绑定、ready 转换后采纳被服务段（圆角 class + 等高线层挂载）、有毒段被忽略、拆除干净。机理见工程笔记「0.2.0-rc.2 换掉了对接面」一节。
+
 **`contour-specks.test.js`** 守四件事，并逐一做了反向对照：改回写死种子 → 报「5 次加载地形完全相同」；关掉过滤器 → 报 9 条全画布外、15 条短描边、7 个小环；空白格门槛调回 1 → 空白格重现。（同样的碎屑属性在 Node 侧由 `contour-cusps` 复核：最短绘制等高线与最小环包围盒都必须高于过滤阈值。）
 
 **`contour-cusps.test.js`** 量**真正画出来的曲线本身**：桩掉一个 2d context，让**原样切出的** `contourRenderCache()` 自己录下 `moveTo/lineTo/bezierCurveTo/closePath` 调用流（单次 `beginPath` + 每条路径一个 `moveTo`，因此先按 `moveTo` 切成子路径），再密集 de Casteljau 采样、逐点测转角（闭合环丢掉与起点重合的末样本后**按循环测，接缝一并计入**）。样条与路径布局不在测试里重算，所以测试不会悄悄偏离它要检查的渲染器。
