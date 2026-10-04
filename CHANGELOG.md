@@ -4,6 +4,51 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.5.0 — full 0.2.0-rc.2 re-anchor: every remaining 0.1.x hash rule rebuilt structurally
+
+### 1.4.1 只修了背景；这一轮把审计出的全部 8 组哈希锚定规则重建
+
+The 1.4.1 fix restored the contour sheet, but the audit for it showed the same defect class in
+**eight more rule groups** — every one pinned to a 0.1.x build hash, every one silently dead on
+0.2.0-rc.2: workspace browser rows (hover/selected/ink), the agent-preset header chip, the token
+meter's segment colours, the appearance theme cube's selected border, the composer +/send buttons,
+the accent-fill hover-ink set (settings row actions + inspect panels), and the danger button.
+
+All of them are now anchored on **semantic NAME substrings** (`[class*='_sessionRow']`,
+`[class*='_inspectButton']`, `[class*='_colorMessages']`, …), each re-derived by auditing the
+0.2.0-rc.2 bundles the same way the 1.4.0 audit did. Highlights:
+
+- `secondaryButton`/`dangerButton`/`inspectButton` each collapsed **multiple** 0.1.x hashes
+  (three separate inspect modules in 0.1.x, four inspect modules in 0.2.0) into one name anchor.
+- The genuinely generic tokens (`_chevron`, `_arrow`, `_iconButton`, `_primary`, `_add`, `_label`,
+  `_slot`) are scoped to their component root — identified structurally (`:has`) — because a bare
+  suffix match would recolour unrelated elements and invent new contrast bugs. The workspace root
+  is "the `*_root` containing a session row", the composer column "the `*_root` containing a
+  composer seat"; `_add` additionally excludes `_addButton` (settings' add button keeps the
+  translucent wash, and the deliverables `_add` takes no fill at all).
+- The 0.1.x attachment-carousel arrow (`.JVDQca_arrow`) survives as a legacy fallback only: the
+  0.2.0-rc.2 audit found **no** carousel arrow carrying the solid-accent hover fill.
+- `.pXSMma_previewBadge` likewise: the 0.2.0 hero no longer renders that element.
+
+### 每条规则都以 0.2.0-rc.2 的真实类名验证
+
+- `test/settings-buttons.test.js` now renders **twins** — the 0.1.x-named buttons (legacy fallback
+  still works) alongside 0.2.0-named ones (`_3nPmjq_secondaryButton`, `p_wyXq_inspectButton`,
+  `_3nPmjq_dangerButton`) — and asserts composited contrast for both spellings in both palettes
+  and both schemes: **49 assertions**, green.
+- The over-match guards stay: trajectory/workspace arrows must keep their resting ink.
+- Full CI 30/30 green.
+
+### 已知边界（如实记录）
+
+- `_secondaryButton`/`_primaryButton` anchors now also cover the settings-account bundle's buttons
+  (0.1.x only knew settings-models) — same defect class, so covering them is intended.
+- The agent-preset chip anchors on "a `_label` with an `_icon` child inside the composer column";
+  if a future build adds another labelled+iconed control there it would be picked up — the token
+  name `label` alone is shared by 14 bundles, which is exactly why this rule keeps a scope.
+- The `.pXSMma_previewBadge` and attachment-carousel rules are dead code on 0.2.0-rc.2 (elements
+  no longer exist under those names) and are kept for older builds.
+
 ## 1.4.1 — fix: the contour sheet was invisible on DSH 0.2.0-rc.2
 
 ### 根因：透明化规则锚在 0.1.x 的 css-module 哈希上，0.2.0 重新哈希后全部落空

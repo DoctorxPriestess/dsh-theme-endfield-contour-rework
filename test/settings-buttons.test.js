@@ -59,11 +59,23 @@ const UPSTREAM = `
   .zGbnIq_addButton.HOVERPROBE:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
   .zGbnIq_dangerButton{box-sizing:border-box;height:36px;border:1px solid var(--dsw-alias-border-l2);
     color:var(--dsw-alias-label-error);background:0 0;border-radius:18px;padding:0 14px}
+  /* 0.2.0-rc.2 twins: same bundle, rehashed module names. The theme anchors on the
+     semantic NAME substring, so both spellings must receive identical ink. */
+  ._3nPmjq_secondaryButton{box-sizing:border-box;height:36px;font:inherit;cursor:pointer;
+    border:1px solid var(--dsw-alias-border-l2);border-radius:18px;justify-content:center;
+    align-items:center;gap:4px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex;
+    color:var(--dsw-alias-label-primary);background:0 0}
+  ._3nPmjq_secondaryButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}
+  ._3nPmjq_secondaryButton.HOVERPROBE:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}
+  ._3nPmjq_dangerButton{box-sizing:border-box;height:36px;border:1px solid var(--dsw-alias-border-l2);
+    color:var(--dsw-alias-label-error);background:0 0;border-radius:18px;padding:0 14px}
   /* Same defect, other screens. These three re-assert label-primary in the SAME
      rule that sets the accent fill, so they are the strongest form of the bug. */
   .gNWCoW_inspectButton{color:var(--dsw-alias-label-secondary);background:0 0;border:none;cursor:pointer}
   .gNWCoW_inspectButton:hover{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
   .gNWCoW_inspectButton.HOVERPROBE{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
+  .p_wyXq_inspectButton{color:var(--dsw-alias-label-secondary);background:0 0;border:none;cursor:pointer}
+  .p_wyXq_inspectButton.HOVERPROBE{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
   .JVDQca_arrow{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-specific-input-major);
     width:24px;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer}
   .JVDQca_arrow:hover{background:var(--dsw-alias-interactive-bg-hover-solid)}
@@ -92,6 +104,10 @@ fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><style>
   <button class="JVDQca_arrow HOVERPROBE" id="arrowHover">&gt;</button>
   <span class="Y0dWHa_arrow" id="trajArrow">&gt;</span>
   <span class="YDXeBa_arrow" id="wsArrow">&gt;</span>
+  <button class="_3nPmjq_secondaryButton" id="edit020">编辑</button>
+  <button class="_3nPmjq_secondaryButton HOVERPROBE" id="editHover020">编辑</button>
+  <button class="_3nPmjq_dangerButton" id="danger020">移除</button>
+  <button class="p_wyXq_inspectButton HOVERPROBE" id="inspectHover020">检查</button>
 </div>
 <script>window.__ModuleLoader__={load:(m)=>{window.__MOD__=m}}</script>
 <script src="./client.js"></script>
@@ -182,6 +198,16 @@ const run=(paletteName)=>{
     R(tag+' · 轨迹箭头 未被误改', ta.ratio>=4.5, ta.ratio.toFixed(2)+':1  fg='+ta.fg+' on '+ta.bg)
     const wa=probe('wsArrow')
     R(tag+' · 工作区箭头 未被误改', wa.ratio>=4.5, wa.ratio.toFixed(2)+':1  fg='+wa.fg+' on '+wa.bg)
+    /* --- 0.2.0-rc.2 twins: same buttons, rehashed module names. The theme must
+       reach them through the semantic NAME anchors, not the 0.1.x hashes. --- */
+    const h02=probe('editHover020')
+    R(tag+' · 编辑 悬停（0.2.0 类名）', h02.ratio>=4.5, h02.ratio.toFixed(2)+':1  fg='+h02.fg+' on '+h02.bg)
+    const r02=probe('edit020')
+    R(tag+' · 编辑 常态（0.2.0 类名）', r02.ratio>=4.5, r02.ratio.toFixed(2)+':1  fg='+r02.fg+' on '+r02.bg)
+    const d02=probe('danger020')
+    R(tag+' · 移除 常态（0.2.0 类名）', d02.ratio>=4.5, d02.ratio.toFixed(2)+':1  fg='+d02.fg+' on '+d02.bg)
+    const i02=probe('inspectHover020')
+    R(tag+' · 检查按钮 悬停（0.2.0 类名）', i02.ratio>=4.5, i02.ratio.toFixed(2)+':1  fg='+i02.fg+' on '+i02.bg)
   }
 }
 

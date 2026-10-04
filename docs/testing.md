@@ -183,7 +183,9 @@ node test/shoot.js                    # 输出亮/暗 × 两配色共四张截�
 
 > 这套脚本抓到了三个真实 bug，都不是解析错误：子开关在已挂载时失效、TDZ 崩溃隐患、重启动画的首帧是空转。详见[工程笔记](engineering-notes.md#等高线背景)。
 
-**`contour-render-020.test.js`** 是 0.2.0-rc.2 的可见性回归：应用重新哈希 css-module 后（`wSkVaW_root` → `Dc7zOa_root` 等），透明化规则一度全部落空——图层挂载、画布绘制、主题样式全部正常，**唯独背景被新哈希的不透明底色盖住**，控制台零报错。该测试用 0.2.0-rc.2 形状的 DOM 跑真实 client.js，断言中列/右列/对话根的底色在挂载期间必须透明、画布必须有墨迹、正文仍在其上。修复前它抓到三个 FAIL（`centre column bg cleared -> rgb(232, 232, 226)` 等）。
+**`contour-render-020.test.js`** 是 0.2.0-rc.2 的可见性回归：应用重新哈希 css-module 后（`wSkVaW_root` → `Dc7zOa_root` 等），透明化规则一度全部落空——图层挂载、画布绘制、主题样式全部正常，**唯独背景被新哈希的不透明底色盖住**，控制台零报错。该测试用 0.2.0-rc.2 形状的 DOM 跑真实 client.js，断言中列/右列/对话根的底色在挂载期间必须透明、画布必须有墨迹、正文仍在其上。修复前它抓到三个 FAIL（`centre column bg cleared -> rgb(232, 232, 226)` 等）。1.5.0 起它与 `settings-buttons.test.js` 一同覆盖全部语义锚点。
+
+**`settings-buttons.test.js`**（见[设置页](#设置页)）自 1.5.0 起在夹具里同时渲染**两套拼写的孪生按钮**：0.1.x 哈希命名的（`zGbnIq_secondaryButton` 等，验证旧版回退仍有效）与 0.2.0-rc.2 命名的（`_3nPmjq_secondaryButton`、`p_wyXq_inspectButton`、`_3nPmjq_dangerButton`，验证语义名锚点命中新构建），两套拼写都要在两套配色、明暗两种方案下通过合成对比度断言（共 49 条）；「轨迹/工作区箭头未被误改」两条防过度匹配的守卫保持不变。
 
 **`contour-specks.test.js`** 守四件事，并逐一做了反向对照：改回写死种子 → 报「5 次加载地形完全相同」；关掉过滤器 → 报 9 条全画布外、15 条短描边、7 个小环；空白格门槛调回 1 → 空白格重现。（同样的碎屑属性在 Node 侧由 `contour-cusps` 复核：最短绘制等高线与最小环包围盒都必须高于过滤阈值。）
 

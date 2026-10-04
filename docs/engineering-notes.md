@@ -88,6 +88,8 @@
 
 **锚定必须用结构后缀，不能用构建哈希（0.2.0-rc.2 的教训）。** 这些透明化规则最初锚在 0.1.x 构建的 css-module 哈希上（`wSkVaW_root` / `ydkMvW_root`）；0.2.0-rc.2 把所有模块重新哈希（对话列根变成 `Dc7zOa_root`，详情列变成 `BynINW_rightbarCol`，且 `BynINW_centerCol` 开始自涂 bg-base），规则一条不剩地落空——于是**图层照常挂载、画布照常绘制、主题样式照常生效，唯独背景被三块不透明底色盖得严严实实**，控制台无任何报错。修复后锚定改为结构后缀：对话列根 = 「包含 composer 座的唯一的 `*_root`」（`[class$='_root']:has([class$='_composerSeat'])`），中列/右列 = `_centerCol` / `_rightbarCol` 后缀，与早已这么做的 `_sidebarCol`、`_heroGlow` 一致；0.1.x 的哈希保留为回退。回归防护：`test/contour-render-020.test.js` 用 0.2.0-rc.2 形状的 DOM 跑真实 client.js，逐项断言底色透明与画布墨迹。
 
+**1.5.0：同样的缺陷不止在背景——其余全部哈希规则一并重建。** 背景修复的审计同时暴露了另外 8 组锚在 0.1.x 哈希上的规则（工作区行 hover/选中/墨迹、agent 预设标签、token 计量条分段色、主题立方选中描边、composer 加号/发送键、强调色悬停墨迹集合、危险按钮），在 0.2.0-rc.2 上同样全部静默失效。全部改为语义名后缀（`[class*='_sessionRow']`、`[class*='_inspectButton']`、`[class*='_colorMessages']`…），其中**真正通用的 token**（`_chevron`/`_arrow`/`_iconButton`/`_primary`/`_add`/`_label`/`_slot`）必须先按组件根收窄——工作区根 = 「包含 `_sessionRow` 的 `*_root`」，composer 列 = 「包含 `_composerSeat` 的 `*_root`」，`_add` 还要排除 `_addButton`——否则裸后缀会误染无关元素，制造出新的对比度问题（轨迹/工作区箭头的「未被误改」断言就是这道防线）。`secondaryButton`/`dangerButton`/`inspectButton` 各自合并了多个旧哈希（inspect 在 0.1.x 有 3 个、0.2.0 有 4 个模块），一条语义锚全覆盖；副作用是也覆盖了 0.1.x 不存在的 settings-account 捆包（同类缺陷，属预期收益）。附件轮播箭头 `.JVDQca_arrow` 与 `.pXSMma_previewBadge` 在 0.2.0-rc.2 已无对应元素，仅作为旧版本回退保留。`test/settings-buttons.test.js` 现在同时渲染 0.1.x 命名与 0.2.0 命名（`_3nPmjq_secondaryButton` 等）的孪生按钮，两套拼写都要过对比度断言。
+
 外框本身已是 `position: relative` 且**不产生层叠上下文**，因此 `inset:0; z-index:0` 的子元素正好落在「外框底色之上、所有定位子元素之下」。
 
 侧栏底色也一并透明：本主题里 `--dsw-specific-sidebar-fill` 与 `--dsw-alias-bg-base` **本就是同一个值**，所以这不改变任何像素，只是让整片地形连续穿过侧栏。

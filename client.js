@@ -3757,41 +3757,43 @@ function apply(ctx) {
       :is([role='tab'], [role='menuitem'], [role='option'], [role='link'], [role='treeitem'], [role='checkbox'], [role='switch'], [role='radio'], [role='combobox'], [class*='nav-item' i], [class*='menu-item' i], [class*='list-item' i], [class*='session-item' i], [class*='workspace-item' i], [class*='search-result' i], [class*='item' i], [class*='tab' i], [class*='card' i], [class*='row' i], [class*='tool' i], [class*='composer' i]):hover {
         color: var(--dsw-alias-label-primary) !important;
       }
-      /* ---------- Workspace browser rows (YDXeBa) ---------- */
-      .YDXeBa_slot {
+      /* ---------- Workspace browser rows ----------
+         0.1.x pinned the build hash 'YDXeBa'; 0.2.0-rc.2 rehashed it to 'hIlkoa'
+         and silently disabled every rule here. Anchored on the semantic suffixes
+         now: _projectRow/_sessionRow/_searchResultRow/_selected are unique to the
+         workspace bundle. The genuinely generic tokens (_chevron/_arrow/
+         _iconButton, also rendered by chat/cordis/skill/tool/model-selection) are
+         scoped under the workspace ROOT, identified structurally as the *_root
+         that contains a session row — the same ancestor trick the conversation
+         root uses below. */
+      [class*='_root']:has([class$='_sessionRow']) [class*='_slot'] {
         color: var(--dsw-alias-brand-primary) !important;
       }
-      .YDXeBa_projectRow:hover,
-      .YDXeBa_sessionRow:hover,
-      .YDXeBa_sessionRow.YDXeBa_selected,
-      .YDXeBa_searchResultRow:hover,
-      .YDXeBa_searchResultRow.YDXeBa_selected {
+      [class*='_projectRow']:hover,
+      [class*='_sessionRow']:hover,
+      [class*='_sessionRow'][class*='_selected'],
+      [class*='_searchResultRow']:hover,
+      [class*='_searchResultRow'][class*='_selected'] {
         background: rgba(var(--edge-accent-rgb), 0.22) !important;
       }
-      .YDXeBa_projectRow:hover *,
-      .YDXeBa_sessionRow:hover *,
-      .YDXeBa_sessionRow.YDXeBa_selected *,
-      .YDXeBa_searchResultRow:hover *,
-      .YDXeBa_searchResultRow.YDXeBa_selected * {
+      [class*='_projectRow']:hover *,
+      [class*='_sessionRow']:hover *,
+      [class*='_sessionRow'][class*='_selected'] *,
+      [class*='_searchResultRow']:hover *,
+      [class*='_searchResultRow'][class*='_selected'] * {
         color: #000 !important;
       }
       /* ---------- Light mode: workspace folder / icon buttons ink ---------- */
-      body:not([data-ds-dark-theme]) .YDXeBa_folder,
-      body:not([data-ds-dark-theme]) .YDXeBa_folderActive,
-      body:not([data-ds-dark-theme]) .YDXeBa_chevron,
-      body:not([data-ds-dark-theme]) .YDXeBa_arrow,
-      body:not([data-ds-dark-theme]) .YDXeBa_iconButton,
-      body:not([data-ds-dark-theme]) .qDHVXG_iconButton,
-      body:not([data-ds-dark-theme]) .qDHVXG_searchButton,
-      body:not([data-ds-dark-theme]) .qDHVXG_clearButton {
+      body:not([data-ds-dark-theme]) :is([class*='_folder'], [class*='_folderActive'], [class*='_searchButton'], [class*='_clearButton']),
+      body:not([data-ds-dark-theme]) [class*='_root']:has([class$='_sessionRow']) :is([class*='_chevron'], [class*='_arrow'], [class*='_iconButton']) {
         color: #101110 !important;
       }
       /* ---------- Dark mode: solid signal-yellow inversions ---------- */
-      body[data-ds-dark-theme] .YDXeBa_projectRow:hover,
-      body[data-ds-dark-theme] .YDXeBa_sessionRow:hover,
-      body[data-ds-dark-theme] .YDXeBa_sessionRow.YDXeBa_selected,
-      body[data-ds-dark-theme] .YDXeBa_searchResultRow:hover,
-      body[data-ds-dark-theme] .YDXeBa_searchResultRow.YDXeBa_selected {
+      body[data-ds-dark-theme] [class*='_projectRow']:hover,
+      body[data-ds-dark-theme] [class*='_sessionRow']:hover,
+      body[data-ds-dark-theme] [class*='_sessionRow'][class*='_selected'],
+      body[data-ds-dark-theme] [class*='_searchResultRow']:hover,
+      body[data-ds-dark-theme] [class*='_searchResultRow'][class*='_selected'] {
         background: var(--edge-accent) !important;
       }
       body[data-ds-dark-theme] [class*='badge' i]:hover,
@@ -3923,8 +3925,12 @@ function apply(ctx) {
         background: var(--edge-accent) !important;
       }
       /* ---------- Agent-preset header chip: signal yellow, stretches to fill the action row ---------- */
-      /* (scoped: the old broad [class$='_label'] rule yellowed plain text labels like 产物/settings/jobs names) */
-      .SVAs4q_label {
+      /* (scoped: the old broad [class$='_label'] rule yellowed plain text labels like 产物/settings/jobs names)
+         The chip is matched INSIDE the composer column and only when it carries its
+         own icon child (0.1.x 'SVAs4q_label' -> 0.2.0 'b06baG_label'; the token
+         name 'label' alone is shared by 14 bundles, so bare suffix matching would
+         recolour unrelated labels). */
+      [class$='_root']:has([class$='_composerSeat']) [class*='_label']:has([class*='_icon']) {
         color: #000 !important;
         background: var(--edge-accent) !important;
         flex: 1 1 auto !important;
@@ -3932,11 +3938,11 @@ function apply(ctx) {
         justify-content: center !important;
         padding: 0 12px !important;
       }
-      body:not(.theme-endfield-round) .SVAs4q_label {
+      body:not(.theme-endfield-round) [class$='_root']:has([class$='_composerSeat']) [class*='_label']:has([class*='_icon']) {
         border-radius: 0 !important;
       }
-      .SVAs4q_label .SVAs4q_icon,
-      .SVAs4q_label svg {
+      [class$='_root']:has([class$='_composerSeat']) [class*='_label']:has([class*='_icon']) [class*='_icon'],
+      [class$='_root']:has([class$='_composerSeat']) [class*='_label']:has([class*='_icon']) svg {
         opacity: 1 !important;
         color: #000 !important;
       }
@@ -4015,18 +4021,25 @@ function apply(ctx) {
         --dsw-alias-fill-l2: #242624;
         --dsw-alias-fill-tsp-secondary: #242624;
       }
-      /* Token meter: messages segment signal yellow, system warm gray (tools keeps purple) */
-      .JObwrW_colorMessages {
+      /* Token meter: messages segment signal yellow, system warm gray (tools keeps purple).
+         0.1.x 'JObwrW_colorMessages/colorSystem' -> 0.2.0 '_2WTFBq_colorMessages/colorSystem'
+         (client-ui-conversation); the token names are unique app-wide. */
+      [class*='_colorMessages'] {
         --meter-tint: var(--edge-accent) !important;
       }
-      .JObwrW_colorSystem {
+      [class*='_colorSystem'] {
         --meter-tint: #9a9d98 !important;
       }
-      /* Appearance theme cube selected border: warm */
-      ._8HJdBW_selected {
+      /* Appearance theme cube selected border: warm. 0.1.x '._8HJdBW_selected' ->
+         0.2.0 'v01cdW_selected' (client-ui-theme); the cube element carries both
+         _themeCube and _selected, and no other element carries _themeCube. */
+      [class*='_themeCube'][class*='_selected'] {
         border-color: var(--dsw-alias-border-l2) !important;
       }
-      /* Hero preview badge: solid signal-yellow + black (reference accent chip) */
+      /* Hero preview badge: solid signal-yellow + black (reference accent chip).
+         0.1.x only: the 0.2.0 hero no longer renders this element (no *_badge
+         class in the conversation bundle), so the rule stays as a legacy
+         fallback and simply never matches on current builds. */
       .pXSMma_previewBadge {
         color: #101110 !important;
         background: var(--edge-accent) !important;
@@ -4096,28 +4109,36 @@ function apply(ctx) {
         background: #000 !important;
       }
       /* ================= composer add (+) button hover inversion ================= */
-      /* Dark: + icon signal yellow at rest; on hover solid yellow bg + black icon */
-      body[data-ds-dark-theme] .uV2eYG_add {
+      /* 0.1.x 'uV2eYG_add' -> 0.2.0 'RlGAzG_add' (client-ui-conversation); the
+         '_add' token also exists on the deliverables panel ('_0SbxAa_add', whose
+         hover carries NO fill), so the match is scoped under the conversation
+         column. Dark: + icon signal yellow at rest; on hover solid yellow bg + black icon */
+      body[data-ds-dark-theme] [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']) {
         color: var(--edge-accent) !important;
       }
-      body[data-ds-dark-theme] .uV2eYG_add:hover:not(:disabled),
-      body[data-ds-dark-theme] .uV2eYG_add:focus-visible {
+      body[data-ds-dark-theme] [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']):hover:not(:disabled),
+      body[data-ds-dark-theme] [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']):focus-visible {
         color: #000 !important;
         background: var(--edge-accent) !important;
       }
       /* ================= composer primary send/stop button ================= */
-      /* Dark: hardcoded #fff icon on yellow info-fill -> black icon; hover deeper yellow */
-      body[data-ds-dark-theme] .uV2eYG_primary {
+      /* 0.1.x 'uV2eYG_primary' -> 0.2.0 'RlGAzG_primary'; the '_primary' token is
+         shared with the settings bundles, so this too is scoped to the composer
+         column. Dark: hardcoded #fff icon on yellow info-fill -> black icon; hover deeper yellow */
+      body[data-ds-dark-theme] [class$='_root']:has([class$='_composerSeat']) [class*='_primary'] {
         color: #101110 !important;
       }
-      body[data-ds-dark-theme] .uV2eYG_primary:hover:not(:disabled) {
+      body[data-ds-dark-theme] [class$='_root']:has([class$='_composerSeat']) [class*='_primary']:hover:not(:disabled) {
         color: #101110 !important;
         background: var(--edge-accent-deep) !important;
       }
       /* ================= light-mode white-on-dark buttons keep white icon ================= */
-      /* Generic hover inversion would make the white send icon black on the dark fill */
-      body:not([data-ds-dark-theme]) :is(.uV2eYG_primary, .zGbnIq_primaryButton),
-      body:not([data-ds-dark-theme]) :is(.uV2eYG_primary, .zGbnIq_primaryButton):hover:not(:disabled) {
+      /* Generic hover inversion would make the white send icon black on the dark fill.
+         Covers the composer send button and the settings primary buttons
+         (0.1.x '.zGbnIq_primaryButton' -> 0.2.0 '_3nPmjq_primaryButton'). */
+      body:not([data-ds-dark-theme]) :is([class*='_primaryButton']),
+      body:not([data-ds-dark-theme]) [class$='_root']:has([class$='_composerSeat']) [class*='_primary'],
+      body:not([data-ds-dark-theme]) :is([class*='_primaryButton'], [class$='_root']:has([class$='_composerSeat']) [class*='_primary']):hover:not(:disabled) {
         color: #fff !important;
       }
       /* ================= buttons the theme fills with the SOLID accent =================
@@ -4149,38 +4170,40 @@ function apply(ctx) {
          rule that ships, instead of testing a near-copy. It never matches in the
          real app, since nothing renders that class.
 
-         The class list is not just the reported button. Auditing the installed
-         bundles for elements whose hover background is that token found SIX, and
-         three of them additionally re-assert color:label-primary in the same rule
-         (so they would fight a token-level fix):
-           .zGbnIq_secondaryButton   settings > 模型 row actions   <- reported
-           .gNWCoW_inspectButton     inspect panels (cordis)
-           .iWrAna_inspectButton     inspect panels (skill)
-           .o3BgMG_inspectButton     inspect panels (tool)
-           .JVDQca_arrow             attachment carousel arrow
-           .uV2eYG_add               composer + (already handled above)
-         All are the same defect on different screens, so they are fixed together
-         rather than one bug report at a time.
-
-         '_inspectButton' is matched on the CLASS TOKEN, not with [class$=...], and
-         that distinction is load-bearing: an attribute-suffix match requires the
-         WHOLE class attribute to end with the string, so it silently misses any
-         element that carries a second class after it (measured: it failed on
-         class="gNWCoW_inspectButton HOVERPROBE"). Upstream composes class lists
-         freely, so [class$=] is the wrong tool here. [class~='...'] matches a
-         whitespace-separated token in any position, but the token includes the
-         build hash, so each of the three is listed explicitly — they are stable
-         names in installed bundles, and the audit above is what keeps the list
-         honest. '_arrow' is NOT matched by suffix either: two other components
-         (trajectory, workspace) also end in _arrow and take NO hover fill, so a
-         suffix match there would force ink onto elements that keep their normal
-         background — inventing a new contrast bug while fixing this one. */
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow):hover:not(:disabled),
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow):hover:not(:disabled) svg,
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow):hover:not(:disabled) svg path,
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow).HOVERPROBE:not(:disabled),
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow).HOVERPROBE:not(:disabled) svg,
-      :is(.zGbnIq_secondaryButton, .gNWCoW_inspectButton, .iWrAna_inspectButton, .o3BgMG_inspectButton, .JVDQca_arrow).HOVERPROBE:not(:disabled) svg path {
+         The set is not just the reported button. The 1.4.0 audit listed the
+         elements whose hover background is that token by their 0.1.x build hashes
+         (.zGbnIq_secondaryButton, .gNWCoW/.iWrAna/.o3BgMG_inspectButton,
+         .JVDQca_arrow, .uV2eYG_add) — and 0.2.0-rc.2 rehashed every one of those
+         modules, silently disabling the whole rule. The set is now matched on
+         hash-agnostic NAME substrings, re-derived by the same audit over the
+         0.2.0-rc.2 bundles:
+            [class*='_secondaryButton']   settings row actions (models + account)
+            [class*='_inspectButton']     inspect panels (cordis, skill, tool x2)
+            [class*='_compactionButton']  compaction banner (already suffix-matched)
+            [class*='_add']               composer + (scoped to the composer column;
+                                          deliverables also has an _add whose hover
+                                          carries no fill, hence the scope and the
+                                          _addButton exclusion)
+         The 0.1.x attachment-carousel arrow (.JVDQca_arrow) stays as a legacy
+         fallback: 0.2.0 has no carousel arrow taking that fill. '_arrow' is still
+         NOT matched as a suffix: other components (trajectory, workspace) also end
+         in _arrow and take NO hover fill, so a suffix match there would force ink
+         onto elements that keep their normal background — inventing a new contrast
+         bug while fixing this one. The same hash churn is why every other rule in
+         this stylesheet anchors on structural suffixes, with the build hashes kept,
+         where at all, only as fallbacks. */
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow):hover:not(:disabled),
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow):hover:not(:disabled) svg,
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow):hover:not(:disabled) svg path,
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow).HOVERPROBE:not(:disabled),
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow).HOVERPROBE:not(:disabled) svg,
+      :is([class*='_secondaryButton'], [class*='_inspectButton'], [class*='_compactionButton'], .JVDQca_arrow).HOVERPROBE:not(:disabled) svg path,
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']):hover:not(:disabled),
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']):hover:not(:disabled) svg,
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']):hover:not(:disabled) svg path,
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']).HOVERPROBE:not(:disabled),
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']).HOVERPROBE:not(:disabled) svg,
+      [class$='_root']:has([class$='_composerSeat']) [class*='_add']:not([class*='_addButton']).HOVERPROBE:not(:disabled) svg path {
         /* Ink on accent: 16.50:1 on 谷地黄, 6.62:1 on 武陵青 — both AA. */
         color: #101110 !important;
         fill: currentColor !important;
@@ -4192,7 +4215,7 @@ function apply(ctx) {
          reds are tuned for white-on-red fills, not red-on-paper text. Darkening the
          TEXT colour alone (the token keeps its value for fills/dots elsewhere)
          brings it to 5.12:1 while staying unmistakably red. */
-      body:not([data-ds-dark-theme]) .zGbnIq_dangerButton {
+      body:not([data-ds-dark-theme]) [class*='_dangerButton'] {
         color: #c62016 !important;
       }
       /* ================= dark mode: selected rows = solid signal-yellow + black text ================= */
