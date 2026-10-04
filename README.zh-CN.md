@@ -6,11 +6,29 @@
 
 ---
 
+> ## ⚠️ 按你的 DSH 版本选版本
+>
+> | 你的 DSH | 用哪个版本 | 原因 |
+> | --- | --- | --- |
+> | **0.2.0-rc.2**（`desktop` profile，当前版本） | **`v1.5.3`** | 0.2.0 重写了设置服务：插件的命名空间改由宿主半侧导出的 `Config` schema 决定（且只有 `.volatile()` 字段会被上架），浏览器侧对接面从 `settingsScope` 改名为 `configForms`，profile 也变成了 `desktop`。1.5.3 就是针对这套栈开发并验证的。 |
+> | **0.1.5 及更早**（`web` profile） | **`v1.4.0`** | 1.4.1 – 1.5.3 **只为适配 0.2.0** 而存在，未在 0.1.x 上测试过。在 0.1.x 上，这些后续版本的设置「重启后回退默认」是预期行为——请留在 1.4.0。 |
+>
+> ```bash
+> # 0.2.0-rc.2 desktop：
+> dsh plugin --profile desktop add https://codeload.github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework/tar.gz/refs/tags/v1.5.3
+> # 0.1.5 及更早的 web profile：
+> dsh plugin --profile web     add https://codeload.github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework/tar.gz/refs/tags/v1.4.0
+> ```
+>
+> （`dsh plugin --profile <名字> add github:…` 跟随 `main`，也就是最新版；需要「与你的 DSH 匹配的那一版」时请固定 tag。）
+
+---
+
 > **出处。** fork 自 [dsh-theme-endfield](https://github.com/ymh0000123/dsh-theme-endfield) —— **Copyright (c) ymh0000123**。上游 MIT 许可证在 [`LICENSE`](LICENSE) 中原样保留、未做改动；完整声明见 [`NOTICE.md`](NOTICE.md)。
 >
 > **AI 声明。** 本项目大量使用 AI 辅助开发：代码修改主要由 AI 生成，并经过运行测试、调试与迭代修正。**在生产环境使用前请自行审阅改动。**
 >
-> **仅在 DSH 0.1.1-rc.2**（`web` profile、Windows）上测试过。
+> **测试环境：** 1.4.0 及以前为 **DSH 0.1.1-rc.2**（`web` profile、Windows）；1.4.1 起为 **DSH 0.2.0-rc.2**（`desktop` profile）。
 
 ---
 
@@ -25,13 +43,14 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:DoctorxPriestess/dsh-theme-endfield-contour-rework
+# DSH 0.2.0-rc.2（desktop profile）；0.1.5 及更早请用 --profile web + v1.4.0：
+dsh plugin --profile desktop add github:DoctorxPriestess/dsh-theme-endfield-contour-rework
 ```
 
-重启或重新加载 `web` profile 后生效。卸载：
+重启或重新加载该 profile 后生效。卸载：
 
 ```bash
-dsh plugin --profile web rm dsh-theme-endfield-contour-rework
+dsh plugin --profile desktop rm dsh-theme-endfield-contour-rework
 ```
 
 插件会自行挂载：`cordis.patch.yml` 已声明 bundle 行，不需要手改 profile 文件。
@@ -39,7 +58,7 @@ dsh plugin --profile web rm dsh-theme-endfield-contour-rework
 想固定版本而不是跟随 `main`，就装 release 的 tarball——这也正是 profile 里实际记录的形式（滚动 `github:` 安装最终也解析成它）：
 
 ```bash
-dsh plugin --profile web add https://codeload.github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework/tar.gz/refs/tags/v1.0.0
+dsh plugin --profile desktop add https://codeload.github.com/DoctorxPriestess/dsh-theme-endfield-contour-rework/tar.gz/refs/tags/v1.5.3
 ```
 
 固定版本在这里有一件必须说清的理由：profile 的依赖项是一个 **tarball URL**，之后在该 profile 里跑 `pnpm install` 会**重新拉取那个 URL 指向的内容**。固定到 tag，就没有任何你没选择过的版本能覆盖插件。
