@@ -165,6 +165,12 @@ async function main() {
       wrap?String(wrap.querySelectorAll('canvas').length):'none')
     R('on: canvas sized', !!lines && lines.width>200 && lines.height>200,
       lines?lines.width+'x'+lines.height:'none')
+    /* The backing store must cover the whole frame at device resolution. It may be
+       LARGER than the viewport: the sheet is painted once into a surface one period
+       over, and the compositor slides it (client.js contourPaintSurface). */
+    R('on: canvas covers the frame', !!lines && lines.width>=Math.round(innerWidth*devicePixelRatio)-2
+      && lines.height>=Math.round(innerHeight*devicePixelRatio)-2,
+      lines?lines.width+'x'+lines.height+' vs frame '+Math.round(innerWidth*devicePixelRatio)+'x'+Math.round(innerHeight*devicePixelRatio):'none')
     const fbgOn=getComputedStyle(frame).backgroundColor
     const cbgOn=getComputedStyle(conv).backgroundColor
     R('on: frame bg cleared', fbgOn==='rgba(0, 0, 0, 0)', fbgOn)
@@ -185,23 +191,57 @@ async function main() {
     const hit=document.elementFromPoint(r.left+8, r.top+r.height/2)
     R('text is hit-testable above layer', hit===probeEl, hit?hit.tagName+'.'+hit.className:'null')
 
-    // ---------- 4. animation changes pixels, and stops when off ----------
-    const snap=()=>lines.getContext('2d').getImageData(0,0,lines.width,lines.height).data
-    const a1=snap().slice(0)
-    let diff=0
-    for(let i=0;i<40 && diff<=500;i++){
-      await sleep(120)
-      const a2=snap()
-      diff=0
-      for(let k=3;k<a1.length;k+=4) if(a1[k]!==a2[k]) diff++
+    // ---------- 4. the sheet MOVES, and freezes when the animation is off -----
+    /* Motion is no longer a repaint. The sheet is painted once and the compositor
+       slides it (contourPaintSurface/contourBlit in client.js), so the canvas
+       PIXELS are static BY DESIGN while the layer travels -- that is the
+       optimisation this test is here to keep honest. So the observable is the
+       layer's own geometry: the used transform plus the bounding rect. Reading
+       the used transform (not style.transform) proves the browser really moved
+       the layer rather than that some string was assigned.
+       A cheap pixel hash is kept in the probe: if the size plan ever falls back to
+       the per-frame blit (a viewport too large to budget a surface for), motion
+       shows up as pixels instead, and this still passes. */
+    const geom=()=>{
+      const r=lines.getBoundingClientRect()
+      return Math.round(r.left*100)+'|'+Math.round(r.top*100)+'|'+getComputedStyle(lines).transform
     }
-    R('anim on: pixels change over time', diff>500, 'changedAlpha='+diff)
+    const hash=()=>{
+      const d=lines.getContext('2d').getImageData(0,0,lines.width,lines.height).data
+      let h=0; for(let i=3;i<d.length;i+=4096) h=(h*31+d[i])|0
+      return h
+    }
+    const probe=()=>geom()+'#'+hash()
+    /* Wait for the sheet to advance rather than for a fixed wall-clock window.
+       Measured reason: this assertion was flaky at 2 failures in 6 runs, always
+       with no change at all, because the page sleeps on wall-clock timers while
+       the browser runs under --virtual-time-budget: the frame pass is throttled to
+       24fps and gated on rAF, and headless delivers rAF callbacks irregularly, so a
+       700 ms sleep sometimes spans ZERO callbacks. Polling for the first real move
+       removes the race without weakening the assertion: it still fails if the
+       animation genuinely does not run, it just fails after the budget. */
+    const advance=async()=>{
+      const before=probe()
+      for(let i=0;i<40;i++){
+        await sleep(120)
+        const now=probe()
+        if(now!==before) return now
+      }
+      return before
+    }
+    const a1=probe()
+    const a2=await advance()
+    R('anim on: sheet advances', a2!==a1, a1+' -> '+a2)
+    /* The other half of the optimisation: the canvas must NOT be repainted while
+       it animates. A non-zero pixel change here means frames went back to
+       clearRect+drawImage, i.e. the per-frame upload came back. */
+    const p1=hash(); await sleep(400); const p2=hash()
+    R('anim on: canvas not repainted per frame', p1===p2, 'hash '+p1+' -> '+p2)
     LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
     document.body.appendChild(document.createElement('span'))
     await sleep(500)
-    const b1=snap().slice(0); await sleep(600); const b2=snap()
-    let diff2=0; for(let i=3;i<b1.length;i+=4) if(b1[i]!==b2[i]) diff2++
-    R('anim off: pixels static', diff2===0, 'changedAlpha='+diff2)
+    const b1=probe(); await sleep(600); const b2=probe()
+    R('anim off: sheet frozen', b1===b2, b1+' vs '+b2)
     // Static pattern must still be on screen after the animation is switched off.
     R('anim off: pattern still painted', px(lines).opaque>3000, 'opaquePx='+px(lines).opaque)
 
@@ -209,29 +249,9 @@ async function main() {
     LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
     document.body.appendChild(document.createElement('span'))
     await sleep(300)
-    /* Wait for PIXELS to move rather than for a fixed wall-clock window.
-
-       Measured reason: this assertion was flaky at 2 failures in 6 runs, always
-       with changedAlpha === 0, because the page sleeps on wall-clock timers while
-       the browser runs under --virtual-time-budget. The field pass is throttled to
-       24fps AND gated on rAF, and headless delivers rAF callbacks irregularly, so
-       a 700 ms sleep sometimes spans ZERO callbacks — the sheet is animating
-       correctly and the sample still sees no change. (The same rAF unreliability is
-       already documented in contour-perf.test.js, which is why that test does not
-       use rAF at all.)
-
-       Polling for the first real change removes the race without weakening the
-       assertion: it still fails if the animation genuinely does not resume, it just
-       fails after the budget instead of on an unlucky sample. */
-    const e1=snap().slice(0)
-    let diff3=0
-    for(let i=0;i<40 && diff3<=500;i++){
-      await sleep(120)
-      const e2=snap()
-      diff3=0
-      for(let k=3;k<e1.length;k+=4) if(e1[k]!==e2[k]) diff3++
-    }
-    R('anim re-enabled: pixels change again', diff3>500, 'changedAlpha='+diff3)
+    const e1=probe()
+    const e2=await advance()
+    R('anim re-enabled: sheet advances again', e2!==e1, e1+' -> '+e2)
 
     // ---------- 6. dark scheme restroke ----------
     document.body.setAttribute('data-ds-dark-theme','')

@@ -97,7 +97,7 @@ function grabArray(name) {
 const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
-  'contourBuildTexture', 'contourBlit', 'contourRetune', 'contourFrame',
+  'contourBuildTexture', 'contourBlit', 'contourPaintSurface', 'contourRetune', 'contourFrame',
   'contourTerrainProfile', 'contourTerrainRow', 'contourOctaveLadder',
   'contourRebuildForRoughness', 'contourReadIndex', 'contourStair', 'contourTerrace',
   'contourCliff', 'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp',
@@ -108,7 +108,8 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_MIN_RING_BOX', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_GRAD_X',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
-  'CONTOUR_TEX_QUANT', 'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
+  'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT',
+  'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY',
   'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT',
   'CONTOUR_NOISE_NORM', 'CONTOUR_FEATURE_MIN', 'CONTOUR_PLATEAU_BAND',
@@ -162,6 +163,7 @@ let api
 try {
   api = new Function(`
 let contourField=null, contourPaths=[], contourTex=null, contourLineCv=null
+let contourSurfaceOn=false
 let contourOffsetX=0, contourOffsetY=0, contourDpr=1, contourSpeedPx=48
 let contourVelX=0, contourVelY=-1, contourView=null, contourWrap=null
 let contourRaf=null, contourLastT=-1, contourResizeTimer=null
@@ -249,6 +251,19 @@ return {
     contourBuildTexture(w, h)
   },
   blit() { return contourBlit() },
+  /* Compositor path controls: give the mounted canvas a writable transform the
+     way a real <canvas> has one, then paint the surface by hand. */
+  setTransformable(v) { contourLineCv.style = v ? { transform: '' } : {} },
+  paintSurface() { return contourPaintSurface() },
+  surfaceOn() { return contourSurfaceOn },
+  memBudget() { return CONTOUR_MEM_BUDGET },
+  transform() { return contourLineCv && contourLineCv.style ? contourLineCv.style.transform : null },
+  surfaceSize() {
+    return contourLineCv === null ? null : {
+      w: contourLineCv.width, h: contourLineCv.height,
+      tw: contourTex ? contourTex.cv.width : 0, th: contourTex ? contourTex.cv.height : 0,
+    }
+  },
   retune() { return contourRetune() },
   rebuildForRoughness() { return contourRebuildForRoughness() },
   roughKey: CONTOUR_ROUGHNESS_KEY,
@@ -335,6 +350,81 @@ for (const [w, h, dpr] of SIZES) {
   report.blitMs = stats(frameMs)
 }
 if (!bad) ok('300 frames on each of ' + SIZES.length + ' viewports: 0 terrain generations, 0 extractions, 0 texture renders')
+
+/* ---------- A2. compositor path: a frame writes a transform, nothing else --- */
+/* The mounted canvas in a real page has a writable style, so the shipped path is
+   the surface + transform one; the block above deliberately runs the fallback.
+   Both must stay cheap AND correct, and the surface must respect its budget. */
+for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
+  const label = w + 'x' + h + '@' + dpr + 'x'
+  api.reset()
+  api.build(w, h, dpr)
+  api.setTransformable(true)
+  api.blankOps()
+  api.paintSurface()
+  if (!api.surfaceOn()) { fail(label + ': the surface path did not engage on a transformable canvas'); continue }
+  const painted = api.snapshot()
+  if (painted.ops.clearRect !== 1) fail(label + ': painting the surface did ' + painted.ops.clearRect + ' clearRect (expected 1)')
+  if (painted.counts.generate !== 1 || painted.counts.extract !== 1) {
+    fail(label + ': painting the surface redid terrain work (gen=' + painted.counts.generate
+      + ' extract=' + painted.counts.extract + ')')
+  }
+  const surf = api.surfaceSize()
+  const tex = painted.texture
+  // The surface must be exactly the viewport plus one whole period, so the wrap
+  // never exposes an unpainted edge.
+  const wantW = Math.round(w * dpr) + surf.tw
+  const wantH = Math.round(h * dpr) + surf.th
+  if (surf.w !== wantW || surf.h !== wantH) {
+    fail(label + ': surface is ' + surf.w + 'x' + surf.h + ', expected ' + wantW + 'x' + wantH)
+  }
+  // Budget: the layer holds the texture AND its surface, and the plan is only
+  // allowed to engage the surface path when the pair fits.
+  const surfBytes = surf.w * surf.h * 4
+  const texBytes = surf.tw * surf.th * 4
+  const totalBytes = surfBytes + texBytes
+  if (totalBytes > api.memBudget() * 1.05) {
+    fail(label + ': texture + surface is ' + Math.round(totalBytes / 1e6) + ' MB, over the '
+      + Math.round(api.memBudget() / 1e6) + ' MB budget')
+  }
+  // Seamlessness depends on the period being larger than the viewport: at or below
+  // 1.0 the same feature would appear twice inside one frame.
+  if (!(surf.tw > Math.round(w * dpr) && surf.th > Math.round(h * dpr))) {
+    fail(label + ': period ' + surf.tw + 'x' + surf.th + ' does not exceed the ' + Math.round(w * dpr) + 'x' + Math.round(h * dpr) + ' viewport')
+  }
+  // Frames: zero canvas work, one transform write, always inside the period.
+  api.reset()
+  api.blankOps()
+  const frameMs = []
+  let outside = 0
+  for (let i = 0; i < 300; i++) {
+    const t0 = performance.now()
+    api.blit()
+    frameMs.push(performance.now() - t0)
+    const m = /translate3d\((-?[\d.e+-]+)px,(-?[\d.e+-]+)px,0\)/.exec(api.transform() || '')
+    if (m === null) { outside++; continue }
+    const tx = -parseFloat(m[1]) * dpr
+    const ty = -parseFloat(m[2]) * dpr
+    if (!(tx >= 0 && tx < surf.tw) || !(ty >= 0 && ty < surf.th)) outside++
+  }
+  const afterFrame = api.snapshot()
+  if (afterFrame.ops.clearRect !== 0 || afterFrame.ops.drawImage !== 0) {
+    fail(label + ': a compositor frame rasterised (clearRect=' + afterFrame.ops.clearRect
+      + ' drawImage=' + afterFrame.ops.drawImage + ')')
+  }
+  if (afterFrame.counts.generate || afterFrame.counts.extract || afterFrame.counts.render) {
+    fail(label + ': a compositor frame redid expensive work')
+  }
+  if (outside > 0) fail(label + ': ' + outside + ' of 300 frames wrote a transform outside the period')
+  const blit = stats(frameMs)
+  if (blit.p95 > 0.5) fail(label + ': compositor frame p95 is ' + blit.p95.toFixed(2) + ' ms (expected < 0.5 ms)')
+  if (!bad) {
+    ok(label + ': surface ' + surf.w + 'x' + surf.h + ' (' + Math.round(totalBytes / 1e6) + ' MB texture+surface, period '
+      + (surf.tw / Math.round(w * dpr)).toFixed(2) + 'x viewport), 300 frames = 0 raster, p95 '
+      + blit.p95.toFixed(3) + ' ms')
+  }
+  api.setTransformable(false)
+}
 
 /* A density change reuses the terrain: new levels only. */
 api.reset()

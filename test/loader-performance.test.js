@@ -41,6 +41,36 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
     if(this.canvas && this.canvas.hasAttribute('data-endfield-contour-lines')) contourClears++
     return originalClearRect.call(this,x,y,w,h)
   }
+  /* "Is the sheet animating?" is no longer "is it being cleared": the sheet is
+     painted ONCE and moved by the compositor (contourPaintSurface/contourBlit in
+     client.js), so a running animation clears nothing. Three signals are counted
+     and summed as "advance steps" -- a clearRect, a transform that CHANGED, and a
+     frame the render loop asked for:
+       - clearRect: the documented fallback path (no writable style, or a viewport
+         too large to budget a scroll surface for);
+       - transform: the shipped compositor path;
+       - loop request: the only one that also works when virtual time starves rAF --
+         measured 9 callbacks over a whole run here -- because the loop asks for the
+         next frame exactly while it is armed (contourStartLoop only runs when the
+         sheet is supposed to move), and a STOPPED loop asks for nothing.
+     The requests are attributed by callback name: the boot plate's own meter
+     animation also uses rAF, and counting it would mask a frozen sheet. */
+  let contourMoves=0, lastTf=null, loopReqs=0
+  const _raf=window.requestAnimationFrame.bind(window)
+  window.requestAnimationFrame=(cb)=>{
+    if(cb && String(cb.name).indexOf('contour')>=0) loopReqs++
+    return _raf(cb)
+  }
+  /* Sampling MUST NOT use rAF itself (it would be starved along with the loop), so
+     it rides setTimeout, which advances with the virtual clock. */
+  const sampleMotion=()=>{
+    const cv=document.querySelector('[data-endfield-contour-lines]')
+    const tf=cv?getComputedStyle(cv).transform:'none'
+    if(tf!==lastTf){ lastTf=tf; contourMoves++ }
+    setTimeout(sampleMotion, 30)
+  }
+  setTimeout(sampleMotion, 30)
+  const advance=()=>contourClears+contourMoves+loopReqs
   const mod=window.__MOD__.factory(()=>null)
   window.__dispose__=mod.apply({
     get:(n)=>n==='theme'?{overrideTokens:()=>()=>{}}:(n==='settingsScope'?__prefs.binder:undefined),
@@ -51,9 +81,9 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   ;(async()=>{
     await sleep(700)
     const loaderDuring=!!document.querySelector('[data-endfield-loader]')
-    const clearsDuring=contourClears
+    const clearsDuring=advance()
     await sleep(500)
-    const clearsWhileLoader=contourClears
+    const clearsWhileLoader=advance()
     await sleep(600)
     const plate=document.querySelector('[data-endfield-loader]')
     const meter=plate && plate.querySelector('[data-endfield-loader-meter]')
@@ -70,17 +100,23 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       meterBottomStyle: getComputedStyle(meter).bottom,
     } : null
     while(document.querySelector('[data-endfield-loader]')) await sleep(100)
-    const clearsAtRemoval=contourClears
-    const beforeToggle=contourClears
+    const clearsAtRemoval=advance()
+    const beforeToggle=advance()
     __prefs.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
     document.body.appendChild(document.createElement('span'))
     await sleep(150)
     __prefs.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
     document.body.appendChild(document.createElement('span'))
-    await sleep(300)
-    const clearsAfterToggle=contourClears
+    /* Poll for the sheet ADVANCING rather than sampling once after a fixed sleep:
+       the frame pass is rAF-driven, and headless delivers rAF irregularly, so a
+       300ms sample can straddle zero frames and blame the code for a scheduling
+       artefact. Polling keeps the assertion (it still fails when motion never
+       returns) while removing the race. */
+    let resumed=0
+    for(let i=0;i<20 && !resumed;i++){ await sleep(75); if(advance()>beforeToggle) resumed=1 }
+    const clearsAfterToggle=advance()
     const loaderAfter=!document.querySelector('[data-endfield-loader]')
-    document.title='LDR '+JSON.stringify({loaderDuring,loaderAfter,clearsDuring,clearsWhileLoader,clearsAtRemoval,beforeToggle,clearsAfterToggle,loaderGeometry})
+    document.title='LDR '+JSON.stringify({loaderDuring,loaderAfter,clearsDuring,clearsWhileLoader,clearsAtRemoval,beforeToggle,clearsAfterToggle,resumed,loaderGeometry})
   })()
 </script></body></html>`
 
@@ -116,10 +152,10 @@ if (r.loaderGeometry && r.loaderGeometry.pct === '100%' && r.loaderGeometry.mete
 } else {
   fail('100% loader meter exceeds the plate bounds or lost bottom anchoring: ' + JSON.stringify(r.loaderGeometry))
 }
-if (r.clearsWhileLoader === r.clearsDuring) ok('contour redraw is paused behind the boot plate (' + r.clearsWhileLoader + ' clears)')
-else fail('contour kept redrawing behind the boot plate (' + r.clearsWhileLoader + ' clears; started at ' + r.clearsDuring + ')')
-if (r.clearsAfterToggle > r.beforeToggle) ok('contour animation resumes after a normal switch reconciliation')
-else fail('contour animation did not resume after switch reconciliation (' + r.beforeToggle + ' -> ' + r.clearsAfterToggle + ')')
+if (r.clearsWhileLoader === r.clearsDuring) ok('contour animation is paused behind the boot plate (' + r.clearsWhileLoader + ' advance steps, unchanged)')
+else fail('contour kept animating behind the boot plate (' + r.clearsDuring + ' -> ' + r.clearsWhileLoader + ' advance steps)')
+if (r.resumed === 1) ok('contour animation resumes after a normal switch reconciliation (' + r.beforeToggle + ' -> ' + r.clearsAfterToggle + ')')
+else fail('contour animation did not resume after switch reconciliation (' + r.beforeToggle + ' -> ' + r.clearsAfterToggle + ' advance steps)')
 
 if (failures) { console.error(failures + ' loader performance check(s) failed'); process.exit(1) }
 console.log('all loader performance checks passed')

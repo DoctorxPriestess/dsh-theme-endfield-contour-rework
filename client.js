@@ -1169,6 +1169,17 @@ function apply(ctx) {
     const CONTOUR_TEX_MAX_AREA = 8.3e6      // CSS px^2
     const CONTOUR_TEX_MAX_DIM = 4096        // device px per side
     const CONTOUR_TEX_QUANT = 128           // CSS px
+    /* Ceiling on the BACKING STORES this one effect may hold: the contour texture
+       plus the scroll surface it is painted into (see contourPaintSurface). The
+       surface is (viewport + period)^2 against the texture's period^2, so with a
+       period of m viewports the pair costs m^2 + (1+m)^2 viewport-areas -- that is
+       what bounds m, because a fixed 3x would be ~340 MB at 1432x753@2x. */
+    const CONTOUR_MEM_BUDGET = 200e6
+    /* Smallest period worth a surface: at or below 1.0 the same feature would sit
+       twice inside one frame, which reads as a tiling pattern rather than as a
+       moving landscape. If the budget cannot even afford this, the layer keeps the
+       old per-frame blit (one texture, no surface) rather than a repeating one. */
+    const CONTOUR_SCROLL_MIN_MULT = 1.05
     /* Terrain shape. BASE_CELL is the approximate CSS-px size of the largest
        noise cell (hills land a few hundred px across, like a real topo map);
        5 octaves at persistence 0.5 add ridge/valley detail and a light grain.
@@ -1938,6 +1949,9 @@ function apply(ctx) {
     let contourHost = null
     let contourWrap = null
     let contourLineCv = null
+    /* true once the mounted canvas is the SCROLL SURFACE (texture painted once,
+       moved by a transform) rather than a per-frame redraw target. */
+    let contourSurfaceOn = false
     let contourRaf = null
     let contourRo = null
     let contourResizeTimer = null
@@ -2596,20 +2610,69 @@ function apply(ctx) {
        edge continues the right edge exactly. */
     const contourBlit = () => {
       if (contourLineCv === null || contourTex === null) return
-      const ctx = contourLineCv.getContext('2d')
-      if (!ctx) return
-      const w = contourLineCv.width
-      const h = contourLineCv.height
       const tw = contourTex.cv.width
       const th = contourTex.cv.height
       const sx = ((Math.floor(contourOffsetX) % tw) + tw) % tw
       const sy = ((Math.floor(contourOffsetY) % th) + th) % th
+      /* COMPOSITOR PATH: the surface already holds the whole texture, so moving
+         the sheet is a transform -- the compositor's work, not the page's. One
+         style write per frame, zero raster, and the texture is uploaded once per
+         rebuild instead of 60 times a second. Offsets are floored to whole device
+         pixels first, so the transform never resamples the 1px strokes. */
+      if (contourSurfaceOn && contourLineCv.style != null && typeof contourLineCv.style.transform === 'string') {
+        const dpr = contourDpr > 0 ? contourDpr : 1
+        contourLineCv.style.transform =
+          'translate3d(' + (-sx / dpr) + 'px,' + (-sy / dpr) + 'px,0)'
+        return
+      }
+      /* FALLBACK: no style on the canvas (a headless harness): repaint the
+         viewport from the cache, as every previous version did. */
+      const ctx = contourLineCv.getContext('2d')
+      if (!ctx) return
+      const w = contourLineCv.width
+      const h = contourLineCv.height
       ctx.clearRect(0, 0, w, h)
       for (let y = -sy; y < h; y += th) {
         for (let x = -sx; x < w; x += tw) {
           ctx.drawImage(contourTex.cv, x, y)
         }
       }
+    }
+
+    /* Paint the sheet into the scroll surface: viewport + one period, textured
+       from the cache. Runs on rebuild/repaint only (a resize that changes the
+       target size, a colour flip, a first mount), never per frame. */
+    const contourPaintSurface = () => {
+      if (contourLineCv === null || contourTex === null || contourView === null) return
+      const cv = contourLineCv
+      /* Two ways the surface stays off, both falling back to the per-frame blit
+         into a viewport-sized canvas: the size plan did not budget for it, or the
+         canvas has no writable transform (a headless harness). Bail before sizing. */
+      if (contourTex.scroll !== true || cv.style == null || typeof cv.style.transform !== 'string') {
+        contourSurfaceOn = false
+        return
+      }
+      const dpr = contourView.dpr > 0 ? contourView.dpr : 1
+      const tw = contourTex.cv.width
+      const th = contourTex.cv.height
+      const wDev = Math.max(1, Math.round(contourView.w * dpr)) + tw
+      const hDev = Math.max(1, Math.round(contourView.h * dpr)) + th
+      if (cv.width !== wDev || cv.height !== hDev) {
+        cv.width = wDev
+        cv.height = hDev
+        if (cv.style != null) {
+          cv.style.width = (wDev / dpr) + 'px'
+          cv.style.height = (hDev / dpr) + 'px'
+        }
+      }
+      const ctx = cv.getContext('2d')
+      if (!ctx) return
+      ctx.clearRect(0, 0, wDev, hDev)
+      for (let y = 0; y < hDev; y += th) {
+        for (let x = 0; x < wDev; x += tw) ctx.drawImage(contourTex.cv, x, y)
+      }
+      contourSurfaceOn = cv.style != null && typeof cv.style.transform === 'string'
+      contourBlit()
     }
 
     /* The app frame: the only ancestor that is both position:relative and free of a
@@ -2637,16 +2700,52 @@ function apply(ctx) {
     /** Pure texture-size target for a viewport (quantised, capped), in CSS px
      *  and the device-px backing-store size it maps to at the current DPR. */
     const contourTargetTexture = (w, h, dpr) => {
-      const tw0 = w * CONTOUR_TEX_MULT
-      const th0 = h * CONTOUR_TEX_MULT
-      const scale = Math.min(1,
-        Math.sqrt(CONTOUR_TEX_MAX_AREA / (tw0 * th0)),
-        CONTOUR_TEX_MAX_DIM / (tw0 * dpr),
-        CONTOUR_TEX_MAX_DIM / (th0 * dpr))
-      const q = (v) => Math.max(CONTOUR_TEX_QUANT * 2, Math.min(CONTOUR_TEX_MAX_DIM / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
-      const twCss = q(tw0 * scale)
-      const thCss = q(th0 * scale)
-      return { twCss, thCss, twDev: Math.round(twCss * dpr), thDev: Math.round(thCss * dpr) }
+      const q = (v) => Math.max(CONTOUR_TEX_QUANT * 2,
+        Math.min(CONTOUR_TEX_MAX_DIM / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
+      /* Period multiplier. Two ceilings, and the tighter one wins:
+           texture area    m^2 * A <= CONTOUR_TEX_MAX_AREA  (per-side cap too)
+           layer memory    (m^2 + (1+m)^2) * unit <= CONTOUR_MEM_BUDGET
+         where unit is one viewport of device pixels in bytes. The memory form is
+         quadratic in m: m = (sqrt(8r - 4) - 2) / 4 with r = budget / unit.
+         Only the SCROLL case pays for the surface; when the budget cannot afford
+         a useful period, the sheet falls back to one texture and the old blit. */
+      const unit = 4 * dpr * dpr * w * h
+      const mArea = Math.sqrt(CONTOUR_TEX_MAX_AREA / (w * h))
+      const mDim = CONTOUR_TEX_MAX_DIM / (Math.max(w, h) * dpr)
+      const mFull = Math.max(1, Math.min(CONTOUR_TEX_MULT, mArea, mDim))
+      const r = CONTOUR_MEM_BUDGET / unit
+      const mScroll = r > 0.5 ? (Math.sqrt(8 * r - 4) - 2) / 4 : 0
+      let scroll = mScroll >= CONTOUR_SCROLL_MIN_MULT && mScroll >= 1
+      let twCss = 0
+      let thCss = 0
+      if (scroll) {
+        const m = Math.min(mFull, mScroll)
+        const minTw = q(1.02 * w)
+        const minTh = q(1.02 * h)
+        twCss = Math.max(minTw, q(m * w))
+        thCss = Math.max(minTh, q(m * h))
+        /* Quantising up can push the pair back over the budget, so step the period
+           down one notch at a time (bounded: a pathological viewport must not loop)
+           and give up on the surface path once the period stops being worth it. */
+        for (let guard = 0; guard < 64; guard++) {
+          const areaOk = twCss * thCss <= CONTOUR_TEX_MAX_AREA * 1.02
+          const memOk = (w * h + (w + twCss) * (h + thCss)) * 4 * dpr * dpr <= CONTOUR_MEM_BUDGET * 1.02
+          if (areaOk && memOk) break
+          if (twCss <= minTw && thCss <= minTh) break
+          twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
+          thCss = Math.max(minTh, thCss - CONTOUR_TEX_QUANT)
+        }
+        if (!(twCss > w * 1.02 && thCss > h * 1.02)) scroll = false
+      }
+      if (!scroll) {
+        twCss = Math.max(q(w * 1.02), q(mFull * w))
+        thCss = Math.max(q(h * 1.02), q(mFull * h))
+      }
+      return {
+        twCss, thCss,
+        twDev: Math.round(twCss * dpr), thDev: Math.round(thCss * dpr),
+        scroll,
+      }
     }
 
     /* Build the whole texture for a viewport: size -> field -> contours -> cache.
@@ -2668,8 +2767,11 @@ function apply(ctx) {
       if (!(cv.width > 0) || !(cv.height > 0)) {
         dbg('texture build got a degenerate canvas', cv.width, cv.height, 'viewport', wCss, hCss, 'dpr', contourDpr)
       }
-      contourTex = { cv, wCss: t.twCss, hCss: t.thCss }
+      contourTex = { cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true }
       contourRenderCache()
+      /* The sheet is static until the next rebuild, so this is where it goes
+         onto the scroll surface (one full-surface paint, not one per frame). */
+      contourPaintSurface()
       // Keep the scroll offset inside the (possibly new) texture period.
       contourOffsetX = ((contourOffsetX % t.twDev) + t.twDev) % t.twDev
       contourOffsetY = ((contourOffsetY % t.thDev) + t.thDev) % t.thDev
@@ -2695,7 +2797,16 @@ function apply(ctx) {
       /* The visible canvas is viewport-sized; resizing it is cheap and must be
          immediate (the next blit repaints it from the existing texture, so the
          resize shows no flash). */
-      if (contourLineCv !== null) {
+      /* The surface path sizes itself in contourPaintSurface (it needs the texture
+         period); only the fallback's viewport canvas is resized here. A GREW
+         viewport needs a bigger surface, though, and the rebuild is debounced, so
+         repaint immediately when the surface no longer covers the frame. */
+      if (contourSurfaceOn && contourTex !== null && contourLineCv !== null) {
+        const needW = Math.round(w * dpr) + contourTex.cv.width
+        const needH = Math.round(h * dpr) + contourTex.cv.height
+        if (contourLineCv.width < needW || contourLineCv.height < needH) contourPaintSurface()
+      }
+      if (contourLineCv !== null && !contourSurfaceOn) {
         const bw = Math.max(1, Math.round(w * dpr))
         const bh = Math.max(1, Math.round(h * dpr))
         if (contourLineCv.width !== bw || contourLineCv.height !== bh) {
@@ -2832,6 +2943,7 @@ function apply(ctx) {
       if (contourWrap !== null && contourWrap.parentNode) contourWrap.parentNode.removeChild(contourWrap)
       contourWrap = null
       contourLineCv = null
+      contourSurfaceOn = false
       contourHost = null
       contourPaths = []
       contourField = null
@@ -3009,7 +3121,9 @@ function apply(ctx) {
     const contourRepaint = () => {
       if (contourWrap === null || contourTex === null) return
       contourRenderCache()
-      contourBlit()
+      /* The cached texture changed under the surface, so the surface has to be
+         repainted (not just re-positioned). */
+      contourPaintSurface()
     }
 
     /* Colour scheme changes are a token flip on <body>, not a resize, so the
