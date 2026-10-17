@@ -1173,8 +1173,13 @@ function apply(ctx) {
        plus the scroll surface it is painted into (see contourPaintSurface). The
        surface is (viewport + period)^2 against the texture's period^2, so with a
        period of m viewports the pair costs m^2 + (1+m)^2 viewport-areas -- that is
-       what bounds m, because a fixed 3x would be ~340 MB at 1432x753@2x. */
-    const CONTOUR_MEM_BUDGET = 200e6
+       what bounds m, because a fixed 3x would be ~340 MB at 1432x753@2x.
+       NOTE (measured, see scratch/terrain-lab/budget.js): at the per-side 4096 and
+       8.3e6-area caps this budget is NOT the binding constraint for any viewport up
+       to 1920x1080@2x -- 200MB and 300MB produce identical plans. It is headroom for
+       a larger per-side cap (at 8192 the same 300MB is what gives 1432x753@2x a
+       2.41x period instead of 1.43x). */
+    const CONTOUR_MEM_BUDGET = 300e6
     /* Smallest period worth a surface: at or below 1.0 the same feature would sit
        twice inside one frame, which reads as a tiling pattern rather than as a
        moving landscape. If the budget cannot even afford this, the layer keeps the
