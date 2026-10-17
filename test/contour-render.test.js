@@ -259,7 +259,72 @@ async function main() {
     R('dark: still painted', px(lines).opaque>3000)
     document.body.removeAttribute('data-ds-dark-theme')
 
-    // ---------- 7. teardown ----------
+    // ---------- 7. the 3D parallax view ----------
+    /* Two branches, because the hardware rule is half the feature. This harness is
+       headless Chrome on SwiftShader, which the shipped rule REJECTS, so:
+         - with window.__CONTOUR_FORCE_GL__ the shader path is exercised for real
+           (context, compile, link, program bound, draw calls running);
+         - without it, selecting 视差 must leave NO gl layer and keep the flat sheet
+           on screen -- that is the documented fallback, tested rather than assumed.
+       The projection's arithmetic is pinned separately in contour-3d.test.js: this
+       harness cannot read back a WebGL back buffer, so pixel claims about the shader
+       would be fake evidence here. */
+    window.__CONTOUR_FORCE_GL__ = true
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(700)
+    const wrapBox=wrap.getBoundingClientRect()
+    const glCv=document.querySelector('[data-endfield-contour-gl]')
+    R('3d (forced): gl layer mounted', !!glCv, glCv?glCv.tagName:'none')
+    const glBox=glCv?glCv.getBoundingClientRect():null
+    R('3d (forced): gl layer covers the frame',
+      !!glBox && Math.abs(glBox.width-wrapBox.width)<2 && Math.abs(glBox.height-wrapBox.height)<2,
+      glBox?JSON.stringify({w:glBox.width,h:glBox.height,frame:wrapBox.width+'x'+wrapBox.height}):'none')
+    const glCtx=glCv?glCv.getContext('webgl'):null
+    const glProg=glCtx?glCtx.getParameter(glCtx.CURRENT_PROGRAM):null
+    R('3d (forced): shader program is live (compile+link+draw ran)', !!glProg, glProg?'program bound':'no program')
+    R('3d (forced): no webgl error', !!glCtx && glCtx.getError()===0, glCtx?String(glCtx.getError()):'no context')
+    R('3d (forced): exactly one gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===1,
+      String(document.querySelectorAll('[data-endfield-contour-gl]').length))
+    /* Why there is no pixel assertion on the GL canvas here: the context is created
+       without preserveDrawingBuffer (keeping it would cost a full copy per frame),
+       so readPixels is only valid inside the frame that drew it -- and this harness
+       runs on a virtual clock that delivers rAF a handful of times per run
+       (measured: 9 callbacks), so a readback in "the same frame as the engine" is
+       not something a test here can rely on. The shader's arithmetic is pinned in
+       contour-3d.test.js instead, and what a real GPU paints is the user's to see;
+       claiming pixel evidence from this harness would be inventing it. */
+
+
+    /* Now the honest devices: no force flag, and a fresh mount so the sticky
+       "already checked" cache from the forced run does not carry over. */
+    delete window.__CONTOUR_FORCE_GL__
+    LS.setItem('dsh-theme-endfield-contour-rework-contour','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(300)
+    LS.setItem('dsh-theme-endfield-contour-rework-contour','1')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(500)
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(600)
+    const linesFb=document.querySelector('[data-endfield-contour-lines]')
+    R('3d without hardware acceleration: gl layer refused',
+      document.querySelectorAll('[data-endfield-contour-gl]').length===0,
+      String(document.querySelectorAll('[data-endfield-contour-gl]').length)+' gl canvas')
+    R('3d without hardware acceleration: flat sheet still painted',
+      !!linesFb && px(linesFb).opaque>3000, linesFb?('opaquePx='+px(linesFb).opaque):'no canvas')
+
+    /* And back to flat: the fallback path is symmetric. */
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-view','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(500)
+    const linesFlat=document.querySelector('[data-endfield-contour-lines]')
+    R('back to flat: no gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===0)
+    R('back to flat: sheet painted', !!linesFlat && px(linesFlat).opaque>3000,
+      linesFlat?('opaquePx='+px(linesFlat).opaque):'no canvas')
+
+    // ---------- 8. teardown ----------
     if(typeof window.__dispose__==='function') window.__dispose__()
     await sleep(150)
     R('teardown: layer removed', document.querySelectorAll('[data-endfield-contour]').length===0)

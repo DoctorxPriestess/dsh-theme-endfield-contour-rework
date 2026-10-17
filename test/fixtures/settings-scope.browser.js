@@ -22,6 +22,7 @@ const BROWSER_SETTINGS_SCOPE_SNIPPET = `
 var __endfieldFieldDefaults = {
   enabled:'1', palette:'valley', radius:'square', contour:'0', contourAnim:'1',
   contourDir:'0', contourSpeed:'2', contourDensity:'1', contourRoughness:'7', contourScrollPause:'1',
+  contourView:'0',
   watermark:'1', watermarkPersist:'0', loader:'0', thunder:'0', thunderAnim:'0'
 };
 function __endfieldSettingsScope(initial) {

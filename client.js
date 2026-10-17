@@ -132,6 +132,8 @@ function apply(ctx) {
          the plains..extreme-mountains slider opens on the familiar landscape. */
       contourRoughness: '7',
       contourScrollPause: '1',
+      /* Index into the view options: 0 = flat sheet, 1 = 3D parallax. */
+      contourView: '0',
       watermark: '1',
       watermarkPersist: '0',
       loader: '0',
@@ -159,7 +161,7 @@ function apply(ctx) {
         'watermark-persist', 'contour',
         'contour-anim', 'contour-dir',
         'contour-speed', 'contour-density',
-        'contour-roughness', 'contour-scroll-pause', 'loader',
+        'contour-roughness', 'contour-scroll-pause', 'contour-view', 'loader',
         'thunder', 'thunder-anim',
       ].map((suffix) => PREFS_NS + '-' + suffix)
       for (const k of raw) m[k] = prefsKeyToField(k)
@@ -1120,11 +1122,18 @@ function apply(ctx) {
        changes the SHAPE of the landscape rather than how it is drawn. */
     const CONTOUR_ROUGHNESS_KEY = PREFS_NS + '-contour-roughness'
     const CONTOUR_SCROLL_PAUSE_KEY = PREFS_NS + '-contour-scroll-pause'
+    /* 2D sheet or 3D parallax. Stored as an index ('0' = flat, '1' = parallax)
+       for the same reason as the other option settings: a stored index cannot go
+       stale. Opt-in because 3D is only worth anything with real GPU acceleration
+       (see contourHardwareGL), and the flat view is the one that has always
+       shipped. */
+    const CONTOUR_VIEW_KEY = PREFS_NS + '-contour-view'
     // Default OFF (=== '1'): a background pattern must be opt-in.
     const isContourOn = () => prefsGet(CONTOUR_KEY) === '1'
     // Scroll defaults ON, so enabling the layer shows the full effect at once.
     const isContourAnimOn = () => prefsGet(CONTOUR_ANIM_KEY) !== '0'
     const isContourScrollPauseOn = () => prefsGet(CONTOUR_SCROLL_PAUSE_KEY) !== '0'
+    const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
 
     /* Scroll directions, clockwise from up. Diagonals are normalised so "fast"
        is the same SPEED on every direction rather than 1.41x faster there. */
@@ -2623,6 +2632,16 @@ function apply(ctx) {
        edge continues the right edge exactly. */
     const contourBlit = () => {
       if (contourLineCv === null || contourTex === null) return
+      /* 3D view: the shader does the moving, so nothing here has to touch the flat
+         sheet. When the GPU says no, this returns false and the flat path below
+         draws instead -- the sheet is always on screen, one way or the other. */
+      if (isContourView3D()) {
+        if (contourGlDraw()) return
+      } else if (contourGl !== null) {
+        /* Back to flat: drop the GL layer so its texture memory goes away. */
+        contourGlDispose()
+        contourPaintSurface()
+      }
       const tw = contourTex.cv.width
       const th = contourTex.cv.height
       const sx = ((Math.floor(contourOffsetX) % tw) + tw) % tw
@@ -2652,6 +2671,312 @@ function apply(ctx) {
       }
     }
 
+    /* ---- 3D parallax view ------------------------------------------------------
+       The flat sheet moves everywhere at one speed; real terrain does not. Under a
+       camera, a ridge is nearer than the valley behind it, so it sweeps past faster.
+       That is one number per pixel -- a gain on the scroll offset -- and it can be
+       applied in a fragment shader with the terrain height as the input:
+
+           s(h)  = 1 + DEPTH * (h - REF)        motion gain
+           py'   = py + RISE * (h - REF) * H    the ridge sits higher on screen
+           uv    = fract((p + offset * s) / period)
+
+       Height is sampled at the UNDISPLACED position and then displaces the sample
+       (single-step parallax mapping, the standard oblique projection of a height
+       field): sampling at the displaced position would be circular, since the
+       displacement is what we are solving for.
+
+       Why a separate canvas: a canvas is permanently either a 2d or a webgl
+       surface, so the flat canvas stays exactly as it is and the 3D layer is a
+       second element on top. Switching views therefore costs nothing on the flat
+       side, and a device without usable acceleration just never gets the second
+       canvas -- the flat sheet is already on screen underneath.
+
+       Cost: with the sheet as a single period texture (wrap is fract(), not a
+       surface), 3D holds LESS memory than the flat path: the scroll surface is
+       skipped entirely, so only the texture remains. */
+    const CONTOUR_3D_REF = 0.5      // height that moves exactly like the flat sheet
+    const CONTOUR_3D_DEPTH = 0.55   // motion gain per unit of height away from REF
+    const CONTOUR_3D_RISE = 0.18    // vertical lift per unit height, in viewport heights
+    /* Renderer strings that mean "this is not hardware acceleration". The user's
+       requirement is explicit: 3D must run on the GPU or fall back to 2D, so a
+       software rasteriser (headless Chrome, a driver-less VM, a blocklisted GPU)
+       is a NO, not a slow yes. */
+    const CONTOUR_SOFT_GL = /swiftshader|basic render driver|llvmpipe|softpipe|software rasterizer|microsoft basic/i
+    const CONTOUR_GL_VERT = [
+      'attribute vec2 a_pos;',
+      'varying vec2 v_uv;',
+      'void main() {',
+      '  v_uv = a_pos * 0.5 + 0.5;',
+      '  gl_Position = vec4(a_pos, 0.0, 1.0);',
+      '}',
+    ].join('\n')
+    const CONTOUR_GL_FRAG = [
+      'precision mediump float;',
+      'uniform sampler2D u_sheet;',
+      'uniform sampler2D u_height;',
+      'uniform vec2 u_sheetSize;',
+      'uniform vec2 u_viewSize;',
+      'uniform vec2 u_offset;',
+      'uniform float u_depth;',
+      'uniform float u_ref;',
+      'uniform float u_rise;',
+      'varying vec2 v_uv;',
+      'void main() {',
+      /* v_uv is bottom-up (clip space), the sheet is top-down. */
+      '  vec2 px = vec2(v_uv.x, 1.0 - v_uv.y) * u_viewSize;',
+      '  vec2 base = (px + u_offset) / u_sheetSize;',
+      '  float h = texture2D(u_height, fract(base)).r;',
+      '  float s = 1.0 + u_depth * (h - u_ref);',
+      '  vec2 p = px + u_offset * s;',
+      '  p.y += u_rise * (h - u_ref) * u_viewSize.y;',
+      '  gl_FragColor = texture2D(u_sheet, fract(p / u_sheetSize));',
+      '}',
+    ].join('\n')
+
+    /* The projection above, as plain arithmetic: the tests check the geometry
+       without a GPU (materialise, monotonicity, and the depth=0 identity), and the
+       shader is the same three lines. Returns texture-space uv in [0,1). */
+    const contourParallaxUV = (px, py, sx, sy, tw, th, h, viewH) => {
+      const baseU = (px + sx) / tw
+      const baseV = (py + sy) / th
+      const u0 = baseU - Math.floor(baseU)
+      const v0 = baseV - Math.floor(baseV)
+      const gain = 1 + CONTOUR_3D_DEPTH * (h - CONTOUR_3D_REF)
+      const su = (px + sx * gain) / tw
+      const sv = (py + sy * gain + CONTOUR_3D_RISE * (h - CONTOUR_3D_REF) * viewH) / th
+      return { h, u0, v0, u: su - Math.floor(su), v: sv - Math.floor(sv), gain }
+    }
+
+    /* A test hook, and nothing else: forcing 3D on a software rasteriser is how the
+       shader itself gets exercised in CI (headless Chrome is SwiftShader). Real
+       users leave it unset, so the hardware rule below still holds for them. */
+    const contourGlForced = () => typeof window !== 'undefined' && window.__CONTOUR_FORCE_GL__ === true
+
+    let contourGl = null
+    let contourGlWhy = ''
+    let contourGlChecked = false
+
+    /* Does this device actually accelerate WebGL? Returns {ok, why} with the
+       renderer string in `why` either way -- the settings row shows it, so "3D is
+       unavailable here" is never a silent mystery. */
+    const contourHardwareGL = () => {
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+        return { ok: false, why: 'no document' }
+      }
+      let cv = null
+      try { cv = document.createElement('canvas') } catch (e) { return { ok: false, why: 'no canvas' } }
+      let gl = null
+      try {
+        gl = cv.getContext('webgl', { antialias: false, depth: false, alpha: true, premultipliedAlpha: true })
+          || cv.getContext('experimental-webgl')
+      } catch (e) { gl = null }
+      if (!gl) return { ok: false, why: 'webgl unavailable' }
+      let renderer = ''
+      try {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info')
+        if (ext) renderer = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '')
+      } catch (e) { renderer = '' }
+      /* The test hook is consulted FIRST: it exists to exercise the shader on a
+         machine the rule below would refuse (CI is headless, hence SwiftShader or
+         the Basic Render Driver), and a hook that only applies after the rule has
+         already said no would be dead code. */
+      if (contourGlForced()) return { ok: true, why: renderer || 'forced', renderer, forced: true }
+      /* Without the extension the renderer string is masked ("WebKit WebGL"),
+         which cannot be told apart from a software rasteriser. The requirement is
+         hardware acceleration, so unprovable counts as no. */
+      if (renderer === '') return { ok: false, why: 'renderer not queryable' }
+      if (CONTOUR_SOFT_GL.test(renderer)) return { ok: false, why: 'software renderer: ' + renderer, renderer }
+      return { ok: true, why: renderer, renderer }
+    }
+
+    const contourGlCompile = (gl, type, src) => {
+      const sh = gl.createShader(type)
+      if (!sh) return null
+      gl.shaderSource(sh, src)
+      gl.compileShader(sh)
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return null
+      return sh
+    }
+
+    /* Create the 3D layer for the first time. Any failure is sticky
+       (contourGlChecked) so a device without acceleration never pays for a retry
+       per frame, and `why` is left behind for the settings hint. */
+    const contourGlMount = () => {
+      if (contourGl !== null) return true
+      if (contourGlChecked) return false
+      contourGlChecked = true
+      const hw = contourHardwareGL()
+      if (!hw.ok) {
+        contourGlWhy = hw.why
+        return false
+      }
+      if (contourWrap === null || typeof document === 'undefined') return false
+      let cv = null
+      let gl = null
+      try {
+        cv = document.createElement('canvas')
+        cv.setAttribute('data-endfield-contour-gl', '')
+        /* Above the flat canvas, below every piece of content (the wrapper keeps
+           z-index 0 and pointer-events none). */
+        cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none'
+        contourWrap.appendChild(cv)
+        gl = cv.getContext('webgl', { antialias: false, depth: false, alpha: true, premultipliedAlpha: true })
+          || cv.getContext('experimental-webgl')
+      } catch (e) { gl = null }
+      if (!gl) {
+        if (cv && cv.parentNode) cv.parentNode.removeChild(cv)
+        contourGlWhy = 'webgl context refused'
+        return false
+      }
+      const vs = contourGlCompile(gl, gl.VERTEX_SHADER, CONTOUR_GL_VERT)
+      const fs = contourGlCompile(gl, gl.FRAGMENT_SHADER, CONTOUR_GL_FRAG)
+      const prog = vs && fs ? gl.createProgram() : null
+      if (!prog) {
+        if (cv.parentNode) cv.parentNode.removeChild(cv)
+        contourGlWhy = 'shader compile failed'
+        return false
+      }
+      gl.attachShader(prog, vs)
+      gl.attachShader(prog, fs)
+      gl.linkProgram(prog)
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        if (cv.parentNode) cv.parentNode.removeChild(cv)
+        contourGlWhy = 'shader link failed'
+        return false
+      }
+      const makeTexture = (wrap) => {
+        const t = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, t)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        return t
+      }
+      const quad = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
+      contourGl = {
+        cv, gl, prog, quad,
+        aPos: gl.getAttribLocation(prog, 'a_pos'),
+        uSheet: gl.getUniformLocation(prog, 'u_sheet'),
+        uHeight: gl.getUniformLocation(prog, 'u_height'),
+        uSheetSize: gl.getUniformLocation(prog, 'u_sheetSize'),
+        uViewSize: gl.getUniformLocation(prog, 'u_viewSize'),
+        uOffset: gl.getUniformLocation(prog, 'u_offset'),
+        uDepth: gl.getUniformLocation(prog, 'u_depth'),
+        uRef: gl.getUniformLocation(prog, 'u_ref'),
+        uRise: gl.getUniformLocation(prog, 'u_rise'),
+        sheet: makeTexture(gl.CLAMP_TO_EDGE),
+        height: makeTexture(gl.CLAMP_TO_EDGE),
+        sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null,
+      }
+      contourGlWhy = hw.why
+      return true
+    }
+
+    const contourGlDispose = () => {
+      const st = contourGl
+      contourGl = null
+      if (st === null) return
+      try {
+        if (st.cv && st.cv.parentNode) st.cv.parentNode.removeChild(st.cv)
+        const gl = st.gl
+        if (gl) {
+          if (st.sheet) gl.deleteTexture(st.sheet)
+          if (st.height) gl.deleteTexture(st.height)
+          if (st.quad) gl.deleteBuffer(st.quad)
+          if (st.prog) gl.deleteProgram(st.prog)
+        }
+      } catch (e) { /* a lost context must not take the teardown down with it */ }
+    }
+
+    /* Upload whatever the current texture/field pair is, once per change. */
+    const contourGlUpload = () => {
+      const st = contourGl
+      if (st === null || contourTex === null) return false
+      const gl = st.gl
+      const src = contourTex.cv
+      if (st.sheetSrc !== src || st.sheetW !== src.width || st.sheetH !== src.height) {
+        gl.bindTexture(gl.TEXTURE_2D, st.sheet)
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src)
+        st.sheetSrc = src
+        st.sheetW = src.width
+        st.sheetH = src.height
+      }
+      const f = contourField
+      if (f !== null && st.heightGen !== f) {
+        /* Heights as 8-bit: the field is smooth and the parallax gain is ±0.55, so
+           a 1/255 step is far below one screen pixel of displacement. RGBA rather
+           than LUMINANCE because a non-RGBA upload with row-major strides is the
+           classic driver-dependent trap. */
+        const n = f.cols * f.rows
+        const px = new Uint8Array(n * 4)
+        const span = (f.mx - f.mn) || 1
+        for (let i = 0; i < n; i++) {
+          const v = Math.round(((f.F[i] - f.mn) / span) * 255)
+          const b = v < 0 ? 0 : (v > 255 ? 255 : v)
+          px[i * 4] = b
+          px[i * 4 + 1] = b
+          px[i * 4 + 2] = b
+          px[i * 4 + 3] = 255
+        }
+        gl.bindTexture(gl.TEXTURE_2D, st.height)
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, f.cols, f.rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, px)
+        st.heightGen = f
+      }
+      return true
+    }
+
+    /* Draw one 3D frame. Returns false when 3D cannot draw right now, which is the
+       caller's cue to fall back to the flat path (no GPU, no texture yet, ...). */
+    const contourGlDraw = () => {
+      if (contourTex === null || contourView === null) return false
+      if (!contourGlMount()) return false
+      const st = contourGl
+      const gl = st.gl
+      const dpr = contourView.dpr > 0 ? contourView.dpr : 1
+      const wDev = Math.max(1, Math.round(contourView.w * dpr))
+      const hDev = Math.max(1, Math.round(contourView.h * dpr))
+      if (st.cv.width !== wDev || st.cv.height !== hDev) {
+        st.cv.width = wDev
+        st.cv.height = hDev
+        st.cv.style.width = contourView.w + 'px'
+        st.cv.style.height = contourView.h + 'px'
+      }
+      if (!contourGlUpload()) return false
+      const tw = contourTex.cv.width
+      const th = contourTex.cv.height
+      const sx = ((Math.floor(contourOffsetX) % tw) + tw) % tw
+      const sy = ((Math.floor(contourOffsetY) % th) + th) % th
+      gl.viewport(0, 0, wDev, hDev)
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.useProgram(st.prog)
+      gl.bindBuffer(gl.ARRAY_BUFFER, st.quad)
+      gl.enableVertexAttribArray(st.aPos)
+      gl.vertexAttribPointer(st.aPos, 2, gl.FLOAT, false, 0, 0)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, st.sheet)
+      gl.uniform1i(st.uSheet, 0)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, st.height)
+      gl.uniform1i(st.uHeight, 1)
+      gl.uniform2f(st.uSheetSize, tw, th)
+      gl.uniform2f(st.uViewSize, wDev, hDev)
+      gl.uniform2f(st.uOffset, sx, sy)
+      gl.uniform1f(st.uDepth, CONTOUR_3D_DEPTH)
+      gl.uniform1f(st.uRef, CONTOUR_3D_REF)
+      gl.uniform1f(st.uRise, CONTOUR_3D_RISE)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      return true
+    }
+
     /* Paint the sheet into the scroll surface: viewport + one period, textured
        from the cache. Runs on rebuild/repaint only (a resize that changes the
        target size, a colour flip, a first mount), never per frame. */
@@ -2661,6 +2986,12 @@ function apply(ctx) {
       /* Two ways the surface stays off, both falling back to the per-frame blit
          into a viewport-sized canvas: the size plan did not budget for it, or the
          canvas has no writable transform (a headless harness). Bail before sizing. */
+      /* In 3D the shader wraps the sheet itself, so the surface would be pure
+         cost (100-300MB) for a canvas nobody looks at. */
+      if (isContourView3D()) {
+        contourSurfaceOn = false
+        return
+      }
       if (contourTex.scroll !== true || cv.style == null || typeof cv.style.transform !== 'string') {
         contourSurfaceOn = false
         return
@@ -2959,6 +3290,9 @@ function apply(ctx) {
         contourRo = null
       }
       if (contourWrap !== null && contourWrap.parentNode) contourWrap.parentNode.removeChild(contourWrap)
+      contourGlDispose()
+      contourGlChecked = false
+      contourGlWhy = ''
       contourWrap = null
       contourLineCv = null
       contourSurfaceOn = false
@@ -5388,6 +5722,11 @@ function apply(ctx) {
       contourDensityMedium: '适中',
       contourDensityDense: '密集',
       contourDensityVeryDense: '极密',
+      contourViewRow: '背景视角',
+      contourViewHint: '视差按山体高度改变移速：高的地方（离相机近）移动更快',
+      contourViewHintNoGL: '此设备没有可用的硬件加速，视差会自动退回平面视角',
+      contourViewFlat: '平面',
+      contourViewParallax: '视差',
       contourRoughnessRow: '地形粗糙度',
       contourRoughnessHint: '低=平原（线条宽阔平缓），高=极端山地（等高线密集、多峰多谷）；改变地形本身，不是线距',
       contourRoughnessNeedLayer: '请先开启等高线背景',
@@ -5485,6 +5824,11 @@ function apply(ctx) {
       contourDensityMedium: 'Medium',
       contourDensityDense: 'Dense',
       contourDensityVeryDense: 'Very dense',
+      contourViewRow: 'View',
+      contourViewHint: 'Parallax scales motion by terrain height: higher ground (nearer the camera) moves faster',
+      contourViewHintNoGL: 'No hardware acceleration on this device, so parallax falls back to the flat view',
+      contourViewFlat: 'Flat',
+      contourViewParallax: 'Parallax',
       contourRoughnessRow: 'Terrain roughness',
       contourRoughnessHint: 'Low = plains (wide, gentle lines); high = extreme mountains (dense contours, many peaks and valleys). This changes the terrain itself, not the line spacing',
       contourRoughnessNeedLayer: 'Turn on the contour background first',
@@ -5596,6 +5940,7 @@ function apply(ctx) {
           const [contourDensity, setContourDensity] = R.useState(contourDensityIndex())
           const [contourRoughness, setContourRoughness] = R.useState(contourRoughnessIndex())
           const [contourScrollPause, setContourScrollPause] = R.useState(isContourScrollPauseOn())
+          const [contourView, setContourView] = R.useState(isContourView3D() ? 1 : 0)
           const [thunderOn, setThunderOn] = R.useState(isThunderOn())
           const [thunderAnim, setThunderAnim] = R.useState(isThunderAnimOn())
           const [palette, setPalette] = R.useState(readPalette())
@@ -5715,6 +6060,21 @@ function apply(ctx) {
             setContourRoughness(next)
             // New terrain (same seed): rebuild field + contours + cache once.
             contourRebuildForRoughness()
+          }
+          /* Switching view swaps which canvas is on screen. The flat canvas is left
+             exactly as it was (it cannot become a webgl surface, and vice versa), so
+             the expensive rebuild is never part of a view flip: 3D mounts a second
+             element on top, and going back just drops it and repaints the surface. */
+          const setContourViewValue = (value) => {
+            const next = Number(value) === 1 ? 1 : 0
+            if (next === contourView) return
+            prefsSet(CONTOUR_VIEW_KEY, String(next))
+            setContourView(next)
+            contourSwitchSig = ''
+            /* Force one draw before the loop is reconciled: when scrolling is off
+               (static sheet) nothing else would ever call contourBlit(). */
+            contourBlit()
+            contourApplySwitches()
           }
           const toggleContourScrollPause = () => {
             const next = !contourScrollPause
@@ -5982,6 +6342,29 @@ function apply(ctx) {
                     opacity: contourOn ? 1 : 0.45,
                   },
                 }),
+              ]),
+              row('contour-view', false, [
+                R.createElement('span', { style: labelStyle },
+                  t('contourViewRow') + t('sep') + t(contourView === 1 ? 'contourViewParallax' : 'contourViewFlat'),
+                  R.createElement('span', { style: hintStyle },
+                    /* Say so when hardware acceleration is missing: picking 视差 on a
+                       software rasteriser keeps the flat sheet, and that must not look
+                       like a broken switch. */
+                    (contourView === 1 && contourGlChecked && contourGl === null)
+                      ? t('contourViewHintNoGL')
+                      : t('contourViewHint')
+                  )
+                ),
+                R.createElement('span', { style: { display: 'flex', gap: '4px', flex: '0 0 auto' } },
+                  ...[t('contourViewFlat'), t('contourViewParallax')].map((label, index) => R.createElement('button', {
+                    key: 'view-' + index,
+                    type: 'button',
+                    onClick: () => setContourViewValue(index),
+                    style: btnStyleFor(contourView === index, !contourOn),
+                    disabled: !contourOn,
+                    title: contourOn ? '' : t('contourAnimNeedLayer'),
+                  }, label))
+                )
               ]),
               row('contour-scroll-pause', true, [
                 R.createElement('span', { style: labelStyle },

@@ -62,6 +62,7 @@ const NAME = 'dsh-theme-endfield-contour-rework';
  *   - default-OFF switches store '0' and the client reads them as `=== '1'`;
  *   - palette / radius store one of their documented literals ('valley' /
  *     'wuling'; 'square' / 'round');
+ *   - the contour VIEW stores 0 (flat sheet) or 1 (3D parallax);
  *   - the contour DIRECTION, SPEED, DENSITY and ROUGHNESS store integer indices
  *     into the client's option tables (0..7 compass directions, 0..4 speeds in
  *     px/s, 0..3 iso-level counts, 0..11 terrain-roughness stops), not the
@@ -84,6 +85,7 @@ const FIELD_DEFAULTS = {
   contourDensity: '1',      // 等高线密度 —— index 1 = 14 条等值线
   contourRoughness: '7',    // 地形粗糙度 —— index 7 = 出厂地形（平原..极端山地共 12 档）
   contourScrollPause: '1',  // 滚动暂停 —— default on
+  contourView: '0',         // 背景视角 —— 0 = 平面，1 = 3D 视差（需要硬件加速）
   watermark: '1',           // 背景水印 —— default on
   watermarkPersist: '0',    // 水印保持显示 —— default off
   loader: '0',              // 启动加载动画 —— default off

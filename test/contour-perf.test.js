@@ -109,7 +109,8 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
   'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT',
-  'CONTOUR_SCROLL_AREA', 'CONTOUR_SCROLL_DIM',
+  'CONTOUR_SCROLL_AREA', 'CONTOUR_SCROLL_DIM', 'CONTOUR_3D_REF', 'CONTOUR_3D_DEPTH',
+  'CONTOUR_3D_RISE', 'CONTOUR_SOFT_GL', 'CONTOUR_VIEW_KEY',
   'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY',
   'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT',
@@ -190,6 +191,15 @@ const setTimeout = undefined
    (not a value cached at load) is what gets asserted. */
 let reducedMotionMatches = false
 const window = { matchMedia: () => ({ matches: reducedMotionMatches }) }
+/* The 3D view is stubbed out here, deliberately: contourBlit/contourPaintSurface
+   dispatch on it, and this harness must keep proving that the FLAT path costs
+   nothing and needs no GPU. 'no gl layer' is the state of every device that fails
+   the hardware check, so this is the shipped fallback, not an awkward fake. */
+let contourGl = null
+const contourGlDraw = () => false
+const contourGlDispose = () => {}
+/* Read straight from the pref store, exactly as the real one does. */
+const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
 ${body}
 ${gateDecls}
 const contourPerm = new Uint16Array(512)
