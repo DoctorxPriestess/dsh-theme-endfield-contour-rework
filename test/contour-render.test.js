@@ -410,7 +410,18 @@ async function main() {
       /* Two things must hold: the canvas never grows during the burst (a surface
          re-allocation per resize event is the freeze), and it stays inside the
          affordability cap that now gates the whole scroll plan. */
-      R('resize drag: the surface is not re-allocated per event', sizeA===sizeB, sizeA+' -> '+sizeB)
+      /* The surface is viewport+pad now (CONTOUR_SURFACE_PAD, 160 device px), never
+         viewport+period. A drag may legitimately repaint it once when the debounce
+         fires, so the invariant to assert is the SIZE, not "unchanged": the old
+         freeze was a period-sized canvas (16M+ device px here) reallocated per event. */
+      const padOk=(()=>{
+        const c=live()
+        if(!c) return false
+        const fr=frame.getBoundingClientRect()
+        const dpr=window.devicePixelRatio||1
+        return c.width<=Math.round(fr.width*dpr)+200 && c.height<=Math.round(fr.height*dpr)+200
+      })()
+      R('resize drag: the surface stays viewport-sized (never viewport+period)', padOk, sizeA+' -> '+sizeB)
       const capPx=24e6
       R('resize drag: the canvas stays inside the surface cap',
         !!cNow && cNow.width*cNow.height<=capPx,
@@ -418,10 +429,21 @@ async function main() {
       /* Compare the TRANSFORM only: a per-event blit legitimately repaints pixels,
          the pause is about the movement stopping. */
       const tf=()=>{const c=live(); return c?getComputedStyle(c).transform:'none'}
+      /* Sampled WITH events still arriving: once the debounce has fired the sheet is
+         allowed to move again (and one repaint restarts the transform at zero), so a
+         pause measured after the drag proves nothing. */
+      const dragOnce=async()=>{
+        const r=frame.getBoundingClientRect()
+        frame.style.width=Math.round(r.width+20)+'px'
+      }
+      await dragOnce()
       const tA=tf()
-      await sleep(150)
+      await sleep(60)
       const tB=tf()
-      R('resize drag: movement pauses while the window moves', tA===tB, tA+' vs '+tB)
+      await dragOnce()
+      await sleep(60)
+      const tC=tf()
+      R('resize drag: movement pauses while the window moves', tA===tB && tB===tC, tA+' / '+tB+' / '+tC)
       await sleep(900)
       /* After the debounce the visible canvas must cover the enlarged frame again
          (a surface it can afford, or the viewport-sized fallback): during the drag it

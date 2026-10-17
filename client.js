@@ -1188,14 +1188,12 @@ function apply(ctx) {
     const CONTOUR_TEX_QUANT = 128           // CSS px
     /* Ceiling on the BACKING STORES this one effect may hold: the contour texture
        plus the scroll surface it is painted into (see contourPaintSurface). The
-       surface is (viewport + period)^2 against the texture's period^2, so with a
-       period of m viewports the pair costs m^2 + (1+m)^2 viewport-areas -- that is
-       what bounds m, because a fixed 3x would be ~340 MB at 1432x753@2x.
+       surface is the VIEWPORT plus a small pad -- it is cropped, not period-sized --
+       so the pair costs m^2 + 1 viewport-areas and m is bounded by sqrt(r - 1).
        NOTE (measured, see scratch/terrain-lab/budget.js): at the per-side 4096 and
        8.3e6-area caps this budget is NOT the binding constraint for any viewport up
-       to 1920x1080@2x -- 200MB and 300MB produce identical plans. It is headroom for
-       a larger per-side cap (at 8192 the same 300MB is what gives 1432x753@2x a
-       2.41x period instead of 1.43x). */
+       to 1920x1080@2x. With the surface no longer period-sized the budget gets to
+       buy a longer period again, which is what the scroll caps below now limit. */
     /* 300MB measured fine in isolation (texture + surface arithmetic) and is what the
        user asked for, but it is not what the RENDERER can hold: with a maximised HiDPI
        window the surface alone is a 100MB+ canvas backed by a raster copy AND a GPU
@@ -1208,10 +1206,22 @@ function apply(ctx) {
        twice inside one frame, which reads as a tiling pattern rather than as a
        moving landscape. If the budget cannot even afford this, the layer keeps the
        old per-frame blit (one texture, no surface) rather than a repeating one. */
-    /* Above this many device pixels the scroll surface is not worth its one-off
-       raster: fall back to the per-frame blit, which is cheap (measured p95
-       0.002ms). Keeps a maximise from allocating and filling a huge canvas. */
-    const CONTOUR_SURFACE_MAX_PX = 24e6
+    /* The scroll surface holds the viewport plus this many DEVICE pixels of slack on
+       each axis. It used to hold viewport + one whole period so that translating it
+       never ran out -- 140MB at 1432x753@2x, and Chromium keeps more than one copy of
+       a canvas that size. With a pad, the surface is one viewport (~17MB) whatever the
+       window size: the sheet is CROPPED, and once the translation has eaten half the
+       pad the surface is repainted once at the new offset (~1ms, a few times a second
+       at the fastest speed) and the transform restarts from zero. */
+    const CONTOUR_SURFACE_PAD = 512
+    /* Sized for the SLOWEST drift to stay cheap: half of this pad is the most the
+       transform ever carries, so at 192 px/s the sheet is repainted about twice a
+       second and at 12 px/s about once a minute. 512 device px costs 1.2x a viewport
+       of backing store and saves the repaints a 160px pad needed. */
+    /* Safety net only: a surface above this many device pixels is refused outright.
+       The pad makes the surface ~1.05 viewports, so this only trips on absurd
+       (5K/8K-at-2x) viewports, where the per-frame blit takes over. */
+    const CONTOUR_SURFACE_MAX_PX = 48e6
     /* How much bigger the target texture has to be before a resize is allowed to
        regenerate the sheet (see contourScheduleRebuildCheck). */
     const CONTOUR_REBUILD_MARGIN = 0.08
@@ -1911,6 +1921,8 @@ function apply(ctx) {
          it as concentric rings, which is what a sinkhole looks like on a map and
          what gives the 3D shader's raymarch something to occlude. */
       const hollow = prof.hollow > 0 ? prof.hollow : 0
+      /* Set by the carve below, read once the field is in its final units. */
+      let pitCells = null
       /* The range BEFORE the carve. contourLevels keeps the absolute contour SPACING
          and adds levels for the extra depth the pits introduce, instead of stretching
          the same number of levels over a bigger range -- which measured as the
@@ -1942,6 +1954,11 @@ function apply(ctx) {
            re-imposes that after the carve, so wrapping the interior is enough. */
         const sm = new Float32Array(cw * ch)
         const tmp = new Float32Array(cw * ch)
+        /* Which cells the funnel actually opened. The 3D shader needs the pit's
+           HEIGHT BAND, not the geometry: it opens the second layer wherever the
+           surface is below that band. */
+        const pit = new Uint8Array(cw * ch)
+        pitCells = pit
         for (let j = 0; j < ch; j++) {
           for (let i = 0; i < cw; i++) sm[j * cw + i] = U[j * cols + i]
         }
@@ -1997,6 +2014,7 @@ function apply(ctx) {
             for (let i = 0; i < cw; i++) {
               const m = sm[j * cw + i]
               if (m >= lvl) continue
+              pit[j * cw + i] = 1
               const t = (lvl - m) / denom
               U[row + i] -= hollow * CONTOUR_HOLLOW_DEPTH * Math.pow(t, CONTOUR_HOLLOW_SHARP)
             }
@@ -2025,6 +2043,29 @@ function apply(ctx) {
       }
       field.mn = mnF
       field.mx = mxF
+      /* The pit's height band in the FINAL units the shader samples: below holeLo it
+         is a hole floor, above holeHi it is untouched ground. Percentiles of the pit
+         cells rather than the carve's own (pre-remap) level, so the mask lines up with
+         the terrain the sheet actually drew. */
+      if (hollow > 0 && pitCells !== null) {
+        /* pit is cw x ch, F is cols x rows: same cells, different stride. Reading F
+           with the pit index instead picked up unrelated rows and put the band across
+           the whole map (measured: the mask covered 14.8% of the screen). */
+        const vals = []
+        const cwP = cols - 1 > 0 ? cols - 1 : cols
+        const chP = rows - 1 > 0 ? rows - 1 : rows
+        for (let j = 0; j < chP; j++) {
+          for (let i = 0; i < cwP; i++) {
+            if (pitCells[j * cwP + i] === 1) vals.push(F[j * cols + i])
+          }
+        }
+        if (vals.length > 8) {
+          vals.sort((a, b) => a - b)
+          field.holeLo = vals[Math.floor(vals.length * 0.45)]
+          field.holeHi = vals[Math.floor(vals.length * 0.92)]
+          field.holeShare = vals.length / pitCells.length
+        }
+      }
     }
     /* How many octaves of that ladder are actually usable on a texture of tw x th
        CSS px: octave o has period (px0 * 2^o), and the lattice indices must stay
@@ -2095,6 +2136,11 @@ function apply(ctx) {
     /* true once the mounted canvas is the SCROLL SURFACE (texture painted once,
        moved by a transform) rather than a per-frame redraw target. */
     let contourSurfaceOn = false
+    /* The offsets the surface was last painted at. The transform only ever moves by
+       the difference, and a difference larger than half the pad means the paint has
+       to be refreshed (see contourPaintSurface / contourBlit). */
+    let contourSurfaceRefX = 0
+    let contourSurfaceRefY = 0
     let contourRaf = null
     let contourRo = null
     let contourResizeTimer = null
@@ -2408,6 +2454,8 @@ function apply(ctx) {
          featKind are per-build: nothing of the previous terrain survives. */
       const field = {
         cols, rows, step, tw, th, F, mn, mx, hCount,
+        /* Filled by the carve; null means this sheet has no cavities. */
+        holeLo: null, holeHi: null, holeShare: 0,
         uScratch: new Float32Array(cols * rows),
         featAmt: new Float32Array(cols * rows),
         featKind: new Uint8Array(cols * rows),
@@ -2876,8 +2924,19 @@ function apply(ctx) {
          pixels first, so the transform never resamples the 1px strokes. */
       if (contourSurfaceOn && contourLineCv.style != null && typeof contourLineCv.style.transform === 'string') {
         const dpr = contourDpr > 0 ? contourDpr : 1
+        let dx = Math.floor(contourOffsetX) - contourSurfaceRefX
+        let dy = Math.floor(contourOffsetY) - contourSurfaceRefY
+        const half = CONTOUR_SURFACE_PAD * 0.5
+        /* Half the pad is gone: repaint the surface at the new offset and start the
+           transform over. That is one tiled fill of a viewport (~1ms) a few times a
+           second at the fastest speed, instead of a viewport+period canvas. */
+        if (dx > half || dx < -half || dy > half || dy < -half) {
+          contourPaintSurface()
+          dx = Math.floor(contourOffsetX) - contourSurfaceRefX
+          dy = Math.floor(contourOffsetY) - contourSurfaceRefY
+        }
         contourLineCv.style.transform =
-          'translate3d(' + (-sx / dpr) + 'px,' + (-sy / dpr) + 'px,0)'
+          'translate3d(' + (-dx / dpr) + 'px,' + (-dy / dpr) + 'px,0)'
         return
       }
       /* FALLBACK: no style on the canvas (a headless harness): repaint the
@@ -2918,6 +2977,12 @@ function apply(ctx) {
        Cost: with the sheet as a single period texture (wrap is fract(), not a
        surface), 3D holds LESS memory than the flat path: the scroll surface is
        skipped entirely, so only the texture remains. */
+    /* The 3D sheet's period, in viewports per axis, and the ceiling on its device
+       pixels. The shader wraps with fract() and the parallax hides repetition, so a
+       short period looks the same while costing 3.5x less GPU memory than the 2D
+       sheet -- and 3D is where the texture is actually resident in VRAM. */
+    const CONTOUR_3D_TEX_MULT = 1.5
+    const CONTOUR_3D_TEX_AREA = 12e6        // device px^2 (~48MB)
     const CONTOUR_3D_REF = 0.5      // height that moves exactly like the flat sheet
     /* Magnification per unit of height: +6% at the top, -6% at the bottom.
        Measured, not guessed: the warp's screen-space gradient is roughly
@@ -2959,7 +3024,10 @@ function apply(ctx) {
        Flipping this to true enables it in the 3D view only; the flat sheet is
        unchanged either way. Kept here rather than deleted so the decision is one
        constant, not a rewrite. */
-    const CONTOUR_HOLLOW_ENABLED = false
+    /* 3D only: the carve makes the cavities, the shader's second layer shows the
+       ground through them. The flat sheet never sees it (contourHollowWanted is keyed
+       on the 3D view), so the 2D drawing is byte-identical to before. */
+    const CONTOUR_HOLLOW_ENABLED = true
     const CONTOUR_HOLLOW_SHARE = 0.04
     const CONTOUR_HOLLOW_SHARP = 2.4    // exponent: only the lowest ground opens
     const CONTOUR_HOLLOW_DEPTH = 0.90   // how far the funnel floor drops, in range units
@@ -2969,6 +3037,15 @@ function apply(ctx) {
        a funnel per basin. The funnel's floor keeps the raw detail, which is what
        puts contour rings inside the cavity. */
     const CONTOUR_HOLLOW_RADIUS = 6
+    /* The second layer's own depth, in height units, and where its terrain is taken
+       from (a fraction of the sheet, so the ground behind a hole is a different part
+       of the landscape instead of the same lines shifted). */
+    const CONTOUR_3D_HOLE_DROP = 0.38
+    /* Magnification of the ground behind a cavity: 0.55 means it sweeps at 55% of the
+       surface's speed, which is what makes it read as a second, farther layer. */
+    const CONTOUR_3D_HOLE_SCALE = 0.55
+    const CONTOUR_3D_HOLE_SHIFT_X = 0.31
+    const CONTOUR_3D_HOLE_SHIFT_Y = 0.17
     /* Raymarch steps per pixel for the occlusion. 14 measured enough to make the rim
        read as a rim at 1:1; the loop is constant-bound because GLSL ES 1.0 requires
        it, and u_steps lets the bound stay honest. */
@@ -3032,6 +3109,16 @@ function apply(ctx) {
       'uniform float u_ref;',
       'uniform float u_rise;',
       'uniform float u_steps;',
+      /* Second layer: the ground seen THROUGH a cavity. It is the same sheet sampled
+         deeper (a smaller magnification, so it drifts slower) and shifted, composited
+         UNDER the surface wherever the raymarch hit land inside the pit's height band.
+         Two taps of one texture -- no second sheet, no extra memory. */
+      'uniform float u_holeOn;',
+      'uniform float u_holeLo;',
+      'uniform float u_holeHi;',
+      'uniform float u_drop;',
+      'uniform vec2 u_deepShift;',
+      'uniform float u_deepScale;',
       'varying vec2 v_uv;',
       /* Where a point of height hh projects to, in sheet uv. This is the shipped
          camera inversion, unchanged: height sets the magnification and `cam` only
@@ -3091,6 +3178,7 @@ function apply(ctx) {
          across it: a local box filter that fades coverage instead of aliasing it.
          Below a texel it is plain magnification, where the single tap is exact and
          blurring would only cost sharpness. */
+      '  vec4 col;',
       '#ifdef CONTOUR_AA',
       '  vec2 fdx = dFdx(uv) * u_sheetSize;',
       '  vec2 fdy = dFdy(uv) * u_sheetSize;',
@@ -3101,13 +3189,42 @@ function apply(ctx) {
       '    acc += contourSample(uv + vec2(-o.x,  o.y));',
       '    acc += contourSample(uv + vec2( o.x, -o.y));',
       '    acc += contourSample(uv + vec2(-o.x, -o.y));',
-      '    gl_FragColor = acc * 0.25;',
+      '    col = acc * 0.25;',
       '  } else {',
-      '    gl_FragColor = contourSample(uv);',
+      '    col = contourSample(uv);',
       '  }',
       '#else',
-      '  gl_FragColor = contourSample(uv);',
+      '  col = contourSample(uv);',
       '#endif',
+      /* The cavity. The mask is the TERRAIN HEIGHT AT THE POINT THE RAY HIT, not the
+         marched coordinate `hh`: a ray that runs out of steps ends at hh ~ 0, which
+         would open the second layer over every low valley (measured: 14.8% of the
+         screen instead of the 4% that is actually carved). Asking the height field
+         directly keeps the mask on the pit floor and nowhere else -- the occlusion is
+         the raymarch's, not a painted-on ring. */
+      '  float hole = u_holeOn * (1.0 - smoothstep(u_holeLo, u_holeHi, surfaceAt(uv)));',
+      '  if (hole > 0.002) {',
+      /* The far ground is sampled on its OWN plane: a fixed, much smaller
+         magnification, so it drifts at u_deepScale of the surface's speed. Deriving it
+         from the height instead (uvAt with a lowered height) gave 0.94 against the
+         floor's 0.95 -- a 1% speed difference is not a parallax cue. */
+      '    vec2 uvDeep = ((px - u_center) / u_deepScale + u_cam) / u_sheetSize + u_deepShift;',
+      '    vec4 deep = contourSample(uvDeep);',
+      /* The near ground STOPS being drawn inside the cavity (a hole is a hole), and a
+         slice of darker air sits in front of what is behind it: without the first part
+         the pit's own concentric rings cover the second layer completely and the
+         funnel reads as a hill seen from above. */
+      '    col *= 1.0 - 0.88 * hole;',
+      '    col += deep * hole * 0.5;',
+      /* A void reads as a void because it is DARK, and a rim reads as a rim because it
+         is LIT: the tint is the air in front of the far ground, the band is the lip of
+         the hole catching the light. Without the two, a pit is just a region with more
+         contour lines on it. */
+      '    col += vec4(0.030, 0.030, 0.026, 0.22) * hole;',
+      '    float rim = clamp(1.0 - abs(hole * 2.0 - 1.0), 0.0, 1.0);',
+      '    col += vec4(0.40, 0.36, 0.19, 0.16) * rim * rim;',
+      '  }',
+      '  gl_FragColor = col;',
       '}',
     ]).join('\n')
 
@@ -3370,6 +3487,12 @@ function apply(ctx) {
         uRef: gl.getUniformLocation(prog, 'u_ref'),
         uRise: gl.getUniformLocation(prog, 'u_rise'),
         uSteps: gl.getUniformLocation(prog, 'u_steps'),
+        uHoleOn: gl.getUniformLocation(prog, 'u_holeOn'),
+        uHoleLo: gl.getUniformLocation(prog, 'u_holeLo'),
+        uHoleHi: gl.getUniformLocation(prog, 'u_holeHi'),
+        uDrop: gl.getUniformLocation(prog, 'u_drop'),
+        uDeepShift: gl.getUniformLocation(prog, 'u_deepShift'),
+        uDeepScale: gl.getUniformLocation(prog, 'u_deepScale'),
         sheet: makeTexture(gl.CLAMP_TO_EDGE),
         height: makeTexture(gl.CLAMP_TO_EDGE),
         sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null,
@@ -3504,6 +3627,20 @@ function apply(ctx) {
       gl.uniform1f(st.uRef, CONTOUR_3D_REF)
       gl.uniform1f(st.uRise, CONTOUR_3D_RISE)
       gl.uniform1f(st.uSteps, CONTOUR_3D_STEPS)
+      /* The cavity layer. A sheet without pits (2D, or 3D with the carve off) passes
+         holeOn = 0, which costs one multiply and removes the second tap. */
+      const fl = contourField
+      const hasHoles = fl !== null && fl.holeLo !== null && fl.holeHi !== null && fl.holeHi > fl.holeLo
+      /* The height texture stores (h - mn)/span, so the band has to be converted the
+         same way -- passing field units through left every sample above holeHi and the
+         second layer never drew. */
+      const hSpan = fl !== null ? ((fl.mx - fl.mn) || 1) : 1
+      gl.uniform1f(st.uHoleOn, hasHoles ? 1 : 0)
+      gl.uniform1f(st.uHoleLo, hasHoles ? (fl.holeLo - fl.mn) / hSpan : 0)
+      gl.uniform1f(st.uHoleHi, hasHoles ? (fl.holeHi - fl.mn) / hSpan : 1)
+      gl.uniform1f(st.uDrop, CONTOUR_3D_HOLE_DROP)
+      gl.uniform1f(st.uDeepScale, CONTOUR_3D_HOLE_SCALE)
+      gl.uniform2f(st.uDeepShift, CONTOUR_3D_HOLE_SHIFT_X, CONTOUR_3D_HOLE_SHIFT_Y)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       return true
     }
@@ -3530,12 +3667,12 @@ function apply(ctx) {
       const dpr = contourView.dpr > 0 ? contourView.dpr : 1
       const tw = contourTex.cv.width
       const th = contourTex.cv.height
-      const wDev = Math.max(1, Math.round(contourView.w * dpr)) + tw
-      const hDev = Math.max(1, Math.round(contourView.h * dpr)) + th
-      /* A surface this big costs more to allocate and fill than the per-frame blit it
-         replaces (measured: 48M device px here, and the paint is a one-off raster of
-         the whole thing). The MEMORY budget already allowed it; this is the time
-         budget. */
+      /* Viewport + pad, NOT viewport + period: the surface exists to be translated,
+         and all the translation it ever needs is the pad (it is repainted once half
+         of the pad is gone). Making it period-sized is what put 140MB of canvas in
+         the renderer and stalled the main thread for seconds on a resize. */
+      const wDev = Math.max(1, Math.round(contourView.w * dpr)) + CONTOUR_SURFACE_PAD
+      const hDev = Math.max(1, Math.round(contourView.h * dpr)) + CONTOUR_SURFACE_PAD
       if (wDev * hDev > CONTOUR_SURFACE_MAX_PX) {
         contourSurfaceOn = false
         return
@@ -3550,9 +3687,15 @@ function apply(ctx) {
       }
       const ctx = cv.getContext('2d')
       if (!ctx) return
+      /* Paint at the CURRENT offset and remember it: from here the transform moves by
+         the difference, so the pad is all the slack the sheet will ever need. */
+      contourSurfaceRefX = Math.floor(contourOffsetX)
+      contourSurfaceRefY = Math.floor(contourOffsetY)
+      const sx0 = ((contourSurfaceRefX % tw) + tw) % tw
+      const sy0 = ((contourSurfaceRefY % th) + th) % th
       ctx.clearRect(0, 0, wDev, hDev)
-      for (let y = 0; y < hDev; y += th) {
-        for (let x = 0; x < wDev; x += tw) ctx.drawImage(contourTex.cv, x, y)
+      for (let y = -sy0; y < hDev; y += th) {
+        for (let x = -sx0; x < wDev; x += tw) ctx.drawImage(contourTex.cv, x, y)
       }
       contourSurfaceOn = cv.style != null && typeof cv.style.transform === 'string'
       contourBlit()
@@ -3580,19 +3723,44 @@ function apply(ctx) {
       return frame
     }
 
+    /* Does the window still fit inside the painted sheet? The sheet is a whole
+       landscape and the window is a hole in front of it, so a window that grows
+       *inside* it needs no work at all -- only one that grows past it does, because a
+       period shorter than the viewport would tile the same feature twice into one
+       frame. */
+    const contourSheetFits = (wCss, hCss, dpr) => {
+      if (contourTex === null) return false
+      return contourTex.cv.width >= Math.round(wCss * dpr) * 1.02
+        && contourTex.cv.height >= Math.round(hCss * dpr) * 1.02
+    }
+
     /** Pure texture-size target for a viewport (quantised, capped), in CSS px
      *  and the device-px backing-store size it maps to at the current DPR. */
-    const contourTargetTexture = (w, h, dpr) => {
+    const contourTargetTexture = (w, h, dpr, three) => {
       const quant = (v, maxDim) => Math.max(CONTOUR_TEX_QUANT * 2,
         Math.min(maxDim / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
+      /* 3D: one sheet, sampled through a camera and wrapped by the shader, so the
+         period only has to be long enough that a repeat is not obvious. A resized 2D
+         surface is not involved, so scroll is false -- the surface path is off. */
+      if (three === true) {
+        /* PIXELS, not bytes: m^2 = area / one viewport of device pixels. */
+        const m3 = Math.max(1.05, Math.min(CONTOUR_3D_TEX_MULT,
+          Math.sqrt(CONTOUR_3D_TEX_AREA / (dpr * dpr * w * h))))
+        const tw3 = Math.max(quant(w * 1.02, CONTOUR_SCROLL_DIM), quant(m3 * w, CONTOUR_SCROLL_DIM))
+        const th3 = Math.max(quant(h * 1.02, CONTOUR_SCROLL_DIM), quant(m3 * h, CONTOUR_SCROLL_DIM))
+        return {
+          twCss: tw3, thCss: th3,
+          twDev: Math.round(tw3 * dpr), thDev: Math.round(th3 * dpr),
+          scroll: false,
+        }
+      }
       /* Period multiplier. The scroll path is budgeted over BOTH backing stores
-         (texture m^2, surface (1+m)^2, in viewport-areas), which is quadratic in m:
-         m = (sqrt(8r - 4) - 2) / 4 with r = budget / one viewport of device pixels.
-         Falling short of a useful period is not compensated for -- the fallback
-         below takes over instead. */
+         (texture m^2, surface 1, in viewport-areas): m = sqrt(r - 1) with
+         r = budget / one viewport of device pixels. Falling short of a useful
+         period is not compensated for -- the fallback below takes over instead. */
       const unit = 4 * dpr * dpr * w * h
       const r = CONTOUR_MEM_BUDGET / unit
-      const mBudget = r > 0.5 ? (Math.sqrt(8 * r - 4) - 2) / 4 : 0
+      const mBudget = r > 1 ? Math.sqrt(r - 1) : 0
       /* A scroll plan is only worth having if its SURFACE is affordable. Above the
          cap the layer falls back to the tight caps and the per-frame blit, which is
          what shipped upstream and has never frozen the app: the surface is
@@ -3612,7 +3780,7 @@ function apply(ctx) {
            and give up on the scroll path once the period stops being worth it. */
         for (let guard = 0; guard < 128; guard++) {
           const areaOk = twCss * thCss <= CONTOUR_SCROLL_AREA * 1.02
-          const memOk = (w * h + (w + twCss) * (h + thCss)) * 4 * dpr * dpr <= CONTOUR_MEM_BUDGET * 1.02
+          const memOk = (w * h + twCss * thCss) * 4 * dpr * dpr <= CONTOUR_MEM_BUDGET * 1.02
           if (areaOk && memOk) break
           if (twCss <= minTw && thCss <= minTh) break
           twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
@@ -3623,13 +3791,11 @@ function apply(ctx) {
         if (twCss > w * 1.02 && thCss > h * 1.02) {
           const twDev = Math.round(twCss * dpr)
           const thDev = Math.round(thCss * dpr)
-          /* ...and only if its SURFACE is affordable. The surface is viewport+period
-             device px -- 140MB at 1432x753@2x -- and Chromium keeps more than one copy
-             of it (the live renderer was measured at 1.68GB, which is what stalled the
-             main thread for seconds on a resize). Past the cap, fall through to the
-             fallback sizing: tight caps, no surface, per-frame blit -- the shape that
-             shipped upstream and never froze the app. */
-          const surfPx = (Math.round(w * dpr) + twDev) * (Math.round(h * dpr) + thDev)
+          /* ...and only if its SURFACE is affordable. The surface is the viewport plus
+             CONTOUR_SURFACE_PAD, independent of the period, so this can only trip on
+             viewports that are themselves enormous. */
+          const surfPx = (Math.round(w * dpr) + CONTOUR_SURFACE_PAD) *
+            (Math.round(h * dpr) + CONTOUR_SURFACE_PAD)
           if (surfPx > CONTOUR_SURFACE_MAX_PX) {
             /* fall through */
           } else {
@@ -3656,7 +3822,8 @@ function apply(ctx) {
        table are fixed for the page, so the same size rebuilds byte-identically
        and a different size regenerates deterministically instead of randomly. */
     const contourBuildTexture = (wCss, hCss) => {
-      const t = contourTargetTexture(wCss, hCss, contourDpr)
+      const three = isContourView3D()
+      const t = contourTargetTexture(wCss, hCss, contourDpr, three)
       contourField = contourGenerateField(t.twCss, t.thCss, contourHollowWanted() ? 1 : 0)
       contourExtractAll()
       let cv = contourTex !== null ? contourTex.cv : null
@@ -3669,7 +3836,10 @@ function apply(ctx) {
       if (!(cv.width > 0) || !(cv.height > 0)) {
         dbg('texture build got a degenerate canvas', cv.width, cv.height, 'viewport', wCss, hCss, 'dpr', contourDpr)
       }
-      contourTex = { cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true, hollow: contourHollowWanted() }
+      contourTex = {
+        cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true,
+        hollow: contourHollowWanted(), three,
+      }
       contourRenderCache()
       /* The sheet is static until the next rebuild, so this is where it goes
          onto the scroll surface (one full-surface paint, not one per frame). */
@@ -3699,16 +3869,16 @@ function apply(ctx) {
       /* The visible canvas is viewport-sized; resizing it is cheap and must be
          immediate (the next blit repaints it from the existing texture, so the
          resize shows no flash). */
-      /* The surface path sizes itself in contourPaintSurface (it needs the texture
-         period); only the fallback's viewport canvas is resized here. A grown
-         viewport would need a bigger surface, but repainting it here ran on EVERY
-         resize event (48M device px reallocated and refilled per step of a drag).
-         Instead drop the surface for now: the cheap viewport-sized blit keeps the
-         picture correct, and the debounced rebuild above restores the compositor path
-         once, when the resize has stopped. */
+      /* The surface path sizes itself in contourPaintSurface (viewport + pad); only
+         the fallback's viewport canvas is resized here. A grown viewport would need a
+         bigger surface, but repainting it here ran on EVERY resize event (48M device
+         px reallocated and refilled per step of a drag). Instead drop the surface for
+         now: the cheap viewport-sized blit keeps the picture correct, and the
+         debounced rebuild above restores the compositor path once, when the resize has
+         stopped. */
       if (contourSurfaceOn && contourTex !== null && contourLineCv !== null) {
-        const needW = Math.round(w * dpr) + contourTex.cv.width
-        const needH = Math.round(h * dpr) + contourTex.cv.height
+        const needW = Math.round(w * dpr) + CONTOUR_SURFACE_PAD
+        const needH = Math.round(h * dpr) + CONTOUR_SURFACE_PAD
         if (contourLineCv.width < needW || contourLineCv.height < needH) contourSurfaceOn = false
       }
       if (contourLineCv !== null && !contourSurfaceOn) {
@@ -3844,15 +4014,13 @@ function apply(ctx) {
         contourSwitchSig = ''
         contourApplySwitches()
         if (contourWrap === null || contourView === null || contourTex === null) return
-        const t = contourTargetTexture(contourView.w, contourView.h, contourView.dpr)
-        /* GROWTH ONLY, AND ONLY WHEN IT MATTERS. A smaller viewport is already covered
-           by the existing sheet (it tiles), and a few pixels of growth is too: the chat
-           streaming tokens nudge the frame layout constantly, and every nudge used to
-           count as "bigger" and pay a full regenerate. */
-        const margin = CONTOUR_REBUILD_MARGIN
-        const fits = t.twDev <= contourTex.cv.width * (1 + margin)
-          && t.thDev <= contourTex.cv.height * (1 + margin)
-        if (fits) {
+        /* CROP, DO NOT REGENERATE. The sheet is a whole landscape, painted once; the
+           window is a hole in front of it. A window that keeps growing inside the sheet
+           (2.9x a viewport on each axis, so a maximise never leaves it) just shows MORE
+           landscape -- no rebuild, no flash, no 150-300ms regenerate on a drag. Only a
+           window larger than the sheet itself needs a new one, because a period shorter
+           than the viewport would tile a feature twice into one frame. */
+        if (contourSheetFits(contourView.w, contourView.h, contourView.dpr)) {
           contourPaintSurface()
           contourBlit()
           return
@@ -3927,13 +4095,18 @@ function apply(ctx) {
        context) on top of the flat sheet until something happened to repaint. Called
        from the same reconciliation that syncs the switches, so any mutation --
        i.e. any settings change -- settles it. */
-    /* The 3D view draws a DIFFERENT terrain: it carves cavities into the field (see
-       contourApplyLandforms), so a view flip rebuilds the sheet when the two
-       disagree. One-time cost per flip (measured ~90-150ms), and the seed is
-       untouched, so it is the same landscape -- now with holes in it. */
+    /* Two things make the sheet wrong for the current view: the 3D view carves
+       cavities into the terrain (contourApplyLandforms), and it wants a much shorter
+       period than 2D's cropped-and-scrolled sheet. Both are properties of the sheet
+       itself, so a flip rebuilds once -- measured 90-300ms -- and the seed is
+       untouched, so it is the same landscape. */
+    const contourSheetStale = () => contourTex === null
+      || (contourTex.hollow === true) !== contourHollowWanted()
+      || (contourTex.three === true) !== isContourView3D()
+
     const contourApplyHollow = () => {
       if (contourWrap === null || contourView === null || contourTex === null) return
-      if ((contourTex.hollow === true) === contourHollowWanted()) return
+      if (!contourSheetStale()) return
       contourBuildTexture(contourView.w, contourView.h)
     }
 

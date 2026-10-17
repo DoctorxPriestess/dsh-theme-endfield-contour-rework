@@ -150,6 +150,31 @@ const flat = build(0)
 const hollow = build(1)
 const flatSpan = flat.mx - flat.mn
 
+/* A0. the cavity's HEIGHT BAND, which is what the shader masks on. The second layer
+   opens where the sampled terrain is below holeHi and is fully open below holeLo, so
+   the band has to exist, be ordered, and sit on the carved part of the range. */
+{
+  const okBand = hollow.holeLo !== null && hollow.holeHi !== null
+    && Number.isFinite(hollow.holeLo) && Number.isFinite(hollow.holeHi)
+    && hollow.holeHi > hollow.holeLo
+  if (!okBand) {
+    fail('the carved field carries no cavity band (' + hollow.holeLo + ' .. ' + hollow.holeHi + ')')
+  } else if (!(hollow.holeLo < hollow.mn + (hollow.mx - hollow.mn) * 0.7)) {
+    /* The band has to sit on the LOW side of the range, or the mask would be opening
+       holes on ordinary ground. It is the pit cells' own percentile after the carve,
+       not the range floor: a cell the funnel barely touched is still mid-range. */
+    fail('the cavity band is not on the low side of the range (lo '
+      + hollow.holeLo.toFixed(4) + ' vs mn ' + hollow.mn.toFixed(4) + ' mx ' + hollow.mx.toFixed(4) + ')')
+  } else if (!(hollow.holeHi < hollow.mx)) {
+    fail('the cavity band tops out at the range maximum -- the mask would open everywhere')
+  } else if (!(hollow.holeShare > 0.01 && hollow.holeShare < 0.12)) {
+    fail('the carved share of cells is ' + (hollow.holeShare * 100).toFixed(1) + '% (expected a few %)')
+  } else {
+    ok('cavity band ' + hollow.holeLo.toFixed(4) + '..' + hollow.holeHi.toFixed(4)
+      + ' sits at the range floor, over ' + (hollow.holeShare * 100).toFixed(1) + '% of cells')
+  }
+}
+
 /* A1. hollow = 0 is byte-identical to the shipped field: the flat view cannot move. */
 {
   const again = build(0)

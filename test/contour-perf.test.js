@@ -97,7 +97,7 @@ function grabArray(name) {
 const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
-  'contourBuildTexture', 'contourBlit', 'contourPaintSurface', 'contourRetune', 'contourFrame',
+  'contourBuildTexture', 'contourSheetFits', 'contourBlit', 'contourPaintSurface', 'contourRetune', 'contourFrame',
   'contourTerrainProfile', 'contourTerrainRow', 'contourOctaveLadder',
   'contourRebuildForRoughness', 'contourReadIndex', 'contourStair', 'contourTerrace',
   'contourCliff', 'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp',
@@ -109,6 +109,7 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
   'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT', 'CONTOUR_SURFACE_MAX_PX',
+  'CONTOUR_SURFACE_PAD', 'CONTOUR_3D_TEX_MULT', 'CONTOUR_3D_TEX_AREA',
   'CONTOUR_SCROLL_AREA', 'CONTOUR_SCROLL_DIM', 'CONTOUR_3D_REF', 'CONTOUR_3D_DEPTH',
   'CONTOUR_3D_RISE', 'CONTOUR_SOFT_GL', 'CONTOUR_VIEW_KEY',
   'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
@@ -276,10 +277,30 @@ return {
   surfaceOn() { return contourSurfaceOn },
   memBudget() { return CONTOUR_MEM_BUDGET },
   surfaceMaxPx() { return CONTOUR_SURFACE_MAX_PX },
-  planSize(w, h, dpr) {
-    const t = contourTargetTexture(w, h, dpr)
+  surfacePad() { return CONTOUR_SURFACE_PAD },
+  planSize(w, h, dpr, three) {
+    const t = contourTargetTexture(w, h, dpr, three === true)
     return { tw: t.twDev, th: t.thDev, scroll: t.scroll }
   },
+  build3D(w, h, dpr) {
+    /* The engine picks the sheet class from the live view, so the harness only has
+       to say which view it is in before building. */
+    contourDpr = dpr
+    contourView = { w, h, dpr }
+    contourWrap = contourWrap || {}
+    contourLineCv = Object.assign({}, canvas, { _ctx: null })
+    contourLineCv.width = Math.round(w * dpr)
+    contourLineCv.height = Math.round(h * dpr)
+    const had = prefs[CONTOUR_VIEW_KEY]
+    prefs[CONTOUR_VIEW_KEY] = '1'
+    contourBuildTexture(w, h)
+    if (had === undefined) delete prefs[CONTOUR_VIEW_KEY]
+    else prefs[CONTOUR_VIEW_KEY] = had
+  },
+  sheetFits(w, h, dpr) { return contourSheetFits(w, h, dpr) },
+  setOffset(x, y) { contourOffsetX = x; contourOffsetY = y },
+  offset() { return [contourOffsetX, contourOffsetY] },
+  ref() { return [contourSurfaceRefX, contourSurfaceRefY] },
   scrollDim() { return CONTOUR_SCROLL_DIM },
   scrollArea() { return CONTOUR_SCROLL_AREA },
   transform() { return contourLineCv && contourLineCv.style ? contourLineCv.style.transform : null },
@@ -400,9 +421,8 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
     /* A refused surface is only correct when it would have been too big: the huge
        canvas is what stalled the live app (one 100MB+ surface, re-allocated on resize,
        with the renderer observed at 1.68GB). The cheap per-frame blit covers it. */
-    const t2 = api.planSize(w, h, dpr)
-    const area = Math.round(w * dpr) + t2.tw
-    const area2 = Math.round(h * dpr) + t2.th
+    const area = Math.round(w * dpr) + api.surfacePad()
+    const area2 = Math.round(h * dpr) + api.surfacePad()
     if (area * area2 > api.surfaceMaxPx()) {
       ok(label + ': surface refused on purpose, ' + Math.round(area * area2 / 1e6)
         + 'M device px > the ' + Math.round(api.surfaceMaxPx() / 1e6) + 'M cap -- per-frame blit instead')
@@ -419,12 +439,14 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
   }
   const surf = api.surfaceSize()
   const tex = painted.texture
-  // The surface must be exactly the viewport plus one whole period, so the wrap
-  // never exposes an unpainted edge.
-  const wantW = Math.round(w * dpr) + surf.tw
-  const wantH = Math.round(h * dpr) + surf.th
+  /* The surface is the VIEWPORT plus a fixed pad -- not viewport+period. It exists to
+     be translated; the pad is all the slack the translation needs, because the paint
+     is refreshed once half of it is consumed. That is what keeps the backing store at
+     ~one viewport (17MB at 1432x753@2x) instead of the 140MB it used to be. */
+  const wantW = Math.round(w * dpr) + api.surfacePad()
+  const wantH = Math.round(h * dpr) + api.surfacePad()
   if (surf.w !== wantW || surf.h !== wantH) {
-    fail(label + ': surface is ' + surf.w + 'x' + surf.h + ', expected ' + wantW + 'x' + wantH)
+    fail(label + ': surface is ' + surf.w + 'x' + surf.h + ', expected viewport+pad ' + wantW + 'x' + wantH)
   }
   // Budget: the layer holds the texture AND its surface, and the plan is only
   // allowed to engage the surface path when the pair fits.
@@ -441,37 +463,139 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
     fail(label + ': period ' + surf.tw + 'x' + surf.th + ' does not exceed the ' + Math.round(w * dpr) + 'x' + Math.round(h * dpr) + ' viewport')
   }
   // Frames: zero canvas work, one transform write, always inside the period.
+  /* Frames: a transform write while the pad lasts, and a tiled repaint when half of it
+     is gone. Neither may touch the terrain, and the repaint rate must stay small --
+     the old shape repainted a viewport+period canvas instead, which is what the live
+     renderer could not afford. */
   api.reset()
   api.blankOps()
   const frameMs = []
   let outside = 0
+  let repaints = 0
+  const halfPad = api.surfacePad() * 0.5
   for (let i = 0; i < 300; i++) {
     const t0 = performance.now()
     api.blit()
     frameMs.push(performance.now() - t0)
+    const step = api.snapshot()
+    if (step.ops.drawImage > 0) repaints++
     const m = /translate3d\((-?[\d.e+-]+)px,(-?[\d.e+-]+)px,0\)/.exec(api.transform() || '')
     if (m === null) { outside++; continue }
     const tx = -parseFloat(m[1]) * dpr
     const ty = -parseFloat(m[2]) * dpr
-    if (!(tx >= 0 && tx < surf.tw) || !(ty >= 0 && ty < surf.th)) outside++
+    /* The transform only ever encodes the drift since the last paint, so it stays
+       inside half the pad by construction. */
+    if (!(Math.abs(tx) <= halfPad + 1) || !(Math.abs(ty) <= halfPad + 1)) outside++
   }
   const afterFrame = api.snapshot()
-  if (afterFrame.ops.clearRect !== 0 || afterFrame.ops.drawImage !== 0) {
-    fail(label + ': a compositor frame rasterised (clearRect=' + afterFrame.ops.clearRect
-      + ' drawImage=' + afterFrame.ops.drawImage + ')')
-  }
   if (afterFrame.counts.generate || afterFrame.counts.extract || afterFrame.counts.render) {
     fail(label + ': a compositor frame redid expensive work')
   }
-  if (outside > 0) fail(label + ': ' + outside + ' of 300 frames wrote a transform outside the period')
+  if (outside > 0) fail(label + ': ' + outside + ' of 300 frames wrote a transform outside the pad')
+  if (repaints > 60) fail(label + ': ' + repaints + ' of 300 frames repainted the surface (expected a handful)')
   const blit = stats(frameMs)
   if (blit.p95 > 0.5) fail(label + ': compositor frame p95 is ' + blit.p95.toFixed(2) + ' ms (expected < 0.5 ms)')
   if (!bad) {
     ok(label + ': surface ' + surf.w + 'x' + surf.h + ' (' + Math.round(totalBytes / 1e6) + ' MB texture+surface, period '
-      + (surf.tw / Math.round(w * dpr)).toFixed(2) + 'x viewport), 300 frames = 0 raster, p95 '
+      + (surf.tw / Math.round(w * dpr)).toFixed(2) + 'x viewport), 300 frames = ' + repaints + ' pad repaint(s), p95 '
       + blit.p95.toFixed(3) + ' ms')
   }
   api.setTransformable(false)
+}
+
+/* ---------- A3. a grown window is CROPPED, not regenerated ---------------- */
+/* The sheet is a whole landscape and the window is a hole in front of it. Growing
+   the window inside the sheet must not cost a rebuild (the measured 150-300ms and
+   the changed map that a drag used to pay); only growing PAST the sheet may. */
+{
+  api.reset()
+  api.build(1432, 753, 2)
+  const sheet = api.surfaceSize()
+  const fitsSelf = api.sheetFits(1432, 753, 2)
+  const fitsGrown = api.sheetFits(1900, 1000, 2)
+  /* The sheet is ~2.9x a viewport per axis, so this must be far past it. */
+  const fitsHuge = api.sheetFits(1432 * 4, 753 * 4, 2)
+  const fitsDpr = api.sheetFits(1432, 753, 1)
+  if (!fitsSelf) fail('the sheet does not fit the viewport it was built for (' + sheet.tw + 'x' + sheet.th + ')')
+  else if (!fitsGrown) fail('a window 33% larger than the build size wanted a rebuild -- that is the drag freeze')
+  else if (fitsHuge) fail('a window 4x the sheet did not want a rebuild -- the period would be shorter than the viewport')
+  else {
+    ok('crop, not rebuild: fits at 1432x753 and at 1900x1000 (' + sheet.tw + 'x' + sheet.th + ' sheet), '
+      + 'rebuild only past 4x, dpr 1 still fits')
+  }
+  if (fitsDpr) ok('a DPR change alone does not force a rebuild while the sheet still covers the window')
+  else fail('a DPR change that the sheet still covers forced a rebuild')
+}
+
+/* ---------- A4. the 3D sheet is short-period and SMALL --------------------- */
+/* 3D samples the sheet through a camera and wraps it with fract(), so its period only
+   has to hide repetition; it is also where the texture is resident in VRAM. */
+{
+  const w = 1432, h = 753, dpr = 2
+  api.reset()
+  api.build(w, h, dpr)
+  const flat = api.surfaceSize()
+  api.reset()
+  api.build3D(w, h, dpr)
+  const three = api.surfaceSize()
+  const vwDev = Math.round(w * dpr)
+  const vhDev = Math.round(h * dpr)
+  if (!(three.tw > vwDev && three.th > vhDev)) {
+    fail('3D sheet ' + three.tw + 'x' + three.th + ' does not exceed the ' + vwDev + 'x' + vhDev + ' viewport')
+  } else if (three.tw > vwDev * 1.55 || three.th > vhDev * 1.55) {
+    fail('3D sheet ' + three.tw + 'x' + three.th + ' is longer than 1.5x the viewport')
+  } else if (three.tw * three.th > 12e6) {
+    fail('3D sheet is ' + Math.round(three.tw * three.th / 1e6) + 'M device px (cap 12M)')
+  } else if (!(three.tw * three.th < flat.tw * flat.th)) {
+    fail('the 3D sheet is not smaller than the 2D one')
+  } else {
+    ok('3D sheet ' + Math.round(three.tw / vwDev * 100) / 100 + 'x' + Math.round(three.th / vhDev * 100) / 100
+      + ' viewport (' + Math.round(three.tw * three.th * 4 / 1e6) + 'MB) vs 2D '
+      + (flat.tw / vwDev).toFixed(2) + 'x (' + Math.round(flat.tw * flat.th * 4 / 1e6) + 'MB)')
+  }
+}
+
+/* ---------- A5. the pad is repainted only when it is half spent ----------- */
+/* The surface is viewport+pad; the transform carries the drift and the paint is
+   refreshed when half the pad is gone. Without this the sheet would run out of
+   painted pixels and the edge would show as a hard seam. */
+{
+  const w = 1432, h = 753, dpr = 2
+  api.reset()
+  api.build(w, h, dpr)
+  api.setTransformable(true)
+  api.paintSurface()
+  const pad = api.surfacePad()
+  const size0 = api.surfaceSize()
+  /* Small drift: transform only, no raster. */
+  api.setOffset(pad * 0.3, pad * 0.2)
+  api.blankOps()
+  api.blit()
+  const small = api.snapshot()
+  /* Past half the pad: exactly one repaint, and the transform restarts from zero. */
+  api.setOffset(pad * 0.6, 0)
+  api.blankOps()
+  api.blit()
+  const big = api.snapshot()
+  const ref = api.ref()
+  const off = api.offset()
+  const tf = api.transform() || ''
+  const m = /translate3d\((-?[\d.e+-]+)px,(-?[\d.e+-]+)px,0\)/.exec(tf)
+  const size1 = api.surfaceSize()
+  if (small.ops.clearRect !== 0 || small.ops.drawImage !== 0) {
+    fail('a drift of 0.3 pad rasterised (clearRect=' + small.ops.clearRect + ' drawImage=' + small.ops.drawImage + ')')
+  } else if (big.ops.clearRect !== 1 || big.ops.drawImage < 1) {
+    fail('a drift of 0.6 pad did not repaint the surface (clearRect=' + big.ops.clearRect
+      + ' drawImage=' + big.ops.drawImage + ')')
+  } else if (ref[0] !== Math.floor(off[0]) || ref[1] !== Math.floor(off[1])) {
+    fail('the repaint did not record the offset it painted at (' + ref + ' vs ' + off + ')')
+  } else if (m === null || Math.abs(parseFloat(m[1])) > 1 || Math.abs(parseFloat(m[2])) > 1) {
+    fail('the transform did not restart from zero after the repaint (' + tf + ')')
+  } else if (size1.w !== size0.w || size1.h !== size0.h) {
+    fail('the pad repaint resized the surface (' + size0.w + 'x' + size0.h + ' -> ' + size1.w + 'x' + size1.h + ')')
+  } else {
+    ok('pad ' + pad + 'px: 0.3 pad = transform only, 0.6 pad = 1 repaint, transform restarts at 0, size unchanged')
+  }
 }
 
 /* A density change reuses the terrain: new levels only. */

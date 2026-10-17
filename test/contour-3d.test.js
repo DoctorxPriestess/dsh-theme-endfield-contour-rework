@@ -312,6 +312,63 @@ const wrap = (x) => ((x % 1) + 1) % 1
   } else fail('no fallback shader for devices without OES_standard_derivatives')
 }
 
+/* ---------- 9. the cavity's second layer ------------------------------------ */
+/* A pit in a height field seen from a near-vertical camera is a funnel with more
+   contour lines on it -- the rim has nothing to hide. The second layer is what makes
+   it read as a HOLE: the near ground stops being drawn where the ray hit the pit
+   floor, the ground behind is sampled on its own (much slower) plane, and a void tint
+   plus a lit rim say "this is an opening". These assertions pin the three parts that
+   are easy to lose in a refactor. */
+{
+  /* The mask is the terrain height at the point the ray HIT, not the marched
+     coordinate: a ray that runs out of steps ends near hh = 0 and would open the
+     second layer over every low valley (measured: 14.8% of the screen instead of the
+     ~4% that is carved). */
+  const mask = SRC.match(/float hole = u_holeOn \* \(1\.0 - smoothstep\(u_holeLo, u_holeHi, ([^)]*)\)\)/)
+  if (mask === null) fail('the cavity mask is not in the shader')
+  else if (!/surfaceAt\(uv\)/.test(mask[0])) {
+    fail('the cavity mask does not read the hit point terrain height: ' + mask[0])
+  } else ok('cavity mask = terrain height at the hit point')
+
+  /* The far ground is on its OWN plane, so it sweeps at a different speed. */
+  const deep = SRC.match(/vec2 uvDeep = ([^;]*);/)
+  if (deep === null) fail('the second layer is not sampled through uvDeep')
+  else if (!/u_deepScale/.test(deep[1])) fail('the second layer is not scaled into its own plane: ' + deep[1])
+  else ok('second layer has its own plane (u_deepScale)')
+
+  const ds = SRC.match(/const CONTOUR_3D_HOLE_SCALE = ([0-9.]+)/)
+  const dep = SRC.match(/const CONTOUR_3D_DEPTH = ([0-9.]+)/)
+  const rf = SRC.match(/const CONTOUR_3D_REF = ([0-9.]+)/)
+  if (ds === null || dep === null || rf === null) fail('cavity constants not found')
+  else {
+    /* The slowest the SURFACE ever gets is the deepest point it can reach: scale
+       1 + DEPTH*(0 - REF). The far ground must clearly beat that, or the two layers
+       drift at the same rate and there is no parallax between them. */
+    const floorScale = 1 + Number(dep[1]) * (0 - Number(rf[1]))
+    if (!(Number(ds[1]) < floorScale - 0.2)) {
+      fail('CONTOUR_3D_HOLE_SCALE ' + ds[1] + ' is not clearly slower than the surface floor ' + floorScale.toFixed(2))
+    } else ok('far ground sweeps at ' + ds[1] + 'x vs the surface floor ' + floorScale.toFixed(2) + 'x')
+  }
+
+  /* Occlusion must be visible: the near layer has to stop inside the cavity, or the
+     pit's own rings cover the far ground completely (that was the first attempt, and
+     it rendered as a hill with dense contours). */
+  if (!/col \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
+    fail('the near layer is not suppressed inside the cavity, so nothing occludes the far ground')
+  } else ok('the near layer stops inside the cavity (occlusion)')
+  if (!/vec4\(0\.\d+, 0\.\d+, 0\.\d+, 0\.\d+\) \* hole;/.test(SRC)) {
+    fail('no void tint inside the cavity -- a hole that is not darker does not read as a hole')
+  } else if (!/rim \* rim/.test(SRC)) {
+    fail('no lit rim on the cavity lip')
+  } else ok('void tint + lit rim (depth cue)')
+
+  /* ...and off in the flat view: the uniform gate is what keeps 2D byte-identical. */
+  const gate = SRC.match(/const hasHoles = ([^\n]*)/)
+  if (gate === null) fail('the cavity gate is missing in contourGlDraw')
+  else if (!/holeLo !== null/.test(gate[1])) fail('the cavity gate does not check for a band: ' + gate[1])
+  else ok('cavities are gated on the field carrying a band (2D sheet: none)')
+}
+
 if (bad) {
   console.error(bad + ' contour 3D check(s) failed')
   process.exit(1)
