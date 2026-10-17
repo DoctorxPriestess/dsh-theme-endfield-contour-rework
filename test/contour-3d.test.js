@@ -1,30 +1,35 @@
-#!/usr/bin/env node
 /**
  * contour-3d.test.js — the 3D view's projection, without a GPU.
  *
- * The shader is three lines of arithmetic (see CONTOUR_GL_FRAG in client.js), so the
- * thing worth testing is the ARITHMETIC, not the rasteriser: this runs the same maths
- * as a plain function sliced out of the real client.js and asserts its shape.
+ * The shader is four lines of arithmetic (see CONTOUR_GL_FRAG in client.js), so the
+ * thing worth testing is the ARITHMETIC, not the rasteriser: this runs the same
+ * maths as plain functions sliced out of the real client.js and asserts its shape.
  *
- * What it pins down, and why each one matters:
+ * Each assertion exists because a WRONG version of it looked fine in a screenshot:
  *
- *   1. depth = 0 reproduces the 2D projection EXACTLY. If that identity ever breaks,
- *      the "flat" and "3D" views silently disagree about where the sheet is, and a
- *      user flipping the switch sees the landscape jump.
- *   2. motion gain is strictly increasing in height. That IS the feature ("a ridge
- *      sweeps past faster than the valley behind it"); a non-monotone gain would mean
- *      some band of terrain moving backwards relative to its neighbours.
- *   3. h = REF is the fixed point: the reference height moves exactly like the flat
- *      sheet, so the two views line up at that band.
- *   4. every sample lands inside [0,1) -- the sheet is periodic and the shader wraps
- *      with fract(); an out-of-range value would sample the clamped edge instead.
- *   5. the vertical lift follows RISE * (h - REF) * viewHeight.
+ *   1. DEPTH=0 + RISE=0 reproduces the 2D projection exactly. Flip the view and the
+ *      terrain must not move.
+ *   2. The projection is EXACTLY periodic in the scroll offset: advancing the camera
+ *      by one sheet period must reproduce the identical sample. The first shipped
+ *      formula scaled the offset by height instead of inverting a camera, so its
+ *      shear integrated with the offset and the whole image snapped by up to ~140px
+ *      every period -- measured in the rendered shots, not hypothesised.
+ *   3. "Near ground sweeps faster" is a claim about screen SPEED. The forward map
+ *      must move a point of height h by scale(h) * dcam, and scale must increase
+ *      strictly with h, so adjacent height bands never move backwards relative to
+ *      each other.
+ *   4. Every sample lands inside [0,1): the shader wraps with fract(), and an
+ *      out-of-range value would clamp at the texture edge instead.
+ *   5. The vertical lift is RISE*(h-REF)*viewHeight, and it lifts (never sinks)
+ *      ground above the reference height.
+ *   6. The hardware rule's regex rejects software rasterisers and accepts real GPUs.
  *
- * The GPU side (hardware check, fallback, shader actually running) is covered in a
- * real browser by contour-render.test.js, because that needs a canvas.
+ * The GPU side (context, compile, link, draw, fallback) is covered in a real browser
+ * by contour-render.test.js.
  *
  * Usage: node test/contour-3d.test.js
  */
+
 'use strict'
 const fs = require('fs')
 const path = require('path')
@@ -56,21 +61,29 @@ const SOURCE = [
   grabConst('CONTOUR_3D_DEPTH'),
   grabConst('CONTOUR_3D_RISE'),
   grabFn('contourParallaxUV'),
+  grabFn('contourParallaxScreen'),
 ].join('\n')
-const TAIL = '\nreturn { contourParallaxUV, REF: CONTOUR_3D_REF, DEPTH: CONTOUR_3D_DEPTH, RISE: CONTOUR_3D_RISE }'
+const TAIL = '\nreturn { contourParallaxUV, contourParallaxScreen, REF: CONTOUR_3D_REF, DEPTH: CONTOUR_3D_DEPTH, RISE: CONTOUR_3D_RISE }'
 
 let api
 let flat
+let liftOnly
 try {
   api = new Function(SOURCE + TAIL)()
-  /* The same declaration with BOTH 3D knobs turned off. Depth scales the motion and
-     rise lifts the ground, so "no 3D at all" is both at zero -- they are separate
-     knobs on purpose (how fast a ridge sweeps is a different question from how tall
-     it looks), and the flat view is the state where neither applies. */
+  /* The same declarations with BOTH 3D knobs turned off. Depth sets the
+     magnification and rise lifts the ground, so "no 3D at all" is both at zero --
+     they are separate knobs on purpose (how fast a ridge sweeps is a different
+     question from how tall it looks), and the flat view is the state where neither
+     applies. */
   flat = new Function(
     SOURCE
       .replace(/const CONTOUR_3D_DEPTH = [^\n]+/, 'const CONTOUR_3D_DEPTH = 0')
       .replace(/const CONTOUR_3D_RISE = [^\n]+/, 'const CONTOUR_3D_RISE = 0')
+    + TAIL)()
+  /* Depth off, rise on: isolates the vertical lift from the magnification, which
+     otherwise mixes into every v comparison. */
+  liftOnly = new Function(
+    SOURCE.replace(/const CONTOUR_3D_DEPTH = [^\n]+/, 'const CONTOUR_3D_DEPTH = 0')
     + TAIL)()
 } catch (e) {
   console.error('FAIL  could not slice the projection out of client.js: ' + e.message)
@@ -87,8 +100,9 @@ const TW = 3968
 const TH = 2048
 const VW = 2864
 const VH = 1506
+const wrap = (x) => ((x % 1) + 1) % 1
 
-/* ---------- 1. depth = 0 is the 2D projection, exactly ---------- */
+/* ---------- 1. depth 0 + rise 0 is the 2D projection, exactly ---------- */
 {
   let worst = 0
   let n = 0
@@ -96,64 +110,78 @@ const VH = 1506
     for (let j = 0; j < 25; j++) {
       const px = (i / 39) * VW
       const py = (j / 24) * VH
-      const sx = 1234
-      const sy = 777
+      const camX = 1234
+      const camY = 777
       const h = ((i * 7 + j * 13) % 20) / 19
-      const a = flat.contourParallaxUV(px, py, sx, sy, TW, TH, h, VH)
-      /* The 2D contract, written out independently of the implementation. */
-      const u2 = (((px + sx) / TW) % 1 + 1) % 1
-      const v2 = (((py + sy) / TH) % 1 + 1) % 1
-      worst = Math.max(worst, Math.abs(a.u - u2), Math.abs(a.v - v2))
+      const a = flat.contourParallaxUV(px, py, camX, camY, TW, TH, h, VW, VH)
+      const wantU = wrap((px - VW / 2 + camX) / TW)
+      const wantV = wrap((py - VH / 2 + camY) / TH)
+      worst = Math.max(worst, Math.abs(a.u - wantU), Math.abs(a.v - wantV))
       n++
     }
   }
-  if (worst <= 1e-12) ok('depth 0 reproduces the 2D projection exactly (' + n + ' samples, worst ' + worst.toExponential(1) + ')')
-  else fail('depth 0 does not match the 2D projection: worst error ' + worst.toExponential(2))
+  if (worst <= 1e-12) ok('depth 0 + rise 0 reproduces the flat projection exactly (' + n + ' samples, worst ' + worst.toExponential(1) + ')')
+  else fail('depth 0 does not match the flat projection: worst error ' + worst.toExponential(2))
 }
 
-/* ---------- 2. h = REF is the fixed point (tested against the 2D formula, not a
-     second copy of the same function) ---------- */
+/* ---------- 2. exactly periodic in the camera offset (the wrap is seamless) --- */
 {
   let worst = 0
-  for (let i = 0; i < 40; i++) {
-    const px = (i / 39) * VW
-    const py = VH - (i / 39) * VH
-    const a = api.contourParallaxUV(px, py, 900, 1400, TW, TH, api.REF, VH)
-    const u2 = (((px + 900) / TW) % 1 + 1) % 1
-    const v2 = (((py + 1400) / TH) % 1 + 1) % 1
-    worst = Math.max(worst, Math.abs(a.u - u2), Math.abs(a.v - v2))
+  let n = 0
+  for (let i = 0; i < 24; i++) {
+    for (let j = 0; j < 16; j++) {
+      const px = (i / 23) * VW
+      const py = (j / 15) * VH
+      const camX = ((i * 311) % TW) - TW / 2
+      const camY = ((j * 197) % TH) - TH / 2
+      const h = ((i * 5 + j * 3) % 13) / 12
+      const a = api.contourParallaxUV(px, py, camX, camY, TW, TH, h, VW, VH)
+      const b = api.contourParallaxUV(px, py, camX + TW, camY + TH, TW, TH, h, VW, VH)
+      worst = Math.max(worst, Math.abs(a.u - b.u), Math.abs(a.v - b.v))
+      n++
+    }
   }
-  if (worst <= 1e-12) ok('height REF is exactly the flat projection (fixed point), worst ' + worst.toExponential(1))
-  else fail('height REF deviates from the flat projection: ' + worst.toExponential(2))
+  if (worst <= 1e-12) ok('camera + one period reproduces the identical sample (' + n + ' samples, worst ' + worst.toExponential(1) + ') -- the wrap cannot snap')
+  else fail('the projection is not periodic in the camera offset: worst ' + worst.toExponential(2) + ' -- the sheet would jump once per period')
 }
 
-/* ---------- 3. motion gain is strictly increasing in height ---------- */
+/* ---------- 3. near ground sweeps faster (screen speed == the scale) ---------- */
 {
   const px = VW * 0.5
   const py = VH * 0.4
-  const sx = 500
-  const sy = 900
-  const gains = []
-  let prevU = null
+  const camX = 700
+  const camY = 900
+  let prev = null
   let monotone = true
-  let backwards = 0
+  const scales = []
   for (let k = 0; k <= 20; k++) {
     const h = k / 20
-    const r = api.contourParallaxUV(px, py, sx, sy, TW, TH, h, VH)
-    gains.push(r.gain)
-    /* Track the horizontal sample position in UNWRAPPED sheet pixels, so a wrap
-       does not read as a jump backwards. */
-    if (prevU !== null) {
-      if (!(r.gain > prevU)) monotone = false
-      if (r.gain <= 0) backwards++
-    }
-    prevU = r.gain
+    const r = api.contourParallaxUV(px, py, camX, camY, TW, TH, h, VW, VH)
+    scales.push(r.scale)
+    if (prev !== null && !(r.scale > prev)) monotone = false
+    prev = r.scale
   }
-  if (monotone) ok('motion gain strictly increases with height (' + gains[0].toFixed(3) + ' .. ' + gains[20].toFixed(3) + ')')
-  else fail('motion gain is not strictly increasing: ' + gains.map((g) => g.toFixed(3)).join(' '))
-  if (backwards === 0) ok('no height band moves backwards relative to its neighbours')
-  else fail(backwards + ' gain values are <= 0 (a band would stand still or reverse)')
-  if (!(gains[0] < 1 && gains[20] > 1)) fail('gain does not straddle 1 (valleys should be slower, ridges faster)')
+  if (monotone) ok('magnification strictly increases with height (' + scales[0].toFixed(3) + ' .. ' + scales[20].toFixed(3) + ')')
+  else fail('magnification is not strictly increasing: ' + scales.map((v) => v.toFixed(3)).join(' '))
+
+  /* Speed, measured rather than assumed: move the camera by dcam and see how far
+     the SCREEN position of a terrain point travels, at two heights. */
+  const dcam = 10
+  const tx = TW * 0.31
+  const ty = TH * 0.62
+  const hi = api.contourParallaxScreen(tx, ty, camX, camY, TW, TH, 1, VW, VH)
+  const hi2 = api.contourParallaxScreen(tx, ty, camX + dcam, camY, TW, TH, 1, VW, VH)
+  const lo = api.contourParallaxScreen(tx, ty, camX, camY, TW, TH, 0, VW, VH)
+  const lo2 = api.contourParallaxScreen(tx, ty, camX + dcam, camY, TW, TH, 0, VW, VH)
+  const hiSpeed = Math.abs(hi2.x - hi.x)
+  const loSpeed = Math.abs(lo2.x - lo.x)
+  const wantRatio = (1 + api.DEPTH * (1 - api.REF)) / (1 + api.DEPTH * (0 - api.REF))
+  const gotRatio = hiSpeed / loSpeed
+  if (hiSpeed > loSpeed && Math.abs(gotRatio - wantRatio) <= 1e-9) {
+    ok('high ground sweeps faster: ' + hiSpeed.toFixed(2) + 'px vs ' + loSpeed.toFixed(2) + 'px per ' + dcam + 'px of camera travel (ratio ' + gotRatio.toFixed(3) + ')')
+  } else {
+    fail('screen speed does not follow the scale: high ' + hiSpeed.toFixed(3) + ' low ' + loSpeed.toFixed(3) + ' (ratio ' + gotRatio.toFixed(4) + ', expected ' + wantRatio.toFixed(4) + ')')
+  }
 }
 
 /* ---------- 4. samples always land inside the period ---------- */
@@ -164,48 +192,49 @@ const VH = 1506
     for (let j = 0; j < 40; j++) {
       const px = -VW + (i / 59) * 3 * VW       // deliberately beyond the frame
       const py = -VH + (j / 39) * 3 * VH
-      const sx = ((i * 137) % TW) - TW / 2      // and negative offsets
-      const sy = ((j * 311) % TH) - TH / 2
+      const camX = ((i * 137) % TW) - TW / 2    // and negative offsets
+      const camY = ((j * 311) % TH) - TH / 2
       const h = ((i + j) % 11) / 10
-      const r = api.contourParallaxUV(px, py, sx, sy, TW, TH, h, VH)
+      const r = api.contourParallaxUV(px, py, camX, camY, TW, TH, h, VW, VH)
       if (!(r.u >= 0 && r.u < 1) || !(r.v >= 0 && r.v < 1)) outside++
       n++
     }
   }
-  if (outside === 0) ok('all ' + n + ' samples wrap into [0,1) (including negative offsets and off-frame points)')
+  if (outside === 0) ok('all ' + n + ' samples wrap into [0,1) (including negative cameras and off-frame points)')
   else fail(outside + ' of ' + n + ' samples fell outside [0,1) -- the shader would clamp instead of wrap')
 }
 
-/* ---------- 5. the vertical lift follows RISE * (h - REF) * viewHeight ---------- */
+/* ---------- 5. the vertical lift is RISE*(h-REF)*H, and it lifts ---------- */
 {
   const px = VW * 0.3
   const py = VH * 0.6
   const h = 0.9
-  const r = api.contourParallaxUV(px, py, 0, 0, TW, TH, h, VH)
-  const want = (((r.v0 + api.RISE * (h - api.REF) * VH / TH) % 1) + 1) % 1
-  const err = Math.abs(r.v - want)
-  /* 1 - err also counts a wrap-around match. */
-  if (Math.min(err, 1 - err) <= 1e-12) ok('vertical lift == RISE * (h - REF) * viewHeight (' + (api.RISE * (h - api.REF) * VH).toFixed(1) + ' px)')
-  else fail('vertical lift does not match RISE * (h - REF) * viewHeight: error ' + err.toExponential(2))
-  const higher = api.contourParallaxUV(px, py, 0, 0, TW, TH, 1, VH)
-  const lower = api.contourParallaxUV(px, py, 0, 0, TW, TH, 0, VH)
-  /* Higher ground must sit HIGHER on screen. Sampling from further down the sheet
-     (larger v) draws the content above, so v(high) > v(low) whenever RISE > 0. */
-  const dv = ((higher.v - lower.v) % 1 + 1) % 1
+  const camX = 0
+  const camY = 0
+  const a = api.contourParallaxUV(px, py, camX, camY, TW, TH, h, VW, VH)
+  const lift = api.RISE * (h - api.REF) * VH
+  if (Math.abs(a.lift - lift) <= 1e-12) ok('reported lift equals RISE*(h-REF)*viewHeight (' + lift.toFixed(1) + ' px)')
+  else fail('reported lift ' + a.lift.toFixed(3) + ' != RISE*(h-REF)*H ' + lift.toFixed(3))
+
+  /* Higher ground must sit HIGHER on screen, which means it is sampled from
+     further down the sheet. */
+  const hi = liftOnly.contourParallaxUV(px, py, camX, camY, TW, TH, 1, VW, VH)
+  const lo = liftOnly.contourParallaxUV(px, py, camX, camY, TW, TH, 0, VW, VH)
+  const dv = ((hi.v - lo.v) % 1 + 1) % 1
   const span = api.RISE * VH / TH
-  if (Math.abs(dv - span) <= 1e-9) ok('higher ground sits higher on screen by ' + (api.RISE * VH).toFixed(1) + ' px across the full height')
+  if (Math.abs(dv - span) <= 1e-9) ok('the full height range lifts ground by ' + (api.RISE * VH).toFixed(1) + ' px on screen')
   else fail('full-height lift is ' + dv.toFixed(6) + ' of the period, expected ' + span.toFixed(6))
 }
 
-/* ---------- 6. the constants are in a sane range ---------- */
+/* ---------- 6. the constants stay in a range the sheet can survive ---------- */
 {
   const dep = api.DEPTH
   const rise = api.RISE
   const ref = api.REF
-  if (dep > 0 && dep < 1) ok('CONTOUR_3D_DEPTH ' + dep + ' keeps the gain inside (1-depth, 1+depth) -- no band moves >2x faster than the sheet')
-  else fail('CONTOUR_3D_DEPTH ' + dep + ' is out of range (0,1)')
-  if (rise > 0 && rise <= 0.5) ok('CONTOUR_3D_RISE ' + rise + ' lifts at most half a viewport height')
-  else fail('CONTOUR_3D_RISE ' + rise + ' is out of range (0,0.5]')
+  if (dep > 0 && dep < 0.5) ok('CONTOUR_3D_DEPTH ' + dep + ' keeps magnification inside (' + (1 - dep / 2).toFixed(2) + ' .. ' + (1 + dep / 2).toFixed(2) + ') -- neighbouring bands cannot cross')
+  else fail('CONTOUR_3D_DEPTH ' + dep + ' is out of range (0,0.5)')
+  if (rise >= 0 && rise <= 0.25) ok('CONTOUR_3D_RISE ' + rise + ' lifts at most a quarter of a viewport height')
+  else fail('CONTOUR_3D_RISE ' + rise + ' is out of range [0,0.25]')
   if (ref > 0 && ref < 1) ok('CONTOUR_3D_REF ' + ref + ' is an interior height')
   else fail('CONTOUR_3D_REF ' + ref + ' is not inside (0,1)')
 }

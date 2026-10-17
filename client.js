@@ -2696,13 +2696,40 @@ function apply(ctx) {
        surface), 3D holds LESS memory than the flat path: the scroll surface is
        skipped entirely, so only the texture remains. */
     const CONTOUR_3D_REF = 0.5      // height that moves exactly like the flat sheet
-    const CONTOUR_3D_DEPTH = 0.55   // motion gain per unit of height away from REF
-    const CONTOUR_3D_RISE = 0.18    // vertical lift per unit height, in viewport heights
+    /* Magnification per unit of height: +6% at the top, -6% at the bottom.
+       Measured, not guessed: the warp's screen-space gradient is roughly
+       |p - centre| * DEPTH * |grad h|, so the displacement map's own slope sets the
+       ceiling. At 0.28 the gradient passed 2 and contour lines were squashed into
+       facets and stripes in a 1:1 crop; at 0.12 the gradient stays near 0.3 and the
+       lines stay lines. The motion difference is still unmistakable -- near ground
+       sweeps 12% faster than far ground. */
+    const CONTOUR_3D_DEPTH = 0.12
+    /* Vertical lift per unit height, in viewport heights. Small on purpose: the lift
+       bends the sheet (it feeds back into the sample position) and it is the part
+       that makes an under-filtered height map visible as faceting. 0.04 lifts the
+       full height range by 4% of the viewport. */
+    const CONTOUR_3D_RISE = 0.04
     /* Renderer strings that mean "this is not hardware acceleration". The user's
        requirement is explicit: 3D must run on the GPU or fall back to 2D, so a
        software rasteriser (headless Chrome, a driver-less VM, a blocklisted GPU)
        is a NO, not a slow yes. */
     const CONTOUR_SOFT_GL = /swiftshader|basic render driver|llvmpipe|softpipe|software rasterizer|microsoft basic/i
+    /* Displacement-map resolution. The field itself is sampled every CONTOUR_STEP
+       CSS px, which is finer than a parallax displacement needs and fine enough for
+       its bilinear interpolation seams to show up as facets on straight contour
+       lines. Downsample by this much, then blur. */
+    const CONTOUR_3D_HEIGHT_DIV = 4
+    const CONTOUR_3D_HEIGHT_MAX = 192
+    /* Supersample factor. The shader MINIFIES the sheet wherever terrain is below
+       the reference height (down to 1/(1+DEPTH/2)), and the sheet has no mipmaps
+       (mipmapping needs power-of-two, and this texture is deliberately non-POT so
+       its period stays exact). Without mipmaps a 6% minification is enough to tear
+       1-2px contour strokes into staircases -- measured in a 3:1 crop. Rendering the
+       3D layer at 1.5x and letting the compositor downscale puts every sample in
+       magnification, which LINEAR handles smoothly. Costs 2.25x fragments on a
+       fullscreen pass; the layer is viewport-sized (3D needs no scroll surface), so
+       it is still far cheaper in memory than the flat path. */
+    const CONTOUR_3D_SS = 1.5
     const CONTOUR_GL_VERT = [
       'attribute vec2 a_pos;',
       'varying vec2 v_uv;',
@@ -2712,12 +2739,21 @@ function apply(ctx) {
       '}',
     ].join('\n')
     const CONTOUR_GL_FRAG = [
+      /* highp, not mediump: the shader's coordinates are in SHEET PIXELS (thousands),
+         and a 10-bit mantissa quantises the sample position into ~4px steps -- which
+         renders contour lines as staircases. Measured on SwiftShader, and the guard
+         is the portable way to say it: mediump only where highp does not exist. */
+      '#ifdef GL_FRAGMENT_PRECISION_HIGH',
+      'precision highp float;',
+      '#else',
       'precision mediump float;',
+      '#endif',
       'uniform sampler2D u_sheet;',
       'uniform sampler2D u_height;',
       'uniform vec2 u_sheetSize;',
       'uniform vec2 u_viewSize;',
-      'uniform vec2 u_offset;',
+      'uniform vec2 u_center;',
+      'uniform vec2 u_cam;',
       'uniform float u_depth;',
       'uniform float u_ref;',
       'uniform float u_rise;',
@@ -2725,27 +2761,46 @@ function apply(ctx) {
       'void main() {',
       /* v_uv is bottom-up (clip space), the sheet is top-down. */
       '  vec2 px = vec2(v_uv.x, 1.0 - v_uv.y) * u_viewSize;',
-      '  vec2 base = (px + u_offset) / u_sheetSize;',
-      '  float h = texture2D(u_height, fract(base)).r;',
+      /* Height at the UNDISPLACED position: the displacement is what we are solving
+         for, so looking it up at the displaced position would be circular. */
+      '  float h = texture2D(u_height, fract((px - u_center + u_cam) / u_sheetSize)).r;',
       '  float s = 1.0 + u_depth * (h - u_ref);',
-      '  vec2 p = px + u_offset * s;',
-      '  p.y += u_rise * (h - u_ref) * u_viewSize.y;',
-      '  gl_FragColor = texture2D(u_sheet, fract(p / u_sheetSize));',
+      '  float lift = u_rise * (h - u_ref) * u_viewSize.y;',
+      /* Invert the camera: height sets the magnification, cam only translates. The
+         translation is INSIDE the period, which is what keeps the wrap seamless. */
+      '  vec2 t = vec2((px.x - u_center.x) / s, (px.y - u_center.y + lift) / s) + u_cam;',
+      '  gl_FragColor = texture2D(u_sheet, fract(t / u_sheetSize));',
       '}',
     ].join('\n')
 
     /* The projection above, as plain arithmetic: the tests check the geometry
-       without a GPU (materialise, monotonicity, and the depth=0 identity), and the
-       shader is the same three lines. Returns texture-space uv in [0,1). */
-    const contourParallaxUV = (px, py, sx, sy, tw, th, h, viewH) => {
-      const baseU = (px + sx) / tw
-      const baseV = (py + sy) / th
-      const u0 = baseU - Math.floor(baseU)
-      const v0 = baseV - Math.floor(baseV)
-      const gain = 1 + CONTOUR_3D_DEPTH * (h - CONTOUR_3D_REF)
-      const su = (px + sx * gain) / tw
-      const sv = (py + sy * gain + CONTOUR_3D_RISE * (h - CONTOUR_3D_REF) * viewH) / th
-      return { h, u0, v0, u: su - Math.floor(su), v: sv - Math.floor(sv), gain }
+       without a GPU, and the shader is the same four lines. `cam` is the scroll
+       offset in device px (the engine keeps it inside one period), `view` is the
+       viewport in device px. Returns texture-space uv in [0,1) plus the scale and
+       lift that produced it, so a test can reason about the projection instead of
+       just its output. */
+    const contourParallaxUV = (px, py, camX, camY, tw, th, h, viewW, viewH) => {
+      const cx = viewW * 0.5
+      const cy = viewH * 0.5
+      const scale = 1 + CONTOUR_3D_DEPTH * (h - CONTOUR_3D_REF)
+      const lift = CONTOUR_3D_RISE * (h - CONTOUR_3D_REF) * viewH
+      const tx = (px - cx) / scale + camX
+      const ty = (py - cy + lift) / scale + camY
+      const u = tx / tw
+      const v = ty / th
+      return { h, scale, lift, u: u - Math.floor(u), v: v - Math.floor(v) }
+    }
+
+    /* Where a terrain point lands on screen (the inverse of the above, and what
+       "near ground sweeps faster" means quantitatively: screen speed = scale). */
+    const contourParallaxScreen = (tx, ty, camX, camY, tw, th, h, viewW, viewH) => {
+      const scale = 1 + CONTOUR_3D_DEPTH * (h - CONTOUR_3D_REF)
+      const lift = CONTOUR_3D_RISE * (h - CONTOUR_3D_REF) * viewH
+      return {
+        x: (tx - camX) * scale + viewW * 0.5,
+        y: (ty - camY) * scale + viewH * 0.5 - lift,
+        scale,
+      }
     }
 
     /* A test hook, and nothing else: forcing 3D on a software rasteriser is how the
@@ -2788,6 +2843,56 @@ function apply(ctx) {
       if (renderer === '') return { ok: false, why: 'renderer not queryable' }
       if (CONTOUR_SOFT_GL.test(renderer)) return { ok: false, why: 'software renderer: ' + renderer, renderer }
       return { ok: true, why: renderer, renderer }
+    }
+
+    /* Height map for the displacement: area-averaged downsample of the terrain
+       field, then two separable box passes. Values are 0..1 across the field's own
+       range. Pure function of the field, so it is testable on the CPU. */
+    const contourHeightMap = (f) => {
+      const w = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.cols / CONTOUR_3D_HEIGHT_DIV)))
+      const h = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.rows / CONTOUR_3D_HEIGHT_DIV)))
+      const span = (f.mx - f.mn) || 1
+      const acc = new Float32Array(w * h)
+      const cnt = new Float32Array(w * h)
+      for (let y = 0; y < f.rows; y++) {
+        const ty = Math.min(h - 1, Math.floor((y * h) / f.rows))
+        for (let x = 0; x < f.cols; x++) {
+          const tx = Math.min(w - 1, Math.floor((x * w) / f.cols))
+          const i = ty * w + tx
+          acc[i] += (f.F[y * f.cols + x] - f.mn) / span
+          cnt[i] += 1
+        }
+      }
+      let cur = new Float32Array(w * h)
+      for (let i = 0; i < w * h; i++) cur[i] = cnt[i] > 0 ? acc[i] / cnt[i] : 0
+      const blur = (src, horizontal) => {
+        const out = new Float32Array(src.length)
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            let sum = 0
+            let n = 0
+            for (let k = -1; k <= 1; k++) {
+              const sx = horizontal ? x + k : x
+              const sy = horizontal ? y : y + k
+              if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue
+              sum += src[sy * w + sx]
+              n++
+            }
+            out[y * w + x] = sum / n
+          }
+        }
+        return out
+      }
+      for (let pass = 0; pass < 3; pass++) cur = blur(blur(cur, true), false)
+      const bytes = new Uint8Array(w * h * 4)
+      for (let i = 0; i < w * h; i++) {
+        const b = Math.max(0, Math.min(255, Math.round(cur[i] * 255)))
+        bytes[i * 4] = b
+        bytes[i * 4 + 1] = b
+        bytes[i * 4 + 2] = b
+        bytes[i * 4 + 3] = 255
+      }
+      return { w, h, bytes, values: cur }
     }
 
     const contourGlCompile = (gl, type, src) => {
@@ -2864,7 +2969,8 @@ function apply(ctx) {
         uHeight: gl.getUniformLocation(prog, 'u_height'),
         uSheetSize: gl.getUniformLocation(prog, 'u_sheetSize'),
         uViewSize: gl.getUniformLocation(prog, 'u_viewSize'),
-        uOffset: gl.getUniformLocation(prog, 'u_offset'),
+        uCenter: gl.getUniformLocation(prog, 'u_center'),
+        uCam: gl.getUniformLocation(prog, 'u_cam'),
         uDepth: gl.getUniformLocation(prog, 'u_depth'),
         uRef: gl.getUniformLocation(prog, 'u_ref'),
         uRise: gl.getUniformLocation(prog, 'u_rise'),
@@ -2909,25 +3015,16 @@ function apply(ctx) {
       }
       const f = contourField
       if (f !== null && st.heightGen !== f) {
-        /* Heights as 8-bit: the field is smooth and the parallax gain is ±0.55, so
-           a 1/255 step is far below one screen pixel of displacement. RGBA rather
-           than LUMINANCE because a non-RGBA upload with row-major strides is the
-           classic driver-dependent trap. */
-        const n = f.cols * f.rows
-        const px = new Uint8Array(n * 4)
-        const span = (f.mx - f.mn) || 1
-        for (let i = 0; i < n; i++) {
-          const v = Math.round(((f.F[i] - f.mn) / span) * 255)
-          const b = v < 0 ? 0 : (v > 255 ? 255 : v)
-          px[i * 4] = b
-          px[i * 4 + 1] = b
-          px[i * 4 + 2] = b
-          px[i * 4 + 3] = 255
-        }
+        /* Heights as 8-bit RGBA rather than LUMINANCE: a non-RGBA upload with
+           row-major strides is the classic driver-dependent trap, and 4 bytes per
+           texel of a ~190x110 map costs nothing. The map is the smoothed one from
+           contourHeightMap, not the raw field, so straight contour lines do not
+           bend along the field's own cell grid. */
+        const map = contourHeightMap(f)
         gl.bindTexture(gl.TEXTURE_2D, st.height)
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, f.cols, f.rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, px)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, map.w, map.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, map.bytes)
         st.heightGen = f
       }
       return true
@@ -2941,11 +3038,13 @@ function apply(ctx) {
       const st = contourGl
       const gl = st.gl
       const dpr = contourView.dpr > 0 ? contourView.dpr : 1
-      const wDev = Math.max(1, Math.round(contourView.w * dpr))
-      const hDev = Math.max(1, Math.round(contourView.h * dpr))
+      const wDev = Math.max(1, Math.round(contourView.w * dpr * CONTOUR_3D_SS))
+      const hDev = Math.max(1, Math.round(contourView.h * dpr * CONTOUR_3D_SS))
       if (st.cv.width !== wDev || st.cv.height !== hDev) {
         st.cv.width = wDev
         st.cv.height = hDev
+        /* CSS size stays the frame's size: the extra pixels are supersampling, and
+           the compositor scales the layer down for free. */
         st.cv.style.width = contourView.w + 'px'
         st.cv.style.height = contourView.h + 'px'
       }
@@ -2969,7 +3068,8 @@ function apply(ctx) {
       gl.uniform1i(st.uHeight, 1)
       gl.uniform2f(st.uSheetSize, tw, th)
       gl.uniform2f(st.uViewSize, wDev, hDev)
-      gl.uniform2f(st.uOffset, sx, sy)
+      gl.uniform2f(st.uCenter, wDev * 0.5, hDev * 0.5)
+      gl.uniform2f(st.uCam, sx, sy)
       gl.uniform1f(st.uDepth, CONTOUR_3D_DEPTH)
       gl.uniform1f(st.uRef, CONTOUR_3D_REF)
       gl.uniform1f(st.uRise, CONTOUR_3D_RISE)

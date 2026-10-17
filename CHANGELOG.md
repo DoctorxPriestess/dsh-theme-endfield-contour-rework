@@ -25,7 +25,9 @@ Upstream's own history is not reproduced here.
 
 实现要点（细节见 `docs/engineering-notes.md`）：
 
-- 高度取**未位移位置**再位移（单步 parallax mapping），反过来是循环依赖；高度图直接用高度场本身量化成 8 位 RGBA，所以视差跟着等高线走，而不是另造一张图。
+- 投影按相机反解：`t = (p − c + lift)/s(h) + cam`，`s(h) = 1 + DEPTH*(h−REF)`。第一版把平移偏移按高度缩放，结果位移随 offset 累积成条纹，且每绕回一个周期整幅图跳一下（约 140px）——渲染图里抓到的。
+- 高度取**未位移位置**再位移（单步 parallax mapping），反过来是循环依赖；位移图是高度场 4× 降采样 + 3 轮模糊后的结果，直接用场本身会把直线沿 10px 网格掰成多边形。
+- 片元着色器用 highp（mediump 把采样位置量化成 ~4px 台阶），3D 层按 1.5× 超采样再由合成器缩小（纹理是非 2 的幂、无法 mipmap，缩小 6% 就会撕裂 1–2px 细线）。
 - 3D 用**第二块 canvas**：一块 canvas 一旦拿到 `2d` 上下文就永远拿不到 `webgl`（实测第二次 `getContext` 返回 `null`），所以平面层原样不动，切视角不重建任何东西。
 - 3D **不需要滚动面**（着色器里 `fract` 取模环绕），因此它占的内存比平面视角更少。
 - **硬件门槛**：`WEBGL_debug_renderer_info` 读到 `swiftshader` / `basic render driver` / `llvmpipe` / 软件光栅化就直接退回平面；渲染器字符串被掩码（读不到）也算「无法证明是硬件」，同样退回。测试钩子 `window.__CONTOUR_FORCE_GL__` 在这条规则**之前**生效，否则 CI（headless）永远跑不到着色器。
