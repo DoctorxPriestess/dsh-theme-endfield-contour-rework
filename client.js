@@ -2636,11 +2636,26 @@ function apply(ctx) {
          sheet. When the GPU says no, this returns false and the flat path below
          draws instead -- the sheet is always on screen, one way or the other. */
       if (isContourView3D()) {
+        /* A cached refusal only speaks for the request it was formed under. Entering
+           3D is a NEW request -- the user just asked for it, often long after boot --
+           so let the gate probe again instead of replaying a verdict recorded when
+           the GPU process was still warming up. This is the fix for "it worked once,
+           then never again": same page, same session, no restart. */
+        if (contourGlAsked !== true) {
+          contourGlAsked = true
+          contourGlChecked = false
+          contourGlWhy = ''
+          contourGlNextTry = 0
+        }
         if (contourGlDraw()) return
-      } else if (contourGl !== null) {
-        /* Back to flat: drop the GL layer so its texture memory goes away. */
-        contourGlDispose()
-        contourPaintSurface()
+      } else {
+        /* Leaving 3D ends the request, so the next entry probes afresh. */
+        contourGlAsked = false
+        if (contourGl !== null) {
+          /* Back to flat: drop the GL layer so its texture memory goes away. */
+          contourGlDispose()
+          contourPaintSurface()
+        }
       }
       const tw = contourTex.cv.width
       const th = contourTex.cv.height
@@ -2769,7 +2784,14 @@ function apply(ctx) {
       /* Invert the camera: height sets the magnification, cam only translates. The
          translation is INSIDE the period, which is what keeps the wrap seamless. */
       '  vec2 t = vec2((px.x - u_center.x) / s, (px.y - u_center.y + lift) / s) + u_cam;',
-      '  gl_FragColor = texture2D(u_sheet, fract(t / u_sheetSize));',
+      /* PREMULTIPLY. The context is created with premultipliedAlpha: true (the
+         default), and the compositor blends what we write as premultiplied colour.
+         The texture holds STRAIGHT alpha (texImage2D from a canvas unpremultiplies),
+         so writing it straight through drew every stroke at full strength: measured
+         (253,253,189) against the flat path's (220,215,160) on the same terrain.
+         Scaling rgb by a reproduces exactly what the 2D canvas path stores. */
+      '  vec4 texel = texture2D(u_sheet, fract(t / u_sheetSize));',
+      '  gl_FragColor = vec4(texel.rgb * texel.a, texel.a);',
       '}',
     ].join('\n')
 
@@ -2811,6 +2833,9 @@ function apply(ctx) {
     let contourGl = null
     let contourGlWhy = ''
     let contourGlChecked = false
+    /* Whether the current verdict belongs to the request in force right now (3D).
+       Cleared on every exit from 3D, so re-entering always re-probes. */
+    let contourGlAsked = false
 
     /* Does this device actually accelerate WebGL? Returns {ok, why} with the
        renderer string in `why` either way -- the settings row shows it, so "3D is
@@ -2904,9 +2929,16 @@ function apply(ctx) {
       return sh
     }
 
-    /* Create the 3D layer for the first time. Any failure is sticky
-       (contourGlChecked) so a device without acceleration never pays for a retry
-       per frame, and `why` is left behind for the settings hint. */
+    /* Schedule the next hardware probe. Called on every failure so a transient one
+       (GPU process still starting, a driver hiccup) recovers by itself, while a
+       device that genuinely has no acceleration only pays one probe per cooldown
+       instead of one per frame. */
+    const contourGlRetryLater = () => {
+      contourGlNextTry = contourGlNow() + CONTOUR_GL_RETRY_MS
+    }
+
+    /* Create the 3D layer for the first time. `why` is left behind on failure so the
+       settings row can say what happened instead of leaving a dead switch. */
     const contourGlMount = () => {
       if (contourGl !== null) return true
       if (contourGlChecked) return false
@@ -2914,6 +2946,7 @@ function apply(ctx) {
       const hw = contourHardwareGL()
       if (!hw.ok) {
         contourGlWhy = hw.why
+        contourGlRetryLater()
         return false
       }
       if (contourWrap === null || typeof document === 'undefined') return false
@@ -3032,9 +3065,24 @@ function apply(ctx) {
 
     /* Draw one 3D frame. Returns false when 3D cannot draw right now, which is the
        caller's cue to fall back to the flat path (no GPU, no texture yet, ...). */
+    /* A failed hardware check is not a permanent verdict: the FIRST attempt of a
+       session lands during boot, while the GPU process is still warming up, and a
+       single null context there must not disable 3D for the rest of the run (that is
+       exactly what "it worked once, then never again" was). So: no attempt while the
+       boot plate is up, and a failed check is retried after this cooldown (and
+       immediately whenever the user changes the view). */
+    const CONTOUR_GL_RETRY_MS = 8000
+    let contourGlNextTry = 0
+    const contourGlNow = () => (typeof Date.now === 'function' ? Date.now() : 0)
+
     const contourGlDraw = () => {
       if (contourTex === null || contourView === null) return false
-      if (!contourGlMount()) return false
+      if (contourLoaderActive) return false
+      if (contourGl === null && contourGlChecked && contourGlNow() < contourGlNextTry) return false
+      if (!contourGlMount()) {
+        contourGlNextTry = contourGlNow() + CONTOUR_GL_RETRY_MS
+        return false
+      }
       const st = contourGl
       const gl = st.gl
       const dpr = contourView.dpr > 0 ? contourView.dpr : 1
@@ -6172,7 +6220,9 @@ function apply(ctx) {
             setContourView(next)
             contourSwitchSig = ''
             /* Force one draw before the loop is reconciled: when scrolling is off
-               (static sheet) nothing else would ever call contourBlit(). */
+               (static sheet) nothing else would ever call contourBlit(). It is also
+               what re-probes the GPU after a refusal (see contourBlit: entering 3D
+               is a new request, so a boot-time failure is not a life sentence). */
             contourBlit()
             contourApplySwitches()
           }

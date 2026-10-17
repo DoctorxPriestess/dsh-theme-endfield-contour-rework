@@ -272,7 +272,14 @@ async function main() {
     window.__CONTOUR_FORCE_GL__ = true
     LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
     document.body.appendChild(document.createElement('span'))
-    await sleep(700)
+    await sleep(300)
+    /* A view change alone is not a repaint (the flat sheet is already a complete
+       picture), and this harness runs on a virtual clock that stops delivering rAF
+       after a handful of frames -- so ask for one draw explicitly by pausing the
+       movement, exactly like the recovery case further down. */
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(500)
     const wrapBox=wrap.getBoundingClientRect()
     const glCv=document.querySelector('[data-endfield-contour-gl]')
     R('3d (forced): gl layer mounted', !!glCv, glCv?glCv.tagName:'none')
@@ -286,6 +293,9 @@ async function main() {
     R('3d (forced): no webgl error', !!glCtx && glCtx.getError()===0, glCtx?String(glCtx.getError()):'no context')
     R('3d (forced): exactly one gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===1,
       String(document.querySelectorAll('[data-endfield-contour-gl]').length))
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
+    document.body.appendChild(document.createElement('span'))
+
     /* Why there is no pixel assertion on the GL canvas here: the context is created
        without preserveDrawingBuffer (keeping it would cost a full copy per frame),
        so readPixels is only valid inside the frame that drew it -- and this harness
@@ -315,10 +325,42 @@ async function main() {
     R('3d without hardware acceleration: flat sheet still painted',
       !!linesFb && px(linesFb).opaque>3000, linesFb?('opaquePx='+px(linesFb).opaque):'no canvas')
 
-    /* And back to flat: the fallback path is symmetric. */
+    /* A refusal must NOT be permanent. Live report: 3D worked on the first run and
+       then never engaged again -- because the hardware verdict was cached forever and
+       the first probe of a session lands while the GPU process is still warming up.
+       Regression below: keep the layer mounted, flip hardware on, and ask for 3D
+       again by TOGGLING THE VIEW only (no remount, no restart). */
+    window.__CONTOUR_FORCE_GL__ = true
     LS.setItem('dsh-theme-endfield-contour-rework-contour-view','0')
     document.body.appendChild(document.createElement('span'))
-    await sleep(500)
+    await sleep(250)
+    R('recovery: toggling to flat leaves no gl layer',
+      document.querySelectorAll('[data-endfield-contour-gl]').length===0,
+      String(document.querySelectorAll('[data-endfield-contour-gl]').length)+' gl canvas')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(400)
+    /* The view change alone does not repaint (the flat sheet is already a correct
+       picture), so ask for one draw the way a user does: pause and resume the
+       movement. That exercises the real entry point without remounting the layer. */
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(400)
+    const glBack=document.querySelector('[data-endfield-contour-gl]')
+    R('recovery: 3d engages again after a view toggle (no restart)',
+      !!glBack, glBack?glBack.tagName:'none')
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
+    document.body.appendChild(document.createElement('span'))
+    delete window.__CONTOUR_FORCE_GL__
+
+    /* And back to flat: the fallback path is symmetric. Dropping the GL layer is a
+       repaint too, so pause the movement again to force that one draw. */
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-view','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(250)
+    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
+    document.body.appendChild(document.createElement('span'))
+    await sleep(400)
     const linesFlat=document.querySelector('[data-endfield-contour-lines]')
     R('back to flat: no gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===0)
     R('back to flat: sheet painted', !!linesFlat && px(linesFlat).opaque>3000,
