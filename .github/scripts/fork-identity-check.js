@@ -140,12 +140,17 @@ if (!slugMatch) {
   const wrong = hints.filter((h) => !h.endsWith(EXPECTED_SLUG))
   check(`代码与配置里的安装命令与 repository 一致（${EXPECTED_SLUG}）`, hints.length > 0 && wrong.length === 0, wrong.join(' | ') || '未找到安装命令')
   // README 是用户实际照抄的地方，两行都要对：add 取仓库，rm 取包名。
+  // 规则不限定 profile 名（0.1.x 用 --profile web，0.2.x 用 --profile desktop），也不限定
+  // add 只有一条：README 现在同时给「github: 简写跟 main」和「codeload 固定 tag」两种写法，
+  // 要守的是「至少有一条 add 用仓库简写、所有 rm 都用包名」。
   for (const f of ['README.md', 'README.zh-CN.md']) {
     const t = read(f)
-    const add = t.match(/dsh plugin --profile web add (\S+)/)
-    const rm = t.match(/dsh plugin --profile web rm (\S+)/)
-    check(`${f} 的 add 命令指向 repository`, !!add && add[1] === EXPECTED_SLUG, add ? add[1] : '未找到')
-    check(`${f} 的 rm 命令使用包名`, !!rm && rm[1] === PLUGIN, rm ? rm[1] : '未找到')
+    const adds = [...t.matchAll(/dsh plugin --profile \S+\s+add (\S+)/g)].map((m) => m[1])
+    const rms = [...t.matchAll(/dsh plugin --profile \S+\s+rm (\S+)/g)].map((m) => m[1])
+    check(`${f} 的 add 命令指向 repository`,
+      adds.indexOf(EXPECTED_SLUG) >= 0, adds.length ? adds.join(' | ') : '未找到')
+    check(`${f} 的 rm 命令使用包名`,
+      rms.length > 0 && rms.every((r) => r === PLUGIN), rms.length ? rms.join(' | ') : '未找到')
   }
   const doubled = []
   for (const f of seenFiles) {
