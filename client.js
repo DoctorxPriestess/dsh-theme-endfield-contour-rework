@@ -2152,13 +2152,14 @@ function apply(ctx) {
        is static during a drag anyway, so there is nothing to move. Cleared (and the
        loop restarted) by the trailing resize timer. */
     let contourResizing = false
-    /* Wall-clock of the last fallback repaint. The compositor path is a transform (free
-       at any frame rate), but the fallback redraws the whole viewport every frame -- a
-       viewport-sized canvas upload, ~17MB at 1432x753@2x, 60 times a second. That
-       sustained bandwidth is the one thing that can keep the renderer busy for minutes
-       on end, so the fallback is limited to ~30fps while the surface path stays at 60. */
-    let contourLastPaintT = -1
-    const CONTOUR_BLIT_MIN_MS = 30
+    /* Sub-pixel gate for the 3D layer (see contourBlit): the shader output cannot move
+       less than half a device pixel, so a frame that would change it by less than that
+       is skipped instead of re-running the full-screen march. On a 120Hz panel at the
+       slowest speed the drift per frame is ~0.1px, so this is the difference between
+       120 shader passes a second and ~24 -- with no visible change in motion. */
+    let contourGlLastX = Infinity
+    let contourGlLastY = Infinity
+    let contourGlLastKey = ''
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -2884,7 +2885,34 @@ function apply(ctx) {
           contourGlWhy = ''
           contourGlNextTry = 0
         }
-        if (contourGlDraw()) {
+        /* A frame whose camera moved less than half a device pixel cannot change the
+           picture (the finest thing in the sheet is a 1px stroke), so the full-screen
+           march is skipped and the previous frame stays on screen. This is what lets a
+           120Hz panel stay at 120 without paying twice the shader cost at slow speeds.
+           Anything that changes the image -- sheet size, view size -- forces the draw,
+           and so does a missing context (the first frame after entering 3D). */
+        const viewKey = contourView === null
+          ? 'none'
+          : (contourTex.cv.width + 'x' + contourTex.cv.height + ':' + contourView.w + 'x'
+            + contourView.h + '@' + contourView.dpr)
+        const movedEnough = contourGl === null || viewKey !== contourGlLastKey
+          || Math.abs(contourOffsetX - contourGlLastX) >= 0.5
+          || Math.abs(contourOffsetY - contourGlLastY) >= 0.5
+        if (movedEnough) {
+          if (contourGlDraw()) {
+            contourGlLastX = contourOffsetX
+            contourGlLastY = contourOffsetY
+            contourGlLastKey = viewKey
+          }
+        }
+        if (contourGl !== null) {
+          /* Either the draw just succeeded or there was nothing to draw; in both cases
+             the flat layer must stay off -- falling through would paint the 2D sheet
+             underneath the 3D one. */
+          contourReleaseFlat()
+          return
+        }
+        if (!movedEnough) {
           contourReleaseFlat()
           return
         }
@@ -3894,6 +3922,16 @@ function apply(ctx) {
       return changed
     }
 
+    /* One frame of motion: px/second * seconds, wrapped into the texture period.
+       Separate and pure because the frame rate must not change the SPEED -- 60 steps of
+       16.7ms and 120 steps of 8.3ms have to land on the same offset, or a 120Hz panel
+       would scroll the map twice as fast as a 60Hz one. */
+    const contourStepOffset = (off, velocity, dt, period) => {
+      if (!(period > 0)) return 0
+      const next = off + velocity * dt
+      return ((next % period) + period) % period
+    }
+
     const contourFrame = () => {
       contourRaf = null
       if (contourWrap === null || contourTex === null) return
@@ -3912,20 +3950,14 @@ function apply(ctx) {
          so float precision and the modulo in contourBlit both stay trivial. */
       const vx = contourVelX * contourSpeedPx * contourDpr
       const vy = contourVelY * contourSpeedPx * contourDpr
-      contourOffsetX = (((contourOffsetX + vx * dt) % twDev) + twDev) % twDev
-      contourOffsetY = (((contourOffsetY + vy * dt) % thDev) + thDev) % thDev
+      contourOffsetX = contourStepOffset(contourOffsetX, vx, dt, twDev)
+      contourOffsetY = contourStepOffset(contourOffsetY, vy, dt, thDev)
       /* contourBlit is also where a refused 3D layer's cooldown gets re-probed, and
          where entering/leaving 3D is noticed -- so this call is the loop's whole
-         reconciliation as well as its motion. Only the expensive path is throttled:
-         painting the transform is free, repainting the viewport is not. */
-      const cheap = contourSurfaceOn
-        && contourLineCv !== null
-        && contourLineCv.style != null
-        && typeof contourLineCv.style.transform === 'string'
-      if (cheap || contourLastPaintT < 0 || (now - contourLastPaintT) >= CONTOUR_BLIT_MIN_MS) {
-        contourLastPaintT = now
-        contourBlit()
-      }
+         reconciliation as well as its motion. It runs EVERY frame: the panel's refresh
+         rate is the frame rate (60, 120, whatever), because the work per frame on the
+         flat path is one transform write. */
+      contourBlit()
       if (typeof requestAnimationFrame === 'function') contourRaf = requestAnimationFrame(contourFrame)
     }
 

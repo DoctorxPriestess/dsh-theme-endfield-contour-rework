@@ -419,7 +419,9 @@ async function main() {
         if(!c) return false
         const fr=frame.getBoundingClientRect()
         const dpr=window.devicePixelRatio||1
-        return c.width<=Math.round(fr.width*dpr)+200 && c.height<=Math.round(fr.height*dpr)+200
+        /* CONTOUR_SURFACE_PAD is 512 device px (it used to be 160): the surface is the
+           viewport plus that, never plus a whole period. */
+        return c.width<=Math.round(fr.width*dpr)+560 && c.height<=Math.round(fr.height*dpr)+560
       })()
       R('resize drag: the surface stays viewport-sized (never viewport+period)', padOk, sizeA+' -> '+sizeB)
       const capPx=24e6

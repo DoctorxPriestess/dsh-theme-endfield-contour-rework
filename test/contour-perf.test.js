@@ -97,7 +97,8 @@ function grabArray(name) {
 const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
   'contourStroke', 'contourRenderCache', 'contourTargetTexture',
-  'contourBuildTexture', 'contourSheetFits', 'contourBlit', 'contourPaintSurface', 'contourRetune', 'contourFrame',
+  'contourBuildTexture', 'contourSheetFits', 'contourStepOffset', 'contourBlit',
+  'contourPaintSurface', 'contourRetune', 'contourFrame',
   'contourTerrainProfile', 'contourTerrainRow', 'contourOctaveLadder',
   'contourRebuildForRoughness', 'contourReadIndex', 'contourStair', 'contourTerrace',
   'contourCliff', 'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp',
@@ -298,6 +299,7 @@ return {
     else prefs[CONTOUR_VIEW_KEY] = had
   },
   sheetFits(w, h, dpr) { return contourSheetFits(w, h, dpr) },
+  stepOffset(off, v, dt, period) { return contourStepOffset(off, v, dt, period) },
   setOffset(x, y) { contourOffsetX = x; contourOffsetY = y },
   offset() { return [contourOffsetX, contourOffsetY] },
   ref() { return [contourSurfaceRefX, contourSurfaceRefY] },
@@ -595,6 +597,50 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
     fail('the pad repaint resized the surface (' + size0.w + 'x' + size0.h + ' -> ' + size1.w + 'x' + size1.h + ')')
   } else {
     ok('pad ' + pad + 'px: 0.3 pad = transform only, 0.6 pad = 1 repaint, transform restarts at 0, size unchanged')
+  }
+}
+
+/* ---------- A6. the frame rate must not change the speed ------------------- */
+/* A 120Hz panel gets 120 frames and a 60Hz panel 60, so the motion is px/second * dt
+   and the total displacement over the same WALL time has to agree. If it were a fixed
+   step per frame, a 120Hz display would scroll the map at double speed -- the classic
+   bug, and invisible to any single-rate test. */
+{
+  const speed = 192 * 2            // px/s * dpr
+  const period = 8192
+  let a = 0
+  for (let i = 0; i < 60; i++) a = api.stepOffset(a, speed, 1 / 60, period)
+  let b = 0
+  for (let i = 0; i < 120; i++) b = api.stepOffset(b, speed, 1 / 120, period)
+  let c = 0
+  for (let i = 0; i < 144; i++) c = api.stepOffset(c, speed, 1 / 144, period)
+  const want = speed * 1.0
+  const near = (x) => Math.abs(x - want) < 1e-6
+  if (!near(a) || !near(b) || !near(c)) {
+    fail('one second of motion depends on the refresh rate: 60Hz=' + a.toFixed(4)
+      + ' 120Hz=' + b.toFixed(4) + ' 144Hz=' + c.toFixed(4) + ' (expected ' + want.toFixed(4) + ')')
+  } else {
+    ok('60/120/144Hz all advance ' + want.toFixed(1) + ' device px in one second (rate-independent)')
+  }
+  /* ...and it wraps into the period instead of running away, so the modulo in the
+     blit stays trivial and float precision never degrades after hours. */
+  const wrapped = api.stepOffset(period - 1, 100, 1, period)
+  if (!(wrapped >= 0 && wrapped < period)) fail('the step does not wrap into the period: ' + wrapped)
+  else ok('the step wraps into the period (' + wrapped.toFixed(2) + ')')
+}
+
+/* ---------- A7. no frame-rate cap on either path --------------------------- */
+/* The panel's refresh rate IS the frame rate: one transform write on the compositor
+   path, one viewport blit on the fallback. A 30fps cap here was measured as the wrong
+   trade -- the requirement is >=60, ideally 120. */
+{
+  const src = api.frameSource()
+  if (/CONTOUR_BLIT_MIN_MS|contourLastPaintT/.test(src)) {
+    fail('the frame loop still carries a repaint-rate cap')
+  } else if (!/contourBlit\(\)/.test(src)) {
+    fail('the frame loop does not call contourBlit every frame')
+  } else {
+    ok('the frame loop calls contourBlit every frame, with no rate cap')
   }
 }
 
