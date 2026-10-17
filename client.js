@@ -2630,6 +2630,26 @@ function apply(ctx) {
        The wrap is seamless by construction: the texture's noise periods equal its
        CSS size, the transform maps that exactly onto device pixels, so the left
        edge continues the right edge exactly. */
+    /* In 3D the shader owns the whole frame, and the flat canvas sits directly
+       under it: everywhere the shader lays down no ink, the FLAT sheet shows
+       through, so both sets of lines are visible at once (straight sheet + the
+       displaced one = ghosting, and it reads as "too much ink"). The scroll surface
+       is worse than useless there -- up to a third of the memory budget held for a
+       canvas nobody can see. So entering 3D RELEASES the flat layer: drop the
+       surface, clear the backing store and shrink it to one pixel. The flat path
+       below restores the size before it paints again. */
+    const contourReleaseFlat = () => {
+      contourSurfaceOn = false
+      const cv = contourLineCv
+      if (cv === null) return
+      if (cv.style != null && typeof cv.style.transform === 'string') cv.style.transform = 'translate3d(0,0,0)'
+      /* Resizing also wipes the pixels, so no separate clearRect is needed. */
+      if (cv.width !== 1 || cv.height !== 1) {
+        cv.width = 1
+        cv.height = 1
+      }
+    }
+
     const contourBlit = () => {
       if (contourLineCv === null || contourTex === null) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
@@ -2647,7 +2667,10 @@ function apply(ctx) {
           contourGlWhy = ''
           contourGlNextTry = 0
         }
-        if (contourGlDraw()) return
+        if (contourGlDraw()) {
+          contourReleaseFlat()
+          return
+        }
       } else {
         /* Leaving 3D ends the request, so the next entry probes afresh. */
         contourGlAsked = false
@@ -2655,6 +2678,19 @@ function apply(ctx) {
           /* Back to flat: drop the GL layer so its texture memory goes away. */
           contourGlDispose()
           contourPaintSurface()
+        }
+      }
+      /* Back on the flat path: if 3D shrunk this canvas (or the plan has no
+         surface), give it the viewport back before painting into it. A no-op when
+         the surface is on, because contourPaintSurface sizes it to viewport+period
+         and this must not undo that. */
+      if (!contourSurfaceOn && contourView !== null) {
+        const dprFlat = contourView.dpr > 0 ? contourView.dpr : 1
+        const wWant = Math.max(1, Math.round(contourView.w * dprFlat))
+        const hWant = Math.max(1, Math.round(contourView.h * dprFlat))
+        if (contourLineCv.width !== wWant || contourLineCv.height !== hWant) {
+          contourLineCv.width = wWant
+          contourLineCv.height = hWant
         }
       }
       const tw = contourTex.cv.width
@@ -3018,6 +3054,9 @@ function apply(ctx) {
     const contourGlDispose = () => {
       const st = contourGl
       contourGl = null
+      /* Disposing ends the 3D request, so the next entry re-probes (a fresh context
+         is a fresh attempt, not a replay of the old verdict). */
+      contourGlAsked = false
       if (st === null) return
       try {
         if (st.cv && st.cv.parentNode) st.cv.parentNode.removeChild(st.cv)
@@ -3027,6 +3066,14 @@ function apply(ctx) {
           if (st.height) gl.deleteTexture(st.height)
           if (st.quad) gl.deleteBuffer(st.quad)
           if (st.prog) gl.deleteProgram(st.prog)
+          /* Release the CONTEXT, not just the objects hanging off it. A page may
+             only hold ~16 live WebGL contexts, and a context we merely stop using is
+             still live until GC gets to it -- so toggling 视差 a dozen times would
+             end with getContext() returning null for good, which is indistinguishable
+             from "this device has no hardware acceleration". loseContext() hands the
+             context back immediately, and the count stays at one. */
+          const lose = gl.getExtension('WEBGL_lose_context')
+          if (lose && typeof lose.loseContext === 'function') lose.loseContext()
         }
       } catch (e) { /* a lost context must not take the teardown down with it */ }
     }
@@ -3336,6 +3383,9 @@ function apply(ctx) {
       const vy = contourVelY * contourSpeedPx * contourDpr
       contourOffsetX = (((contourOffsetX + vx * dt) % twDev) + twDev) % twDev
       contourOffsetY = (((contourOffsetY + vy * dt) % thDev) + thDev) % thDev
+      /* contourBlit is also where a refused 3D layer's cooldown gets re-probed, and
+         where entering/leaving 3D is noticed -- so this call is the loop's whole
+         reconciliation as well as its motion. */
       contourBlit()
       if (typeof requestAnimationFrame === 'function') contourRaf = requestAnimationFrame(contourFrame)
     }
@@ -3480,6 +3530,22 @@ function apply(ctx) {
       }
     }
 
+    /* Keep the 3D layer's lifetime tied to the view alone. The frame loop drops it
+       when it repaints, but a repaint is not guaranteed -- with the movement paused
+       nothing ticks, so flipping back to 平面 would leave the GL canvas (and a live
+       context) on top of the flat sheet until something happened to repaint. Called
+       from the same reconciliation that syncs the switches, so any mutation --
+       i.e. any settings change -- settles it. */
+    const contourReconcileView = () => {
+      if (contourWrap === null || contourTex === null) return
+      /* Both directions, keyed on the request the last draw was made for: entering
+         3D needs that one draw to mount the layer, leaving it needs one to drop it.
+         Nothing else guarantees a repaint (with the movement paused nothing ticks),
+         and a settings change is exactly when it matters. */
+      if (isContourView3D() === contourGlAsked) return
+      contourBlit()
+    }
+
     /** Build/refresh/remove the layer to match the switches and the current page. */
     const syncContour = () => {
       const on = isEnabled() && isContourOn()
@@ -3496,6 +3562,9 @@ function apply(ctx) {
           the layer is already on screen. */
       const attached = contourWrap !== null && contourHost !== null
         && contourWrap.parentNode === contourHost && contourHost.isConnected
+      /* Before the mount work below, which is where 3D gets (re)attached: nothing
+         else guarantees a repaint after a view change. */
+      if (attached) contourReconcileView()
       if (!attached) {
         const host = findAppFrame()
         if (host === null) {

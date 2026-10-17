@@ -272,15 +272,11 @@ async function main() {
     window.__CONTOUR_FORCE_GL__ = true
     LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
     document.body.appendChild(document.createElement('span'))
-    await sleep(300)
-    /* A view change alone is not a repaint (the flat sheet is already a complete
-       picture), and this harness runs on a virtual clock that stops delivering rAF
-       after a handful of frames -- so ask for one draw explicitly by pausing the
-       movement, exactly like the recovery case further down. */
-    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
-    document.body.appendChild(document.createElement('span'))
-    await sleep(500)
+    await sleep(700)
     const wrapBox=wrap.getBoundingClientRect()
+    /* A view change alone is not a repaint, so the layer reconciliation draws that
+       one frame itself (see contourReconcileView); the harness reports the result
+       without pausing the movement first. */
     const glCv=document.querySelector('[data-endfield-contour-gl]')
     R('3d (forced): gl layer mounted', !!glCv, glCv?glCv.tagName:'none')
     const glBox=glCv?glCv.getBoundingClientRect():null
@@ -293,8 +289,14 @@ async function main() {
     R('3d (forced): no webgl error', !!glCtx && glCtx.getError()===0, glCtx?String(glCtx.getError()):'no context')
     R('3d (forced): exactly one gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===1,
       String(document.querySelectorAll('[data-endfield-contour-gl]').length))
-    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
-    document.body.appendChild(document.createElement('span'))
+    /* The flat layer sits directly UNDER the gl layer, so whatever it still holds
+       leaks through every pixel the shader leaves empty: two sets of lines at once
+       (the straight sheet plus the displaced one). It must be released, not just
+       covered -- and that also hands back the scroll surface's memory. */
+    const flatCv=document.querySelector('[data-endfield-contour-lines]')
+    R('3d (forced): the flat layer is released (1px backing store, no ink)',
+      !!flatCv && flatCv.width===1 && flatCv.height===1 && px(flatCv).opaque===0,
+      flatCv?('size='+flatCv.width+'x'+flatCv.height+' opaquePx='+px(flatCv).opaque):'no canvas')
 
     /* Why there is no pixel assertion on the GL canvas here: the context is created
        without preserveDrawingBuffer (keeping it would cost a full copy per frame),
@@ -339,32 +341,27 @@ async function main() {
       String(document.querySelectorAll('[data-endfield-contour-gl]').length)+' gl canvas')
     LS.setItem('dsh-theme-endfield-contour-rework-contour-view','1')
     document.body.appendChild(document.createElement('span'))
-    await sleep(400)
-    /* The view change alone does not repaint (the flat sheet is already a correct
-       picture), so ask for one draw the way a user does: pause and resume the
-       movement. That exercises the real entry point without remounting the layer. */
-    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
-    document.body.appendChild(document.createElement('span'))
-    await sleep(400)
+    await sleep(600)
     const glBack=document.querySelector('[data-endfield-contour-gl]')
     R('recovery: 3d engages again after a view toggle (no restart)',
       !!glBack, glBack?glBack.tagName:'none')
-    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','1')
-    document.body.appendChild(document.createElement('span'))
     delete window.__CONTOUR_FORCE_GL__
 
-    /* And back to flat: the fallback path is symmetric. Dropping the GL layer is a
-       repaint too, so pause the movement again to force that one draw. */
+    /* And back to flat: the fallback path is symmetric -- and it does not need a
+       repaint to happen on its own: dropping the layer is part of the same view
+       reconciliation. */
     LS.setItem('dsh-theme-endfield-contour-rework-contour-view','0')
     document.body.appendChild(document.createElement('span'))
-    await sleep(250)
-    LS.setItem('dsh-theme-endfield-contour-rework-contour-anim','0')
-    document.body.appendChild(document.createElement('span'))
-    await sleep(400)
+    await sleep(600)
     const linesFlat=document.querySelector('[data-endfield-contour-lines]')
     R('back to flat: no gl layer', document.querySelectorAll('[data-endfield-contour-gl]').length===0)
     R('back to flat: sheet painted', !!linesFlat && px(linesFlat).opaque>3000,
       linesFlat?('opaquePx='+px(linesFlat).opaque):'no canvas')
+    /* ...and the size it was shrunk from must come back, or the restored sheet
+       would be drawn into a 1px canvas. */
+    R('back to flat: flat layer regains the viewport size',
+      !!linesFlat && linesFlat.width>1000 && linesFlat.height>500,
+      linesFlat?(linesFlat.width+'x'+linesFlat.height):'no canvas')
 
     // ---------- 8. teardown ----------
     if(typeof window.__dispose__==='function') window.__dispose__()
