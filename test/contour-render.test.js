@@ -392,6 +392,7 @@ async function main() {
         await sleep(100)
       }
       const dragA=liveProbe()
+      const sizeA=(()=>{const c=live(); return c?c.width+'x'+c.height:'none'})()
       for (let i=0;i<3;i++) {
         const r=frame.getBoundingClientRect()
         frame.style.width=Math.round(r.width+40)+'px'
@@ -405,10 +406,15 @@ async function main() {
       const cNow=live()
       const fr=frame.getBoundingClientRect()
       const dprNow=window.devicePixelRatio||1
-      const limit=fr.width*dprNow*fr.height*dprNow*1.35
-      R('resize drag: no viewport+period surface is (re)painted per event',
-        !!cNow && cNow.width*cNow.height<=limit,
-        cNow?(cNow.width+'x'+cNow.height+' vs limit '+Math.round(limit)):'no canvas')
+      const sizeB=(()=>{const c=live(); return c?c.width+'x'+c.height:'none'})()
+      /* Two things must hold: the canvas never grows during the burst (a surface
+         re-allocation per resize event is the freeze), and it stays inside the
+         affordability cap that now gates the whole scroll plan. */
+      R('resize drag: the surface is not re-allocated per event', sizeA===sizeB, sizeA+' -> '+sizeB)
+      const capPx=24e6
+      R('resize drag: the canvas stays inside the surface cap',
+        !!cNow && cNow.width*cNow.height<=capPx,
+        cNow?(cNow.width+'x'+cNow.height+' = '+Math.round(cNow.width*cNow.height/1e6)+'M device px'):'no canvas')
       /* Compare the TRANSFORM only: a per-event blit legitimately repaints pixels,
          the pause is about the movement stopping. */
       const tf=()=>{const c=live(); return c?getComputedStyle(c).transform:'none'}

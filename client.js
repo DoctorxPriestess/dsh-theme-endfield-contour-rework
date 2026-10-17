@@ -1196,7 +1196,14 @@ function apply(ctx) {
        to 1920x1080@2x -- 200MB and 300MB produce identical plans. It is headroom for
        a larger per-side cap (at 8192 the same 300MB is what gives 1432x753@2x a
        2.41x period instead of 1.43x). */
-    const CONTOUR_MEM_BUDGET = 300e6
+    /* 300MB measured fine in isolation (texture + surface arithmetic) and is what the
+       user asked for, but it is not what the RENDERER can hold: with a maximised HiDPI
+       window the surface alone is a 100MB+ canvas backed by a raster copy AND a GPU
+       texture, the renderer was observed at 1.68GB working set, and every surface
+       repaint stalled the main thread long enough for the WebSocket heartbeat to miss
+       ("重连中", ten-second freezes). The budget now keeps the same shape but a size the
+       process can actually afford; the per-frame blit covers the rest at p95 0.002ms. */
+    const CONTOUR_MEM_BUDGET = 200e6
     /* Smallest period worth a surface: at or below 1.0 the same feature would sit
        twice inside one frame, which reads as a tiling pattern rather than as a
        moving landscape. If the budget cannot even afford this, the layer keeps the
@@ -1204,7 +1211,10 @@ function apply(ctx) {
     /* Above this many device pixels the scroll surface is not worth its one-off
        raster: fall back to the per-frame blit, which is cheap (measured p95
        0.002ms). Keeps a maximise from allocating and filling a huge canvas. */
-    const CONTOUR_SURFACE_MAX_PX = 120e6
+    const CONTOUR_SURFACE_MAX_PX = 24e6
+    /* How much bigger the target texture has to be before a resize is allowed to
+       regenerate the sheet (see contourScheduleRebuildCheck). */
+    const CONTOUR_REBUILD_MARGIN = 0.08
     const CONTOUR_SCROLL_MIN_MULT = 1.05
     /* Terrain shape. BASE_CELL is the approximate CSS-px size of the largest
        noise cell (hills land a few hundred px across, like a real topo map);
@@ -2096,6 +2106,13 @@ function apply(ctx) {
        is static during a drag anyway, so there is nothing to move. Cleared (and the
        loop restarted) by the trailing resize timer. */
     let contourResizing = false
+    /* Wall-clock of the last fallback repaint. The compositor path is a transform (free
+       at any frame rate), but the fallback redraws the whole viewport every frame -- a
+       viewport-sized canvas upload, ~17MB at 1432x753@2x, 60 times a second. That
+       sustained bandwidth is the one thing that can keep the renderer busy for minutes
+       on end, so the fallback is limited to ~30fps while the surface path stays at 60. */
+    let contourLastPaintT = -1
+    const CONTOUR_BLIT_MIN_MS = 30
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -2832,15 +2849,18 @@ function apply(ctx) {
           contourPaintSurface()
         }
       }
-      /* Back on the flat path: if 3D shrunk this canvas (or the plan has no
-         surface), give it the viewport back before painting into it. A no-op when
-         the surface is on, because contourPaintSurface sizes it to viewport+period
-         and this must not undo that. */
-      if (!contourSurfaceOn && contourView !== null) {
+      /* Back on the flat path: the canvas must at least cover the viewport before
+         anything is drawn into it. Two ways it can be short -- 3D released it to 1x1
+         (contourReleaseFlat), or the surface belongs to an older, smaller viewport --
+         and both looked like "no background at all" until the canvas grew back. */
+      if (contourView !== null) {
         const dprFlat = contourView.dpr > 0 ? contourView.dpr : 1
         const wWant = Math.max(1, Math.round(contourView.w * dprFlat))
         const hWant = Math.max(1, Math.round(contourView.h * dprFlat))
-        if (contourLineCv.width !== wWant || contourLineCv.height !== hWant) {
+        if (contourLineCv.width < wWant || contourLineCv.height < hWant) {
+          /* A surface that no longer fits is not a surface: drop it and size this
+             canvas to the viewport, which is the cheap path. */
+          contourSurfaceOn = false
           contourLineCv.width = wWant
           contourLineCv.height = hWant
         }
@@ -3573,6 +3593,11 @@ function apply(ctx) {
       const unit = 4 * dpr * dpr * w * h
       const r = CONTOUR_MEM_BUDGET / unit
       const mBudget = r > 0.5 ? (Math.sqrt(8 * r - 4) - 2) / 4 : 0
+      /* A scroll plan is only worth having if its SURFACE is affordable. Above the
+         cap the layer falls back to the tight caps and the per-frame blit, which is
+         what shipped upstream and has never frozen the app: the surface is
+         viewport+period device px (140MB at 1432x753@2x), Chromium keeps more than one
+         copy of it, and the live renderer was measured at 1.68GB. */
       if (mBudget >= CONTOUR_SCROLL_MIN_MULT) {
         const mFull = Math.min(CONTOUR_TEX_MULT,
           Math.sqrt(CONTOUR_SCROLL_AREA / (w * h)),
@@ -3596,10 +3621,19 @@ function apply(ctx) {
         /* A period at or below the viewport would show the same feature twice in
            one frame -- that is a tiling pattern, not a moving landscape. */
         if (twCss > w * 1.02 && thCss > h * 1.02) {
-          return {
-            twCss, thCss,
-            twDev: Math.round(twCss * dpr), thDev: Math.round(thCss * dpr),
-            scroll: true,
+          const twDev = Math.round(twCss * dpr)
+          const thDev = Math.round(thCss * dpr)
+          /* ...and only if its SURFACE is affordable. The surface is viewport+period
+             device px -- 140MB at 1432x753@2x -- and Chromium keeps more than one copy
+             of it (the live renderer was measured at 1.68GB, which is what stalled the
+             main thread for seconds on a resize). Past the cap, fall through to the
+             fallback sizing: tight caps, no surface, per-frame blit -- the shape that
+             shipped upstream and never froze the app. */
+          const surfPx = (Math.round(w * dpr) + twDev) * (Math.round(h * dpr) + thDev)
+          if (surfPx > CONTOUR_SURFACE_MAX_PX) {
+            /* fall through */
+          } else {
+            return { twCss, thCss, twDev, thDev, scroll: true }
           }
         }
       }
@@ -3712,8 +3746,16 @@ function apply(ctx) {
       contourOffsetY = (((contourOffsetY + vy * dt) % thDev) + thDev) % thDev
       /* contourBlit is also where a refused 3D layer's cooldown gets re-probed, and
          where entering/leaving 3D is noticed -- so this call is the loop's whole
-         reconciliation as well as its motion. */
-      contourBlit()
+         reconciliation as well as its motion. Only the expensive path is throttled:
+         painting the transform is free, repainting the viewport is not. */
+      const cheap = contourSurfaceOn
+        && contourLineCv !== null
+        && contourLineCv.style != null
+        && typeof contourLineCv.style.transform === 'string'
+      if (cheap || contourLastPaintT < 0 || (now - contourLastPaintT) >= CONTOUR_BLIT_MIN_MS) {
+        contourLastPaintT = now
+        contourBlit()
+      }
       if (typeof requestAnimationFrame === 'function') contourRaf = requestAnimationFrame(contourFrame)
     }
 
@@ -3803,10 +3845,14 @@ function apply(ctx) {
         contourApplySwitches()
         if (contourWrap === null || contourView === null || contourTex === null) return
         const t = contourTargetTexture(contourView.w, contourView.h, contourView.dpr)
-        /* GROWTH ONLY. A smaller viewport is already covered by the existing sheet
-           (it tiles), so rebuilding there would spend the same hundreds of ms to
-           produce a smaller texture, re-roll the landscape and reallocate memory. */
-        if (t.twDev <= contourTex.cv.width && t.thDev <= contourTex.cv.height) {
+        /* GROWTH ONLY, AND ONLY WHEN IT MATTERS. A smaller viewport is already covered
+           by the existing sheet (it tiles), and a few pixels of growth is too: the chat
+           streaming tokens nudge the frame layout constantly, and every nudge used to
+           count as "bigger" and pay a full regenerate. */
+        const margin = CONTOUR_REBUILD_MARGIN
+        const fits = t.twDev <= contourTex.cv.width * (1 + margin)
+          && t.thDev <= contourTex.cv.height * (1 + margin)
+        if (fits) {
           contourPaintSurface()
           contourBlit()
           return

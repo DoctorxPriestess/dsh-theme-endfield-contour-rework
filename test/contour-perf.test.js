@@ -275,6 +275,11 @@ return {
   paintSurface() { return contourPaintSurface() },
   surfaceOn() { return contourSurfaceOn },
   memBudget() { return CONTOUR_MEM_BUDGET },
+  surfaceMaxPx() { return CONTOUR_SURFACE_MAX_PX },
+  planSize(w, h, dpr) {
+    const t = contourTargetTexture(w, h, dpr)
+    return { tw: t.twDev, th: t.thDev, scroll: t.scroll }
+  },
   scrollDim() { return CONTOUR_SCROLL_DIM },
   scrollArea() { return CONTOUR_SCROLL_AREA },
   transform() { return contourLineCv && contourLineCv.style ? contourLineCv.style.transform : null },
@@ -391,7 +396,21 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
   api.setTransformable(true)
   api.blankOps()
   api.paintSurface()
-  if (!api.surfaceOn()) { fail(label + ': the surface path did not engage on a transformable canvas'); continue }
+  if (!api.surfaceOn()) {
+    /* A refused surface is only correct when it would have been too big: the huge
+       canvas is what stalled the live app (one 100MB+ surface, re-allocated on resize,
+       with the renderer observed at 1.68GB). The cheap per-frame blit covers it. */
+    const t2 = api.planSize(w, h, dpr)
+    const area = Math.round(w * dpr) + t2.tw
+    const area2 = Math.round(h * dpr) + t2.th
+    if (area * area2 > api.surfaceMaxPx()) {
+      ok(label + ': surface refused on purpose, ' + Math.round(area * area2 / 1e6)
+        + 'M device px > the ' + Math.round(api.surfaceMaxPx() / 1e6) + 'M cap -- per-frame blit instead')
+    } else {
+      fail(label + ': the surface path did not engage on a transformable canvas although it would fit')
+    }
+    continue
+  }
   const painted = api.snapshot()
   if (painted.ops.clearRect !== 1) fail(label + ': painting the surface did ' + painted.ops.clearRect + ' clearRect (expected 1)')
   if (painted.counts.generate !== 1 || painted.counts.extract !== 1) {
