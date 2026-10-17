@@ -267,6 +267,51 @@ const wrap = (x) => ((x % 1) + 1) % 1
   }
 }
 
+/* ---------- 8. the shader's plumbing: scale-neutral SS, premultiply, AA ------ */
+/* These are SOURCE assertions, and they exist because a rendered comparison caught
+   something no arithmetic test could: with the projection fed the RASTER size, the
+   supersample factor also magnified the terrain (measured line pitch 22.0px against
+   the flat view's 30.0px at SS 1.5 -- i.e. 1.5x denser), which is what put the line
+   spacing into the beating range that reads as moire. The invariant is "the
+   projection is in logical device px, so SS only adds samples", and the way to pin
+   it in a headless run is to assert the code that encodes it. */
+{
+  const uni = SRC.match(/gl\.uniform2f\(st\.uViewSize, ([^)]*)\)/)
+  if (uni === null) fail('u_viewSize uniform not found in client.js')
+  else if (/\bwDev\b|\bhDev\b|CONTOUR_3D_SS/.test(uni[1])) {
+    fail('u_viewSize is fed the raster size (' + uni[1] + '): the supersample factor would magnify the terrain')
+  } else ok('u_viewSize is in logical device px, not the SS raster size (' + uni[1] + ')')
+
+  const vw = SRC.match(/const vW = Math\.max\(1, Math\.round\(([^)]*)\)\)/)
+  if (vw === null) fail('vW (logical device width) not found')
+  else if (/CONTOUR_3D_SS/.test(vw[1])) fail('vW includes the supersample factor: ' + vw[1])
+  else ok('vW is viewport * dpr with no supersample factor (' + vw[1] + ')')
+
+  const ss = SRC.match(/const CONTOUR_3D_SS = ([0-9.]+)/)
+  if (ss === null) fail('CONTOUR_3D_SS not found')
+  else if (Number(ss[1]) > 1.5) fail('CONTOUR_3D_SS = ' + ss[1] + ' costs more than the footprint filter earns')
+  else ok('CONTOUR_3D_SS = ' + ss[1] + ' (footprint filter earns the rest)')
+
+  /* Premultiplied output: writing straight alpha into a premultipliedAlpha context
+     drew every stroke at full strength -- measured (253,253,189) against the flat
+     path's (220,215,160). The tap helper is where that conversion now lives. */
+  if (!/return vec4\(s\.rgb \* s\.a, s\.a\)/.test(SRC)) {
+    fail('the fragment shader does not premultiply its colour')
+  } else ok('the fragment shader premultiplies (rgb * a) before it writes')
+
+  /* Footprint-aware sampling: the extension, the derivative, and the 4 taps. */
+  const hasExt = /#extension GL_OES_standard_derivatives : enable/.test(SRC)
+  const hasDf = /dFdx\(uv\)/.test(SRC) && /dFdy\(uv\)/.test(SRC)
+  const taps = (SRC.match(/contourSample\(uv \+ vec2/g) || []).length
+  if (hasExt && hasDf && taps === 4) ok('footprint filter: extension + dFdx/dFdy + 4 taps')
+  else fail('footprint filter incomplete (ext=' + hasExt + ' deriv=' + hasDf + ' taps=' + taps + ')')
+  /* ...and it must be optional: the same source has to compile without the
+     extension, or a driver without it loses 3D entirely. */
+  if (/contourGlFragSource\(false\)/.test(SRC) && /#else[\s\S]{0,80}contourSample\(uv\)/.test(SRC)) {
+    ok('the shader has a single-tap fallback for drivers without the extension')
+  } else fail('no fallback shader for devices without OES_standard_derivatives')
+}
+
 if (bad) {
   console.error(bad + ' contour 3D check(s) failed')
   process.exit(1)

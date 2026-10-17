@@ -2771,16 +2771,22 @@ function apply(ctx) {
        lines. Downsample by this much, then blur. */
     const CONTOUR_3D_HEIGHT_DIV = 4
     const CONTOUR_3D_HEIGHT_MAX = 192
-    /* Supersample factor. The shader MINIFIES the sheet wherever terrain is below
-       the reference height (down to 1/(1+DEPTH/2)), and the sheet has no mipmaps
-       (mipmapping needs power-of-two, and this texture is deliberately non-POT so
-       its period stays exact). Without mipmaps a 6% minification is enough to tear
-       1-2px contour strokes into staircases -- measured in a 3:1 crop. Rendering the
-       3D layer at 1.5x and letting the compositor downscale puts every sample in
-       magnification, which LINEAR handles smoothly. Costs 2.25x fragments on a
-       fullscreen pass; the layer is viewport-sized (3D needs no scroll surface), so
-       it is still far cheaper in memory than the flat path. */
-    const CONTOUR_3D_SS = 1.5
+    /* Supersample factor for the 3D raster. Supersampling used to be the only
+       defence against the sheet being torn up where the displacement minifies it
+       (the sheet has no mipmaps: mipmapping needs power-of-two, and this texture is
+       deliberately non-POT so its period stays exact). It is no longer the only
+       defence -- the shader now measures its own footprint and averages four taps
+       across it (see contourGlFragSource) -- and 1.0 is also the honest value now
+       that the projection is scale-neutral: with the mesh at 1.5x, the same terrain
+       used to be packed 1.5x denser than the flat view, which is what put the line
+       pitch into the beating range in the first place.
+
+       Measured (same seed, offset 0, 1432x753@2x): median horizontal line pitch is
+       30.0 px at every SS from 1.0 to 2.0, and soft-edge pixel share is 95.6% at 1.0
+       against 94.7% at 1.5 and 97.7% for the flat 2D path -- no visible gain for
+       2.25x the fragments. Raise this only if a real GPU shows aliasing that the
+       footprint filter misses. */
+    const CONTOUR_3D_SS = 1
     const CONTOUR_GL_VERT = [
       'attribute vec2 a_pos;',
       'varying vec2 v_uv;',
@@ -2789,7 +2795,16 @@ function apply(ctx) {
       '  gl_Position = vec4(a_pos, 0.0, 1.0);',
       '}',
     ].join('\n')
-    const CONTOUR_GL_FRAG = [
+    /* Two fragment shaders, identical except for the sampling. With
+       OES_standard_derivatives the shader measures its own pixel footprint and
+       averages four taps across it; without the extension (it is still an extension,
+       not core in WebGL1) the single tap stays, which is what shipped before.
+       `derivatives` picks the source; mount compiles the AA one first and falls back,
+       so no device loses the feature. */
+    const contourGlFragSource = (derivatives) => (derivatives
+      ? ['#extension GL_OES_standard_derivatives : enable', '#define CONTOUR_AA 1']
+      : []
+    ).concat([
       /* highp, not mediump: the shader's coordinates are in SHEET PIXELS (thousands),
          and a 10-bit mantissa quantises the sample position into ~4px steps -- which
          renders contour lines as staircases. Measured on SwiftShader, and the guard
@@ -2809,6 +2824,15 @@ function apply(ctx) {
       'uniform float u_ref;',
       'uniform float u_rise;',
       'varying vec2 v_uv;',
+      /* One sheet tap, already PREMULTIPLIED. The context is premultipliedAlpha and
+         the texture holds straight alpha, so each tap is converted before it can be
+         added to another one -- averaging straight-alpha colour would bias the hue
+         wherever the strokes are thin. (Writing it through unpremultiplied was the
+         "too bright, too yellow" defect: (253,253,189) vs (220,215,160).) */
+      'vec4 contourSample(vec2 uv) {',
+      '  vec4 s = texture2D(u_sheet, fract(uv));',
+      '  return vec4(s.rgb * s.a, s.a);',
+      '}',
       'void main() {',
       /* v_uv is bottom-up (clip space), the sheet is top-down. */
       '  vec2 px = vec2(v_uv.x, 1.0 - v_uv.y) * u_viewSize;',
@@ -2820,16 +2844,34 @@ function apply(ctx) {
       /* Invert the camera: height sets the magnification, cam only translates. The
          translation is INSIDE the period, which is what keeps the wrap seamless. */
       '  vec2 t = vec2((px.x - u_center.x) / s, (px.y - u_center.y + lift) / s) + u_cam;',
-      /* PREMULTIPLY. The context is created with premultipliedAlpha: true (the
-         default), and the compositor blends what we write as premultiplied colour.
-         The texture holds STRAIGHT alpha (texImage2D from a canvas unpremultiplies),
-         so writing it straight through drew every stroke at full strength: measured
-         (253,253,189) against the flat path's (220,215,160) on the same terrain.
-         Scaling rgb by a reproduces exactly what the 2D canvas path stores. */
-      '  vec4 texel = texture2D(u_sheet, fract(t / u_sheetSize));',
-      '  gl_FragColor = vec4(texel.rgb * texel.a, texel.a);',
+      '  vec2 uv = t / u_sheetSize;',
+      /* MOIRE. The height field's displacement makes the sheet's own sampling rate
+         vary per pixel: where it compresses, one screen pixel covers less than a
+         texel and a 1-2px stroke gets point-sampled -- that is the beating, wavy
+         interference in dense areas. Ask the GPU for the footprint actually covered
+         (dFdx/dFdy of uv, in texels) and, past one texel, average four taps spread
+         across it: a local box filter that fades coverage instead of aliasing it.
+         Below a texel it is plain magnification, where the single tap is exact and
+         blurring would only cost sharpness. */
+      '#ifdef CONTOUR_AA',
+      '  vec2 fdx = dFdx(uv) * u_sheetSize;',
+      '  vec2 fdy = dFdy(uv) * u_sheetSize;',
+      '  float foot = max(length(fdx), length(fdy));',
+      '  if (foot > 1.0) {',
+      '    vec2 o = vec2(min(foot, 3.0) * 0.35) / u_sheetSize;',
+      '    vec4 acc = contourSample(uv + vec2( o.x,  o.y));',
+      '    acc += contourSample(uv + vec2(-o.x,  o.y));',
+      '    acc += contourSample(uv + vec2( o.x, -o.y));',
+      '    acc += contourSample(uv + vec2(-o.x, -o.y));',
+      '    gl_FragColor = acc * 0.25;',
+      '  } else {',
+      '    gl_FragColor = contourSample(uv);',
+      '  }',
+      '#else',
+      '  gl_FragColor = contourSample(uv);',
+      '#endif',
       '}',
-    ].join('\n')
+    ]).join('\n')
 
     /* The projection above, as plain arithmetic: the tests check the geometry
        without a GPU, and the shader is the same four lines. `cam` is the scroll
@@ -2868,6 +2910,8 @@ function apply(ctx) {
 
     let contourGl = null
     let contourGlWhy = ''
+    /* Whether the live shader carries the footprint filter (diagnostics only). */
+    let contourAa = false
     let contourGlChecked = false
     /* Whether the current verdict belongs to the request in force right now (3D).
        Cleared on every exit from 3D, so re-entering always re-probes. */
@@ -3004,7 +3048,13 @@ function apply(ctx) {
         return false
       }
       const vs = contourGlCompile(gl, gl.VERTEX_SHADER, CONTOUR_GL_VERT)
-      const fs = contourGlCompile(gl, gl.FRAGMENT_SHADER, CONTOUR_GL_FRAG)
+      /* The footprint filter needs one extension. Try it, keep it only if it
+         compiles, and record the outcome for the diagnostics line. */
+      let deriv = false
+      try { deriv = !!gl.getExtension('OES_standard_derivatives') } catch (e) { deriv = false }
+      let fs = deriv ? contourGlCompile(gl, gl.FRAGMENT_SHADER, contourGlFragSource(true)) : null
+      contourAa = fs !== null
+      if (fs === null) fs = contourGlCompile(gl, gl.FRAGMENT_SHADER, contourGlFragSource(false))
       const prog = vs && fs ? gl.createProgram() : null
       if (!prog) {
         if (cv.parentNode) cv.parentNode.removeChild(cv)
@@ -3162,8 +3212,16 @@ function apply(ctx) {
       gl.bindTexture(gl.TEXTURE_2D, st.height)
       gl.uniform1i(st.uHeight, 1)
       gl.uniform2f(st.uSheetSize, tw, th)
-      gl.uniform2f(st.uViewSize, wDev, hDev)
-      gl.uniform2f(st.uCenter, wDev * 0.5, hDev * 0.5)
+      /* LOGICAL device pixels, not the raster size. The raster is CONTOUR_3D_SS
+         times larger so the sheet is supersampled; feeding the raster size in here
+         would magnify the terrain by the same factor (measured: SS 1.0 -> 2.5 packed
+         the identical terrain 2.5x denser, and at 1.5 it was already 1.5x denser than
+         the flat view). Keeping the projection in device px makes SS transparent:
+         same picture, more samples. */
+      const vW = Math.max(1, Math.round(contourView.w * dpr))
+      const vH = Math.max(1, Math.round(contourView.h * dpr))
+      gl.uniform2f(st.uViewSize, vW, vH)
+      gl.uniform2f(st.uCenter, vW * 0.5, vH * 0.5)
       gl.uniform2f(st.uCam, sx, sy)
       gl.uniform1f(st.uDepth, CONTOUR_3D_DEPTH)
       gl.uniform1f(st.uRef, CONTOUR_3D_REF)
