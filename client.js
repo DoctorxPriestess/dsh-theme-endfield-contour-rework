@@ -1201,6 +1201,10 @@ function apply(ctx) {
        twice inside one frame, which reads as a tiling pattern rather than as a
        moving landscape. If the budget cannot even afford this, the layer keeps the
        old per-frame blit (one texture, no surface) rather than a repeating one. */
+    /* Above this many device pixels the scroll surface is not worth its one-off
+       raster: fall back to the per-frame blit, which is cheap (measured p95
+       0.002ms). Keeps a maximise from allocating and filling a huge canvas. */
+    const CONTOUR_SURFACE_MAX_PX = 120e6
     const CONTOUR_SCROLL_MIN_MULT = 1.05
     /* Terrain shape. BASE_CELL is the approximate CSS-px size of the largest
        noise cell (hills land a few hundred px across, like a real topo map);
@@ -2086,6 +2090,12 @@ function apply(ctx) {
     let contourResizeTimer = null
     let contourResizePending = false
     let contourScrollPaused = false
+    /* True while the window is being resized. The movement stops for the duration: a
+       resize with the compositor surface off falls back to the per-frame blit, and at
+       a maximised HiDPI viewport that is ~59MB of canvas upload per frame -- the sheet
+       is static during a drag anyway, so there is nothing to move. Cleared (and the
+       loop restarted) by the trailing resize timer. */
+    let contourResizing = false
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -2131,6 +2141,7 @@ function apply(ctx) {
       && !prefersReducedMotion()
       && !contourLoaderActive
       && !contourScrollPaused
+      && !contourResizing
 
     /* Deterministic PRNG (mulberry32), used with a PER-PAGE-LOAD seed.
        Determinism is required WITHIN one load: the field is rebuilt on real
@@ -3501,6 +3512,14 @@ function apply(ctx) {
       const th = contourTex.cv.height
       const wDev = Math.max(1, Math.round(contourView.w * dpr)) + tw
       const hDev = Math.max(1, Math.round(contourView.h * dpr)) + th
+      /* A surface this big costs more to allocate and fill than the per-frame blit it
+         replaces (measured: 48M device px here, and the paint is a one-off raster of
+         the whole thing). The MEMORY budget already allowed it; this is the time
+         budget. */
+      if (wDev * hDev > CONTOUR_SURFACE_MAX_PX) {
+        contourSurfaceOn = false
+        return
+      }
       if (cv.width !== wDev || cv.height !== hDev) {
         cv.width = wDev
         cv.height = hDev
@@ -3647,13 +3666,16 @@ function apply(ctx) {
          immediate (the next blit repaints it from the existing texture, so the
          resize shows no flash). */
       /* The surface path sizes itself in contourPaintSurface (it needs the texture
-         period); only the fallback's viewport canvas is resized here. A GREW
-         viewport needs a bigger surface, though, and the rebuild is debounced, so
-         repaint immediately when the surface no longer covers the frame. */
+         period); only the fallback's viewport canvas is resized here. A grown
+         viewport would need a bigger surface, but repainting it here ran on EVERY
+         resize event (48M device px reallocated and refilled per step of a drag).
+         Instead drop the surface for now: the cheap viewport-sized blit keeps the
+         picture correct, and the debounced rebuild above restores the compositor path
+         once, when the resize has stopped. */
       if (contourSurfaceOn && contourTex !== null && contourLineCv !== null) {
         const needW = Math.round(w * dpr) + contourTex.cv.width
         const needH = Math.round(h * dpr) + contourTex.cv.height
-        if (contourLineCv.width < needW || contourLineCv.height < needH) contourPaintSurface()
+        if (contourLineCv.width < needW || contourLineCv.height < needH) contourSurfaceOn = false
       }
       if (contourLineCv !== null && !contourSurfaceOn) {
         const bw = Math.max(1, Math.round(w * dpr))
@@ -3765,13 +3787,30 @@ function apply(ctx) {
        period tracks the viewport. Debounced so a drag-resize does one rebuild,
        not one per pixel. */
     const contourScheduleRebuildCheck = () => {
-      if (contourResizeTimer !== null) return
       if (typeof setTimeout !== 'function') return
+      /* TRAILING debounce: a maximize fires resize on every animation frame, so a
+         timer armed on the first event (what this used to do) runs the full rebuild
+         mid-animation -- measured as seconds of freeze while the window was still
+         moving. Rescheduling on every event means it runs once, after the user stops. */
+      if (contourResizeTimer !== null) clearTimeout(contourResizeTimer)
       contourResizeTimer = setTimeout(() => {
         contourResizeTimer = null
+        /* The drag is over: resume the movement (contourApplySwitches restarts the
+           loop, whose gate reads contourResizing). Set before the rebuild so the very
+           next frame after it moves instead of waiting for another event. */
+        contourResizing = false
+        contourSwitchSig = ''
+        contourApplySwitches()
         if (contourWrap === null || contourView === null || contourTex === null) return
         const t = contourTargetTexture(contourView.w, contourView.h, contourView.dpr)
-        if (t.twDev === contourTex.cv.width && t.thDev === contourTex.cv.height) return
+        /* GROWTH ONLY. A smaller viewport is already covered by the existing sheet
+           (it tiles), so rebuilding there would spend the same hundreds of ms to
+           produce a smaller texture, re-roll the landscape and reallocate memory. */
+        if (t.twDev <= contourTex.cv.width && t.thDev <= contourTex.cv.height) {
+          contourPaintSurface()
+          contourBlit()
+          return
+        }
         contourBuildTexture(contourView.w, contourView.h)
         contourBlit()
       }, CONTOUR_RESIZE_DEBOUNCE)
@@ -3806,6 +3845,7 @@ function apply(ctx) {
       contourView = null
       contourResizePending = false
       contourScrollPaused = false
+      contourResizing = false
       contourOffsetX = 0
       contourOffsetY = 0
       // Nothing is drawn any more, so the next mount must re-apply the switch rather
@@ -3933,6 +3973,12 @@ function apply(ctx) {
               /* The existing texture already tiles any viewport (it wraps), so
                  the new size shows instantly with zero regeneration work. */
               if (contourSizeTo(contourHost)) {
+                /* Pause the movement for the duration of the drag: with the surface
+                   dropped (see contourSizeTo) a moving sheet costs a viewport-sized
+                   canvas upload per frame, and nothing needs to move while the window
+                   is being dragged anyway. contourScheduleRebuildCheck's trailing
+                   timer clears it and restarts the loop. */
+                contourResizing = true
                 contourBlit()
                 // Regenerate only if the quantised target size changed.
                 contourScheduleRebuildCheck()

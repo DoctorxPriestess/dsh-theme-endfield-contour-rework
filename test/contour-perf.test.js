@@ -108,7 +108,7 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_MIN_RING_BOX', 'CONTOUR_LEVEL_MARGIN', 'CONTOUR_GRAD_X',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
-  'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT',
+  'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT', 'CONTOUR_SURFACE_MAX_PX',
   'CONTOUR_SCROLL_AREA', 'CONTOUR_SCROLL_DIM', 'CONTOUR_3D_REF', 'CONTOUR_3D_DEPTH',
   'CONTOUR_3D_RISE', 'CONTOUR_SOFT_GL', 'CONTOUR_VIEW_KEY',
   'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
@@ -169,7 +169,7 @@ let contourSurfaceOn=false
 let contourOffsetX=0, contourOffsetY=0, contourDpr=1, contourSpeedPx=48
 let contourVelX=0, contourVelY=-1, contourView=null, contourWrap=null
 let contourRaf=null, contourLastT=-1, contourResizeTimer=null
-let contourLoaderActive=false, contourScrollPaused=false
+let contourLoaderActive=false, contourScrollPaused=false, contourResizing=false, contourSwitchSig=''
 /* The preference KEY constants are derived from the namespace (single source of truth:
    a rename must not leave 14 literals behind), so the harness must define it before
    them — otherwise grabbing e.g. CONTOUR_ANIM_KEY throws "PREFS_NS is not defined". */

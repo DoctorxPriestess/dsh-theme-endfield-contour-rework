@@ -363,7 +363,75 @@ async function main() {
       !!linesFlat && linesFlat.width>1000 && linesFlat.height>500,
       linesFlat?(linesFlat.width+'x'+linesFlat.height):'no canvas')
 
-    // ---------- 8. teardown ----------
+    // ---------- 8. window resize / maximise must not rebuild per event ----------
+    /* The live report was "switching or maximising the window freezes for several
+       seconds". Two things made that: the scroll surface was reallocated and
+       refilled on EVERY resize event (48M device px at this size), and the rebuild
+       timer was armed on the first event, so the full regenerate ran while the
+       window was still moving. This asserts the shape of the fix, not a stopwatch
+       (the harness runs on a virtual clock): during a burst of resizes the surface is
+       NOT repainted and the movement pauses; after the debounce the sheet is painted
+       and moving again. The layer can be remounted during the burst, so every probe
+       here re-queries the live canvas. */
+    {
+      const live=()=>document.querySelector('[data-endfield-contour-lines]')
+      const liveProbe=()=>{
+        const c=live()
+        if(!c) return 'none'
+        const r=c.getBoundingClientRect()
+        const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data
+        let h=0; for(let i=3;i<d.length;i+=4096) h=(h*31+d[i])|0
+        return Math.round(r.left*100)+'|'+Math.round(r.top*100)+'|'+getComputedStyle(c).transform+'#'+h
+      }
+      /* One resize first, so the pause has engaged before the measured window --
+         otherwise the frame that was already scheduled still moves the sheet and the
+         comparison measures the wrong thing. */
+      {
+        const r=frame.getBoundingClientRect()
+        frame.style.width=Math.round(r.width+40)+'px'
+        await sleep(100)
+      }
+      const dragA=liveProbe()
+      for (let i=0;i<3;i++) {
+        const r=frame.getBoundingClientRect()
+        frame.style.width=Math.round(r.width+40)+'px'
+        await sleep(70)
+      }
+      const dragB=liveProbe()
+      /* The surface is dropped during a drag, so what must NOT happen is a
+         viewport+period canvas (16M device px here) being allocated and filled on
+         every event. Compare against the viewport, not against the previous size:
+         dropping to the viewport-sized fallback is the fix. */
+      const cNow=live()
+      const fr=frame.getBoundingClientRect()
+      const dprNow=window.devicePixelRatio||1
+      const limit=fr.width*dprNow*fr.height*dprNow*1.35
+      R('resize drag: no viewport+period surface is (re)painted per event',
+        !!cNow && cNow.width*cNow.height<=limit,
+        cNow?(cNow.width+'x'+cNow.height+' vs limit '+Math.round(limit)):'no canvas')
+      /* Compare the TRANSFORM only: a per-event blit legitimately repaints pixels,
+         the pause is about the movement stopping. */
+      const tf=()=>{const c=live(); return c?getComputedStyle(c).transform:'none'}
+      const tA=tf()
+      await sleep(150)
+      const tB=tf()
+      R('resize drag: movement pauses while the window moves', tA===tB, tA+' vs '+tB)
+      await sleep(900)
+      /* After the debounce the visible canvas must cover the enlarged frame again
+         (a surface it can afford, or the viewport-sized fallback): during the drag it
+         was allowed to lag. */
+      const cEnd=live()
+      const frEnd=frame.getBoundingClientRect()
+      const dprEnd=window.devicePixelRatio||1
+      R('resize done: the sheet covers the enlarged viewport',
+        !!cEnd && cEnd.width>=Math.round(frEnd.width*dprEnd)-2 && cEnd.height>=Math.round(frEnd.height*dprEnd)-2,
+        cEnd?(cEnd.width+'x'+cEnd.height+' for '+Math.round(frEnd.width*dprEnd)+'x'+Math.round(frEnd.height*dprEnd)):'no canvas')
+      R('resize done: sheet still painted',
+        (()=>{const c=live(); return !!c && px(c).opaque>3000})(),
+        (()=>{const c=live(); return c?('opaquePx='+px(c).opaque):'no canvas'})())
+    }
+
+    // ---------- 9. teardown ----------
     if(typeof window.__dispose__==='function') window.__dispose__()
     await sleep(150)
     R('teardown: layer removed', document.querySelectorAll('[data-endfield-contour]').length===0)
