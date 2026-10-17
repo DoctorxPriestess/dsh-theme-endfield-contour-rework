@@ -109,6 +109,7 @@ const ONE = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES',
   'CONTOUR_GRAD_Y', 'CONTOUR_KEEP_LEN', 'CONTOUR_KEEP_RING',
   'CONTOUR_TEX_MULT', 'CONTOUR_TEX_MAX_AREA', 'CONTOUR_TEX_MAX_DIM',
   'CONTOUR_TEX_QUANT', 'CONTOUR_MEM_BUDGET', 'CONTOUR_SCROLL_MIN_MULT',
+  'CONTOUR_SCROLL_AREA', 'CONTOUR_SCROLL_DIM',
   'CONTOUR_RESIZE_DEBOUNCE', 'CONTOUR_ANIM_KEY',
   'CONTOUR_ROUGHNESS_DEFAULT', 'CONTOUR_ROUGHNESS_KEY',
   'CONTOUR_TERRACE_STEPS_BASE', 'CONTOUR_TERRACE_STEPS_SPAN', 'CONTOUR_TERRACE_SOFT',
@@ -230,7 +231,11 @@ function snapshot() {
   return {
     counts: Object.assign({}, counts),
     texture: contourTex
-      ? { wCss: contourTex.wCss, hCss: contourTex.hCss, wDev: contourTex.cv.width, hDev: contourTex.cv.height }
+      ? {
+        wCss: contourTex.wCss, hCss: contourTex.hCss,
+        wDev: contourTex.cv.width, hDev: contourTex.cv.height,
+        scroll: contourTex.scroll === true,
+      }
       : null,
     grid: contourField ? { cols: contourField.cols, rows: contourField.rows } : null,
     paths: contourPaths.length,
@@ -257,6 +262,8 @@ return {
   paintSurface() { return contourPaintSurface() },
   surfaceOn() { return contourSurfaceOn },
   memBudget() { return CONTOUR_MEM_BUDGET },
+  scrollDim() { return CONTOUR_SCROLL_DIM },
+  scrollArea() { return CONTOUR_SCROLL_AREA },
   transform() { return contourLineCv && contourLineCv.style ? contourLineCv.style.transform : null },
   surfaceSize() {
     return contourLineCv === null ? null : {
@@ -319,13 +326,22 @@ for (const [w, h, dpr] of SIZES) {
   if (s.counts.extract !== 3) fail(label + ': ' + s.counts.extract + ' extractions for 3 builds (expected 3)')
   if (s.counts.render !== 3) fail(label + ': ' + s.counts.render + ' texture renders for 3 builds (expected 3)')
   if (s.paths === 0) fail(label + ': the cache holds no contours')
-  // Texture caps: a device pixel per side, and the CSS-pixel area budget. Both are
-  // what keep a background layer from ballooning on a 4K HiDPI screen.
-  if (s.texture.wDev > 4096 || s.texture.hDev > 4096) {
-    fail(label + ': texture is ' + s.texture.wDev + 'x' + s.texture.hDev + ' device px, over the 4096 cap')
+  // Texture caps. Which pair applies depends on the play path: the scroll path
+  // paints once and only moves a surface afterwards, so it may spend a longer
+  // period; the blit fallback re-rasters the whole texture every frame and keeps
+  // the tighter pair. Asserting the wrong pair here would either pass a runaway
+  // texture or fail a legitimate one.
+  const dimCap = s.texture.scroll ? api.scrollDim() : 4096
+  const areaCap = s.texture.scroll ? api.scrollArea() : 8.3e6
+  if (s.texture.wDev > dimCap || s.texture.hDev > dimCap) {
+    fail(label + ': texture is ' + s.texture.wDev + 'x' + s.texture.hDev + ' device px, over the '
+      + dimCap + ' cap for the ' + (s.texture.scroll ? 'scroll' : 'blit') + ' path')
   }
   const area = s.texture.wCss * s.texture.hCss
-  if (!(area <= 8.3e6 * 1.05)) fail(label + ': texture area ' + Math.round(area) + ' css px^2 is over the 8.3e6 budget')
+  if (!(area <= areaCap * 1.05)) {
+    fail(label + ': texture area ' + Math.round(area) + ' css px^2 is over the '
+      + (areaCap / 1e6).toFixed(1) + 'e6 budget for the ' + (s.texture.scroll ? 'scroll' : 'blit') + ' path')
+  }
   // Frames: many blits, zero expensive work.
   api.reset()
   api.blankOps()

@@ -1166,8 +1166,16 @@ function apply(ctx) {
        GPUs. Targets are quantised to a 128px grid so that sub-page resizes (a 2px
        drag) do not regenerate the landscape at all. */
     const CONTOUR_TEX_MULT = 3
-    const CONTOUR_TEX_MAX_AREA = 8.3e6      // CSS px^2
-    const CONTOUR_TEX_MAX_DIM = 4096        // device px per side
+    const CONTOUR_TEX_MAX_AREA = 8.3e6      // CSS px^2  (blit fallback)
+    const CONTOUR_TEX_MAX_DIM = 4096        // device px per side (blit fallback)
+    /* The SCROLL path gets its own, looser ceilings: it paints the texture once
+       into a surface and only moves that surface afterwards, so a longer period
+       costs memory and no per-frame work. Measured at 1432x753@2x: 1.43x under the
+       fallback caps, 2.41x here (132MB -> 298MB of texture + surface). The fallback
+       keeps the tighter pair on purpose -- it re-rasters the whole texture every
+       frame, so growing it there buys nothing and costs twice. */
+    const CONTOUR_SCROLL_AREA = 12e6        // CSS px^2
+    const CONTOUR_SCROLL_DIM = 8192         // device px per side
     const CONTOUR_TEX_QUANT = 128           // CSS px
     /* Ceiling on the BACKING STORES this one effect may hold: the contour texture
        plus the scroll surface it is painted into (see contourPaintSurface). The
@@ -2705,51 +2713,56 @@ function apply(ctx) {
     /** Pure texture-size target for a viewport (quantised, capped), in CSS px
      *  and the device-px backing-store size it maps to at the current DPR. */
     const contourTargetTexture = (w, h, dpr) => {
-      const q = (v) => Math.max(CONTOUR_TEX_QUANT * 2,
-        Math.min(CONTOUR_TEX_MAX_DIM / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
-      /* Period multiplier. Two ceilings, and the tighter one wins:
-           texture area    m^2 * A <= CONTOUR_TEX_MAX_AREA  (per-side cap too)
-           layer memory    (m^2 + (1+m)^2) * unit <= CONTOUR_MEM_BUDGET
-         where unit is one viewport of device pixels in bytes. The memory form is
-         quadratic in m: m = (sqrt(8r - 4) - 2) / 4 with r = budget / unit.
-         Only the SCROLL case pays for the surface; when the budget cannot afford
-         a useful period, the sheet falls back to one texture and the old blit. */
+      const quant = (v, maxDim) => Math.max(CONTOUR_TEX_QUANT * 2,
+        Math.min(maxDim / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
+      /* Period multiplier. The scroll path is budgeted over BOTH backing stores
+         (texture m^2, surface (1+m)^2, in viewport-areas), which is quadratic in m:
+         m = (sqrt(8r - 4) - 2) / 4 with r = budget / one viewport of device pixels.
+         Falling short of a useful period is not compensated for -- the fallback
+         below takes over instead. */
       const unit = 4 * dpr * dpr * w * h
-      const mArea = Math.sqrt(CONTOUR_TEX_MAX_AREA / (w * h))
-      const mDim = CONTOUR_TEX_MAX_DIM / (Math.max(w, h) * dpr)
-      const mFull = Math.max(1, Math.min(CONTOUR_TEX_MULT, mArea, mDim))
       const r = CONTOUR_MEM_BUDGET / unit
-      const mScroll = r > 0.5 ? (Math.sqrt(8 * r - 4) - 2) / 4 : 0
-      let scroll = mScroll >= CONTOUR_SCROLL_MIN_MULT && mScroll >= 1
-      let twCss = 0
-      let thCss = 0
-      if (scroll) {
-        const m = Math.min(mFull, mScroll)
-        const minTw = q(1.02 * w)
-        const minTh = q(1.02 * h)
-        twCss = Math.max(minTw, q(m * w))
-        thCss = Math.max(minTh, q(m * h))
-        /* Quantising up can push the pair back over the budget, so step the period
+      const mBudget = r > 0.5 ? (Math.sqrt(8 * r - 4) - 2) / 4 : 0
+      if (mBudget >= CONTOUR_SCROLL_MIN_MULT) {
+        const mFull = Math.min(CONTOUR_TEX_MULT,
+          Math.sqrt(CONTOUR_SCROLL_AREA / (w * h)),
+          CONTOUR_SCROLL_DIM / (Math.max(w, h) * dpr))
+        const minTw = quant(1.02 * w, CONTOUR_SCROLL_DIM)
+        const minTh = quant(1.02 * h, CONTOUR_SCROLL_DIM)
+        const m = Math.min(mFull, mBudget)
+        let twCss = Math.max(minTw, quant(m * w, CONTOUR_SCROLL_DIM))
+        let thCss = Math.max(minTh, quant(m * h, CONTOUR_SCROLL_DIM))
+        /* Quantising up can push the pair back over a ceiling, so step the period
            down one notch at a time (bounded: a pathological viewport must not loop)
-           and give up on the surface path once the period stops being worth it. */
-        for (let guard = 0; guard < 64; guard++) {
-          const areaOk = twCss * thCss <= CONTOUR_TEX_MAX_AREA * 1.02
+           and give up on the scroll path once the period stops being worth it. */
+        for (let guard = 0; guard < 128; guard++) {
+          const areaOk = twCss * thCss <= CONTOUR_SCROLL_AREA * 1.02
           const memOk = (w * h + (w + twCss) * (h + thCss)) * 4 * dpr * dpr <= CONTOUR_MEM_BUDGET * 1.02
           if (areaOk && memOk) break
           if (twCss <= minTw && thCss <= minTh) break
           twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
           thCss = Math.max(minTh, thCss - CONTOUR_TEX_QUANT)
         }
-        if (!(twCss > w * 1.02 && thCss > h * 1.02)) scroll = false
+        /* A period at or below the viewport would show the same feature twice in
+           one frame -- that is a tiling pattern, not a moving landscape. */
+        if (twCss > w * 1.02 && thCss > h * 1.02) {
+          return {
+            twCss, thCss,
+            twDev: Math.round(twCss * dpr), thDev: Math.round(thCss * dpr),
+            scroll: true,
+          }
+        }
       }
-      if (!scroll) {
-        twCss = Math.max(q(w * 1.02), q(mFull * w))
-        thCss = Math.max(q(h * 1.02), q(mFull * h))
-      }
+      /* FALLBACK: one texture, re-blitted every frame, so keep it small. */
+      const mFull = Math.max(1, Math.min(CONTOUR_TEX_MULT,
+        Math.sqrt(CONTOUR_TEX_MAX_AREA / (w * h)),
+        CONTOUR_TEX_MAX_DIM / (Math.max(w, h) * dpr)))
+      const twCss = Math.max(quant(w * 1.02, CONTOUR_TEX_MAX_DIM), quant(mFull * w, CONTOUR_TEX_MAX_DIM))
+      const thCss = Math.max(quant(h * 1.02, CONTOUR_TEX_MAX_DIM), quant(mFull * h, CONTOUR_TEX_MAX_DIM))
       return {
         twCss, thCss,
         twDev: Math.round(twCss * dpr), thDev: Math.round(thCss * dpr),
-        scroll,
+        scroll: false,
       }
     }
 
