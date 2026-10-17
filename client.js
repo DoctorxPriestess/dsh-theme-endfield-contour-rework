@@ -6499,9 +6499,12 @@ function apply(ctx) {
                   R.createElement('span', { style: hintStyle },
                     /* Say so when hardware acceleration is missing: picking 视差 on a
                        software rasteriser keeps the flat sheet, and that must not look
-                       like a broken switch. */
+                       like a broken switch. The machine reason is appended verbatim --
+                       "renderer not queryable" and "software renderer: ..." need
+                       different fixes, and without it the only symptom is a flat
+                       background with no explanation. */
                     (contourView === 1 && contourGlChecked && contourGl === null)
-                      ? t('contourViewHintNoGL')
+                      ? t('contourViewHintNoGL') + (contourGlWhy ? ' (' + contourGlWhy + ')' : '')
                       : t('contourViewHint')
                   )
                 ),
