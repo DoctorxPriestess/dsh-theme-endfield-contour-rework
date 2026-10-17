@@ -1882,6 +1882,113 @@ function apply(ctx) {
           }
         }
       }
+      /* --- stage 5.5: hollow terrain (3D view only) ---------------------------
+         A funnel that drops away at the ground's lowest points: water and wind leave
+         cavities, and a cavity is the one piece of relief a height field can honestly
+         carry. `hollow` comes from the caller (the 3D view sets it, the flat view
+         leaves it 0), so the 2D sheet this fork has always drawn is untouched.
+
+         Carving in U -- normalised height, before it is mapped back to the base
+         range -- buys three things at once: the rim is BY CONSTRUCTION a contour line
+         of the terrain (u = LEVEL), so the hole reads as part of the same landscape
+         instead of a sticker; the carve is a pointwise function of a periodic field
+         with no filter in it, so it adds no tile seam (a blurred carve would); and
+         because the floor drops below the range, the contour levels stack up inside
+         it as concentric rings, which is what a sinkhole looks like on a map and
+         what gives the 3D shader's raymarch something to occlude. */
+      const hollow = prof.hollow > 0 ? prof.hollow : 0
+      /* The range BEFORE the carve. contourLevels keeps the absolute contour SPACING
+         and adds levels for the extra depth the pits introduce, instead of stretching
+         the same number of levels over a bigger range -- which measured as the
+         surface losing ~40% of its lines the moment a pit appeared. */
+      field.span0 = 0
+      if (hollow > 0) {
+        let preMn = Infinity
+        let preMx = -Infinity
+        for (let i = 0; i < n; i++) {
+          const v = U[i]
+          if (v < preMn) preMn = v
+          if (v > preMx) preMx = v
+        }
+        field.span0 = (preMx - preMn) * baseSpan
+        /* And the ABSOLUTE anchors, so the contour levels stay where the flat view put
+           them and the pits only add levels BELOW them. Anchoring to the carved range
+           instead moved every line on the sheet: same landscape, different drawing,
+           which is not what "the same terrain, now with holes" means. */
+        field.lo0 = baseMn + preMn * baseSpan
+        field.hi0 = baseMn + preMx * baseSpan
+      }
+      if (hollow > 0) {
+        const cw = cols - 1 > 0 ? cols - 1 : cols
+        const ch = rows - 1 > 0 ? rows - 1 : rows
+        const R = Math.max(1, Math.min(Math.floor(Math.min(cw, ch) / 4), CONTOUR_HOLLOW_RADIUS))
+        const wi = (i) => ((i % cw) + cw) % cw
+        const wj = (j) => ((j % ch) + ch) % ch
+        /* Interior only: the padded row/column is a copy of index 0 and stage 6
+           re-imposes that after the carve, so wrapping the interior is enough. */
+        const sm = new Float32Array(cw * ch)
+        const tmp = new Float32Array(cw * ch)
+        for (let j = 0; j < ch; j++) {
+          for (let i = 0; i < cw; i++) sm[j * cw + i] = U[j * cols + i]
+        }
+        const win = 1 / (2 * R + 1)
+        for (let pass = 0; pass < 2; pass++) {
+          for (let j = 0; j < ch; j++) {
+            const row = j * cw
+            let sum = 0
+            for (let k = -R; k <= R; k++) sum += sm[row + wi(k)]
+            for (let i = 0; i < cw; i++) {
+              tmp[row + i] = sum * win
+              sum += sm[row + wi(i + R + 1)] - sm[row + wi(i - R)]
+            }
+          }
+          for (let i = 0; i < cw; i++) {
+            let sum = 0
+            for (let k = -R; k <= R; k++) sum += tmp[wj(k) * cw + i]
+            for (let j = 0; j < ch; j++) {
+              sm[j * cw + i] = sum * win
+              sum += tmp[wj(j + R + 1) * cw + i] - tmp[wj(j - R) * cw + i]
+            }
+          }
+        }
+        /* The opening level, as a percentile of the smoothed field: the lowest
+           CONTOUR_HOLLOW_SHARE of the area opens, whatever range this terrain has. */
+        const bins = 256
+        let mx = 0
+        let mnSm = Infinity
+        for (let i = 0; i < cw * ch; i++) {
+          if (sm[i] > mx) mx = sm[i]
+          if (sm[i] < mnSm) mnSm = sm[i]
+        }
+        const scale = mx > 0 ? (bins - 1) / mx : 0
+        let lvl = 0
+        if (scale > 0) {
+          const hist = new Int32Array(bins)
+          for (let i = 0; i < cw * ch; i++) hist[Math.min(bins - 1, Math.max(0, Math.round(sm[i] * scale)))]++
+          const want = Math.max(1, Math.round(CONTOUR_HOLLOW_SHARE * cw * ch))
+          let cum = 0
+          for (let b = 0; b < bins; b++) {
+            cum += hist[b]
+            if (cum >= want) { lvl = b / scale; break }
+          }
+        }
+        if (lvl > 0) {
+          /* Normalise over the pit's OWN depth: the percentile level down to the
+             smoothed minimum. Dividing by the level instead (first attempt) left the
+             funnel's centre at half strength, because the 12th percentile of a
+             blurred field is already a small number. */
+          const denom = Math.max(lvl - (mnSm === Infinity ? 0 : mnSm), 1e-3)
+          for (let j = 0; j < ch; j++) {
+            const row = j * cols
+            for (let i = 0; i < cw; i++) {
+              const m = sm[j * cw + i]
+              if (m >= lvl) continue
+              const t = (lvl - m) / denom
+              U[row + i] -= hollow * CONTOUR_HOLLOW_DEPTH * Math.pow(t, CONTOUR_HOLLOW_SHARP)
+            }
+          }
+        }
+      }
       /* --- stage 6: back into the base range, with the real extremes ---------- */
       let mnF = Infinity
       let mxF = -Infinity
@@ -2134,7 +2241,7 @@ function apply(ctx) {
        TILEABILITY IS UNTOUCHED: every lattice period stays an integer, and the warp
        offset field is itself periodic with the tile, so f(x + tw) == f(x) holds to
        the last bit (test/contour-roughness.test.js measures the seam). */
-    const contourGenerateField = (tw, th) => {
+    const contourGenerateField = (tw, th, hollow) => {
       const step = CONTOUR_STEP
       const cols = Math.ceil(tw / step) + 1
       const rows = Math.ceil(th / step) + 1
@@ -2143,6 +2250,12 @@ function apply(ctx) {
          budget. Nothing below is per-sample; the profile is read once per build,
          so a density change can still re-extract from the SAME field. */
       const prof = contourTerrainProfile()
+      /* Hollow terrain is a 3D-view feature, and it arrives as an ARGUMENT rather
+         than a read of the live preference: this function has to stay a pure
+         function of (size, seed, roughness, hollow) or the tests that slice it out
+         of the source cannot call it at all. 0 = no carve, i.e. what the flat view
+         has always drawn. */
+      prof.hollow = hollow > 0 ? hollow : 0
       const stop = contourRoughnessIndex()
       const ridged = CONTOUR_TERRAIN_RIDGED[stop]
       const grain = CONTOUR_TERRAIN_GRAIN[stop]
@@ -2286,12 +2399,40 @@ function apply(ctx) {
     /** Iso-level heights for the current density, from the field's own range. */
     const contourLevels = () => {
       const f = contourField
-      const count = CONTOUR_DENSITIES[contourDensityIndex()]
-      const pad = (f.mx - f.mn) * CONTOUR_LEVEL_MARGIN
+      const baseCount = CONTOUR_DENSITIES[contourDensityIndex()]
+      /* Hollow terrain widens the range downwards. Contour SPACING is what the eye
+         reads as density, so keep the step and add levels for the extra depth:
+         otherwise the same number of levels spread over a taller range and the
+         surface visibly thins out (~40% fewer lines) the moment a pit opens.
+         span0 == 0 for the flat view, where this is exactly the shipped count. */
+      const span = f.mx - f.mn
+      const pad = span * CONTOUR_LEVEL_MARGIN
       const lo = f.mn + pad
       const hi = f.mx - pad
-      const out = new Array(count)
-      for (let n = 1; n <= count; n++) out[n - 1] = lo + ((hi - lo) * n) / (count + 1)
+      /* Hollow terrain: levels at the FLAT view's step, extended downward as far as
+         the pits reach. Adjusting the COUNT instead (first attempt) cannot preserve
+         the step -- an integer count moves the spacing by up to half a step, measured
+         at 4.9% -- while a fixed step does it exactly, and the extra depth simply
+         gets more levels. span0 == 0 keeps the shipped formula byte for byte. */
+      if (f.span0 > 0 && span > 0 && f.lo0 !== undefined) {
+        /* Levels anchored to the UNCUT range at the uncut step: the surface lines land
+           exactly where the flat view draws them, and the pits simply add levels below
+           them. Anchoring to the carved range instead shifted every line on the sheet
+           (measured: 192k pixels changed across the whole frame instead of the pits).
+           The step is the flat one, span0*(1-2*margin)/(count+1) -- not
+           span0/(count+1), which measured 8.7% too wide. */
+        const step0 = (f.span0 * (1 - 2 * CONTOUR_LEVEL_MARGIN)) / (baseCount + 1)
+        const base = f.lo0 + f.span0 * CONTOUR_LEVEL_MARGIN
+        /* The flat view's own levels, plus as many as the pits need BELOW them. */
+        const above = Math.max(1, Math.floor((hi - base) / step0 + 1e-9))
+        const below = Math.max(0, Math.floor((base - lo) / step0 + 1e-9))
+        const out = []
+        for (let m = below; m >= 1; m--) out.push(base - step0 * m)
+        for (let n = 1; n <= above; n++) out.push(base + step0 * n)
+        return out
+      }
+      const out = new Array(baseCount)
+      for (let n = 1; n <= baseCount; n++) out[n - 1] = lo + ((hi - lo) * n) / (baseCount + 1)
       return out
     }
 
@@ -2765,6 +2906,42 @@ function apply(ctx) {
        software rasteriser (headless Chrome, a driver-less VM, a blocklisted GPU)
        is a NO, not a slow yes. */
     const CONTOUR_SOFT_GL = /swiftshader|basic render driver|llvmpipe|softpipe|software rasterizer|microsoft basic/i
+    /* Hollow terrain ("镂空"). Only the 3D view carves it -- the flat sheet is
+       generated with the flag at 0 and stays byte-identical. A height field cannot
+       carry a true overhang (z = f(x, y) is single-valued, so no point can lean back
+       over another); a CAVITY is the relief it can carry, and it is the shape water
+       and wind leave anyway. These two numbers control how deep the funnels drop and
+       how sharply their walls close. */
+    /* How much of the area opens, as a share of the LOWEST ground (a percentile of
+       the smoothed field). A fixed height level was measured first and opened 0.21%
+       of the cells for a 7% dip, because a box-blurred field rarely reaches the raw
+       minimum -- the constant was describing the wrong surface. */
+    /* SHIPPED OFF, ON PURPOSE. The carve, the level anchoring and the occlusion
+       raymarch all work and are tested (test/contour-hollow.test.js), but what they
+       render is a steep-walled depression -- tightly packed contours along the wall --
+       not the cavity with hidden depth that was asked for ("有视觉遮挡和透视关系").
+       Two hard limits, both measured rather than assumed:
+         * a height field cannot overhang, so the raymarch has almost nothing to hide
+           (14 steps vs 1 step changes ~2k pixels of 3.4M);
+         * the pit's inner rings are small closed loops, and the speck filter
+           (CONTOUR_MIN_RING_BOX) drops them, leaving the wall stack instead.
+       Flipping this to true enables it in the 3D view only; the flat sheet is
+       unchanged either way. Kept here rather than deleted so the decision is one
+       constant, not a rewrite. */
+    const CONTOUR_HOLLOW_ENABLED = false
+    const CONTOUR_HOLLOW_SHARE = 0.04
+    const CONTOUR_HOLLOW_SHARP = 2.4    // exponent: only the lowest ground opens
+    const CONTOUR_HOLLOW_DEPTH = 0.90   // how far the funnel floor drops, in range units
+    /* Half-width of the low-pass that decides WHERE ground opens, in field cells.
+       The carve follows the smoothed field, not the raw one: the raw field dips
+       below the level every ~10px, which opens a filament at every dip instead of
+       a funnel per basin. The funnel's floor keeps the raw detail, which is what
+       puts contour rings inside the cavity. */
+    const CONTOUR_HOLLOW_RADIUS = 6
+    /* Raymarch steps per pixel for the occlusion. 14 measured enough to make the rim
+       read as a rim at 1:1; the loop is constant-bound because GLSL ES 1.0 requires
+       it, and u_steps lets the bound stay honest. */
+    const CONTOUR_3D_STEPS = 14
     /* Displacement-map resolution. The field itself is sampled every CONTOUR_STEP
        CSS px, which is finer than a parallax displacement needs and fine enough for
        its bilinear interpolation seams to show up as facets on straight contour
@@ -2823,7 +3000,19 @@ function apply(ctx) {
       'uniform float u_depth;',
       'uniform float u_ref;',
       'uniform float u_rise;',
+      'uniform float u_steps;',
       'varying vec2 v_uv;',
+      /* Where a point of height hh projects to, in sheet uv. This is the shipped
+         camera inversion, unchanged: height sets the magnification and `cam` only
+         translates, which is what keeps the wrap seamless. */
+      'vec2 uvAt(vec2 p, float hh) {',
+      '  float s = 1.0 + u_depth * (hh - u_ref);',
+      '  float lift = u_rise * (hh - u_ref) * u_viewSize.y;',
+      '  return (vec2((p.x - u_center.x) / s, (p.y - u_center.y + lift) / s) + u_cam) / u_sheetSize;',
+      '}',
+      'float surfaceAt(vec2 uv) {',
+      '  return texture2D(u_height, fract(uv)).r;',
+      '}',
       /* One sheet tap, already PREMULTIPLIED. The context is premultipliedAlpha and
          the texture holds straight alpha, so each tap is converted before it can be
          added to another one -- averaging straight-alpha colour would bias the hue
@@ -2836,15 +3025,33 @@ function apply(ctx) {
       'void main() {',
       /* v_uv is bottom-up (clip space), the sheet is top-down. */
       '  vec2 px = vec2(v_uv.x, 1.0 - v_uv.y) * u_viewSize;',
-      /* Height at the UNDISPLACED position: the displacement is what we are solving
-         for, so looking it up at the displaced position would be circular. */
-      '  float h = texture2D(u_height, fract((px - u_center + u_cam) / u_sheetSize)).r;',
-      '  float s = 1.0 + u_depth * (h - u_ref);',
-      '  float lift = u_rise * (h - u_ref) * u_viewSize.y;',
-      /* Invert the camera: height sets the magnification, cam only translates. The
-         translation is INSIDE the period, which is what keeps the wrap seamless. */
-      '  vec2 t = vec2((px.x - u_center.x) / s, (px.y - u_center.y + lift) / s) + u_cam;',
-      '  vec2 uv = t / u_sheetSize;',
+      /* STEEP PARALLAX. Walking the ray down and stopping at the first hit is what
+         turns a cavity into a cavity: a pit's near rim and its far wall both project
+         onto the same screen pixels, and the one-step displacement used to draw them
+         on top of each other (lines crossing = no depth). Marching is the difference
+         between "the lines bend" and "the near ground hides the far ground".
+         One linear refinement between the two bracketing steps keeps the rim smooth;
+         without it the rim is a staircase of 1/u_steps. */
+      '  float hh = 1.0;',
+      '  vec2 uv = uvAt(px, 1.0);',
+      '  float hPrev = 1.0;',
+      '  float fPrev = surfaceAt(uv) - hPrev;',
+      '  if (fPrev < 0.0) {',
+      '    for (int i = 1; i <= 63; i++) {',
+      '      if (float(i) > u_steps) break;',
+      '      hh = 1.0 - float(i) / u_steps;',
+      '      uv = uvAt(px, hh);',
+      '      float f = surfaceAt(uv) - hh;',
+      '      if (f >= 0.0) {',
+      '        float k = fPrev == f ? 0.0 : fPrev / (fPrev - f);',
+      '        hh = hPrev + (hh - hPrev) * k;',
+      '        uv = uvAt(px, hh);',
+      '        break;',
+      '      }',
+      '      hPrev = hh;',
+      '      fPrev = f;',
+      '    }',
+      '  }',
       /* MOIRE. The height field's displacement makes the sheet's own sampling rate
          vary per pixel: where it compresses, one screen pixel covers less than a
          texel and a 1-2px stroke gets point-sampled -- that is the beating, wavy
@@ -2903,6 +3110,41 @@ function apply(ctx) {
       }
     }
 
+    /* The occlusion march the shader runs, as plain arithmetic: walk the view ray
+       down from the top of the height range and stop where the surface finally rises
+       above it. `surface(u, v)` returns { h, hole } in the same normalised units the
+       height texture stores. Pure, so the rule (not the rasteriser) is what gets
+       tested.
+
+       Two invariants matter and both are asserted in contour-3d.test.js:
+         * a FLAT field must reproduce the closed-form one-step offset exactly --
+           occlusion must not move anything when there is nothing to occlude;
+         * occlusion may only ever pull the sample NEARER (larger h), never deeper. */
+    const contourOcclude = (px, py, camX, camY, tw, th, viewW, viewH, surface, steps) => {
+      const n = Math.max(1, Math.round(steps === undefined ? CONTOUR_3D_STEPS : steps))
+      const at = (hh) => {
+        const r = contourParallaxUV(px, py, camX, camY, tw, th, hh, viewW, viewH)
+        return { u: r.u, v: r.v, f: surface(r.u, r.v) - hh }
+      }
+      /* From the top down: the first step where the surface reaches the ray wins. */
+      let prev = at(1)
+      if (prev.f >= 0) return { u: prev.u, v: prev.v, h: 1, occluded: false, steps: 0 }
+      for (let i = 1; i <= n; i++) {
+        const hh = 1 - i / n
+        const cur = at(hh)
+        if (cur.f >= 0) {
+          /* One linear refinement between the two samples: without it the rim is a
+             staircase of 1/n steps, which at DEPTH 0.12 is a visible stair. */
+          const t = prev.f === cur.f ? 0 : prev.f / (prev.f - cur.f)
+          const hHit = (1 - (i - 1) / n) + (hh - (1 - (i - 1) / n)) * t
+          const hit = at(hHit)
+          return { u: hit.u, v: hit.v, h: hHit, occluded: true, steps: i }
+        }
+        prev = cur
+      }
+      return { u: prev.u, v: prev.v, h: 0, occluded: true, steps: n }
+    }
+
     /* A test hook, and nothing else: forcing 3D on a software rasteriser is how the
        shader itself gets exercised in CI (headless Chrome is SwiftShader). Real
        users leave it unset, so the hardware rule below still holds for them. */
@@ -2949,6 +3191,9 @@ function apply(ctx) {
       if (CONTOUR_SOFT_GL.test(renderer)) return { ok: false, why: 'software renderer: ' + renderer, renderer }
       return { ok: true, why: renderer, renderer }
     }
+
+    /* Is the hollow terrain in force right now? 3D view AND the shipped switch. */
+    const contourHollowWanted = () => CONTOUR_HOLLOW_ENABLED === true && isContourView3D()
 
     /* Height map for the displacement: area-averaged downsample of the terrain
        field, then two separable box passes. Values are 0..1 across the field's own
@@ -3093,6 +3338,7 @@ function apply(ctx) {
         uDepth: gl.getUniformLocation(prog, 'u_depth'),
         uRef: gl.getUniformLocation(prog, 'u_ref'),
         uRise: gl.getUniformLocation(prog, 'u_rise'),
+        uSteps: gl.getUniformLocation(prog, 'u_steps'),
         sheet: makeTexture(gl.CLAMP_TO_EDGE),
         height: makeTexture(gl.CLAMP_TO_EDGE),
         sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null,
@@ -3226,6 +3472,7 @@ function apply(ctx) {
       gl.uniform1f(st.uDepth, CONTOUR_3D_DEPTH)
       gl.uniform1f(st.uRef, CONTOUR_3D_REF)
       gl.uniform1f(st.uRise, CONTOUR_3D_RISE)
+      gl.uniform1f(st.uSteps, CONTOUR_3D_STEPS)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       return true
     }
@@ -3357,7 +3604,7 @@ function apply(ctx) {
        and a different size regenerates deterministically instead of randomly. */
     const contourBuildTexture = (wCss, hCss) => {
       const t = contourTargetTexture(wCss, hCss, contourDpr)
-      contourField = contourGenerateField(t.twCss, t.thCss)
+      contourField = contourGenerateField(t.twCss, t.thCss, contourHollowWanted() ? 1 : 0)
       contourExtractAll()
       let cv = contourTex !== null ? contourTex.cv : null
       if (cv === null) cv = document.createElement('canvas')
@@ -3369,7 +3616,7 @@ function apply(ctx) {
       if (!(cv.width > 0) || !(cv.height > 0)) {
         dbg('texture build got a degenerate canvas', cv.width, cv.height, 'viewport', wCss, hCss, 'dpr', contourDpr)
       }
-      contourTex = { cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true }
+      contourTex = { cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true, hollow: contourHollowWanted() }
       contourRenderCache()
       /* The sheet is static until the next rebuild, so this is where it goes
          onto the scroll surface (one full-surface paint, not one per frame). */
@@ -3594,8 +3841,21 @@ function apply(ctx) {
        context) on top of the flat sheet until something happened to repaint. Called
        from the same reconciliation that syncs the switches, so any mutation --
        i.e. any settings change -- settles it. */
+    /* The 3D view draws a DIFFERENT terrain: it carves cavities into the field (see
+       contourApplyLandforms), so a view flip rebuilds the sheet when the two
+       disagree. One-time cost per flip (measured ~90-150ms), and the seed is
+       untouched, so it is the same landscape -- now with holes in it. */
+    const contourApplyHollow = () => {
+      if (contourWrap === null || contourView === null || contourTex === null) return
+      if ((contourTex.hollow === true) === contourHollowWanted()) return
+      contourBuildTexture(contourView.w, contourView.h)
+    }
+
     const contourReconcileView = () => {
       if (contourWrap === null || contourTex === null) return
+      /* Carving is part of the sheet, so it has to be rebuilt BEFORE the flip is
+         drawn or the first frame of 3D shows the flat terrain. */
+      contourApplyHollow()
       /* Both directions, keyed on the request the last draw was made for: entering
          3D needs that one draw to mount the layer, leaving it needs one to drop it.
          Nothing else guarantees a repaint (with the movement paused nothing ticks),

@@ -200,6 +200,9 @@ const contourGlDraw = () => false
 const contourGlDispose = () => {}
 /* Read straight from the pref store, exactly as the real one does. */
 const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
+/* Hollow terrain is shipped off, so the harness says no without pulling in the rest
+   of the feature. */
+const contourHollowWanted = () => false
 ${body}
 ${gateDecls}
 const contourPerm = new Uint16Array(512)
