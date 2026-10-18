@@ -85,8 +85,9 @@ const NUM_NAMES = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES', 'CONT
   'CONTOUR_GRAIN_OCTAVES', 'CONTOUR_RIDGED_GAIN', 'CONTOUR_WARP_SHARE', 'CONTOUR_WARP_SCALE',
   'CONTOUR_LANDFORM_RIDGE', 'CONTOUR_LANDFORM_VALLEY', 'CONTOUR_BAND_GRAIN_X',
   'CONTOUR_BAND_GRAIN_Y', 'CONTOUR_CONTRAST_SCALE', 'CONTOUR_LEVEL_MARGIN',
-  'CONTOUR_HOLLOW_SHARE', 'CONTOUR_HOLLOW_SHARP', 'CONTOUR_HOLLOW_DEPTH', 'CONTOUR_HOLLOW_RADIUS',
-  'CONTOUR_HOLLOW_SHAPES', 'CONTOUR_HOLLOW_PILLAR_RISE', 'CONTOUR_HOLLOW_LIP_LIFT',
+  'CONTOUR_HOLLOW_SHARE', 'CONTOUR_HOLLOW_DEPTH', 'CONTOUR_HOLLOW_RADIUS',
+  'CONTOUR_KARST_ELONG', 'CONTOUR_KARST_LOBE', 'CONTOUR_KARST_LOBE2', 'CONTOUR_KARST_RIM',
+  'CONTOUR_KARST_MIN_R',
   'CONTOUR_HOLLOW_FEATHER',
   'CONTOUR_3D_REF', 'CONTOUR_3D_DEPTH', 'CONTOUR_3D_RISE', 'CONTOUR_3D_STEPS']
 const KIND_NAMES = ['CONTOUR_FEAT_NONE', 'CONTOUR_FEAT_PLATEAU', 'CONTOUR_FEAT_CLIFF',
@@ -210,63 +211,179 @@ else fail('carve depth out of range: ' + (100 * drop).toFixed(0) + '% of the fla
   else fail('carved area out of range: ' + pct.toFixed(1) + '%')
 }
 
-/* A3.5 THE OPENINGS HAVE THREE SHAPES, and the mask that reads them is BINARY.
-   Shipped kinds: 0 bowl, 1 donut (a remnant tower stands INSIDE the opening, above the
-   rim, so the mask counts it as ground -- a hole with a hole in it), 2 wedge (one side
-   drops further and the near rim is LIFTED, above the rim, outside the opening: that is
-   the only way a single-valued height field can occlude the far wall, by displacement
-   rather than geometry). Both raised parts are the cells the carve RAISED relative to
-   the flat field, which is what makes them measurable. */
+/* A3.5 KARST OUTLINES: no opening may be a circle, and none may contain an island.
+   The first implementation carved a cone per opening (every cave came out as a perfect
+   funnel) and the donut variant stood a remnant tower in the middle of one. Both were
+   rejected: a real doline's outline is set by the joint pattern -- lobed, stretched,
+   sometimes merged with its neighbour -- and nothing stands in the middle of it.
+
+   Measured here on the final height field: for every opening (a connected run of cells
+   below the opening level) the radius is sampled in 12 directions around its centroid;
+   an outline that is not a circle must show a max/min spread, and a pillar would show up
+   as a cell ABOVE the level surrounded by cells below it. */
 {
-  const shapes = hollow.holeShapes
-  const span = flatSpan
+  const aspects = hollow.holeAspect
+  const lvlH = hollow.holeLevel
   const cols = hollow.cols
   const rows = hollow.rows
-  let raised = 0
-  let lowered = 0
-  let tower = 0
-  let lip = 0
-  const raiseAt = new Uint8Array(cols * rows)
-  const lowerAt = new Uint8Array(cols * rows)
-  for (let i = 0; i < hollow.F.length; i++) {
-    const d = hollow.F[i] - flat.F[i]
-    if (d > span * 0.05) { raised++; raiseAt[i] = 1 }
-    else if (d < -span * 0.05) { lowered++; lowerAt[i] = 1 }
-  }
-  for (let j = 3; j < rows - 3; j++) {
-    for (let i = 3; i < cols - 3; i++) {
-      const k = j * cols + i
-      if (raiseAt[k] !== 1) continue
-      let around = 0
-      for (let dj = -4; dj <= 4; dj += 4) {
-        for (let di = -4; di <= 4; di += 4) {
-          if (di === 0 && dj === 0) continue
-          if (lowerAt[(j + dj) * cols + (i + di)] === 1) around++
+  const F = hollow.F
+  const below = new Uint8Array(cols * rows)
+  let belowN = 0
+  for (let i = 0; i < F.length; i++) if (F[i] < lvlH) { below[i] = 1; belowN++ }
+  /* Islands: a cell above the level ENCLOSED by one opening -- not simply a cell that
+     happens to sit in a cluster of pre-existing noise dips, which is why this is an
+     enclosure test inside each opening's own bounding box rather than a neighbour count.
+     (A raw 1-cell dip below the percentile level is ordinary terrain: the sheet draws
+     its ring and the speck filter decides what survives.) */
+  let islandMax = 0
+  /* Openings: 4-connected runs of below-level cells, interior only. */
+  const seen = new Uint8Array(cols * rows)
+  const stack = []
+  const roundness = []
+  for (let s = 0; s < cols * rows; s++) {
+    if (below[s] !== 1 || seen[s] === 1) continue
+    const cells = []
+    stack.length = 0
+    stack.push(s)
+    seen[s] = 1
+    while (stack.length > 0) {
+      const c = stack.pop()
+      cells.push(c)
+      const ci = c % cols
+      const cj = (c - ci) / cols
+      if (ci < 1 || ci >= cols - 1 || cj < 1 || cj >= rows - 1) continue
+      const nb = [c + 1, c - 1, c + cols, c - cols]
+      for (const nc of nb) {
+        if (below[nc] === 1 && seen[nc] === 0) { seen[nc] = 1; stack.push(nc) }
+      }
+    }
+    if (cells.length < 24) continue
+    let cx = 0
+    let cy = 0
+    for (const c of cells) { const ci = c % cols; cx += ci; cy += (c - ci) / cols }
+    cx /= cells.length
+    cy /= cells.length
+    const BY = 12
+    const sum = new Float64Array(BY)
+    const nBy = new Int32Array(BY)
+    for (const c of cells) {
+      const ci = c % cols
+      const cj = (c - ci) / cols
+      const dx = ci - cx
+      const dy = cj - cy
+      const a = Math.atan2(dy, dx)
+      const b = ((Math.floor((a + Math.PI) / (2 * Math.PI) * BY) % BY) + BY) % BY
+      sum[b] += Math.sqrt(dx * dx + dy * dy)
+      nBy[b]++
+    }
+    let lo = Infinity
+    let hi = 0
+    for (let b = 0; b < BY; b++) {
+      if (nBy[b] === 0) continue
+      const r = sum[b] / nBy[b]
+      if (r < lo) lo = r
+      if (r > hi) hi = r
+    }
+    if (lo > 0 && hi > 0) roundness.push(hi / lo)
+    /* Enclosure inside THIS opening: flood the above-level cells of its bounding box
+       from the border; whatever is left over is a pillar standing in the hole. */
+    let bi0 = cols
+    let bi1 = -1
+    let bj0 = rows
+    let bj1 = -1
+    for (const c of cells) {
+      const ci = c % cols
+      const cj = (c - ci) / cols
+      if (ci < bi0) bi0 = ci
+      if (ci > bi1) bi1 = ci
+      if (cj < bj0) bj0 = cj
+      if (cj > bj1) bj1 = cj
+    }
+    const bw = bi1 - bi0 + 1
+    const bh = bj1 - bj0 + 1
+    const out = new Uint8Array(bw * bh)
+    const q = []
+    for (let j = 0; j < bh; j++) {
+      for (let i = 0; i < bw; i++) {
+        const edge = i === 0 || j === 0 || i === bw - 1 || j === bh - 1
+        if (!edge) continue
+        if (F[(bj0 + j) * cols + (bi0 + i)] < lvlH) continue
+        out[j * bw + i] = 1
+        q.push(j * bw + i)
+      }
+    }
+    while (q.length > 0) {
+      const c = q.pop()
+      const ci = c % bw
+      const cj = (c - ci) / bw
+      const nb = [ci > 0 ? c - 1 : -1, ci < bw - 1 ? c + 1 : -1,
+        cj > 0 ? c - bw : -1, cj < bh - 1 ? c + bw : -1]
+      for (const nc of nb) {
+        if (nc < 0 || out[nc] === 1) continue
+        if (F[(bj0 + Math.floor(nc / bw)) * cols + (bi0 + (nc % bw))] < lvlH) continue
+        out[nc] = 1
+        q.push(nc)
+      }
+    }
+    /* Size the enclosed runs: a pillar would be dozens of cells, a diagonal pinch of
+       the noise field is one or two. Only a run of 4+ counts as an island. */
+    const marked = new Uint8Array(bw * bh)
+    let pit = 0
+    for (let c0 = 0; c0 < bw * bh; c0++) {
+      if (out[c0] === 1 || marked[c0] === 1) continue
+      if (F[(bj0 + Math.floor(c0 / bw)) * cols + (bi0 + (c0 % bw))] < lvlH) continue
+      let n = 0
+      q.length = 0
+      q.push(c0)
+      marked[c0] = 1
+      while (q.length > 0) {
+        const c = q.pop()
+        n++
+        const ci = c % bw
+        const cj = (c - ci) / bw
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            if (di === 0 && dj === 0) continue
+            const ni = ci + di
+            const nj = cj + dj
+            if (ni < 0 || nj < 0 || ni >= bw || nj >= bh) continue
+            const nc = nj * bw + ni
+            if (marked[nc] === 1 || out[nc] === 1) continue
+            if (F[(bj0 + nj) * cols + (bi0 + ni)] < lvlH) continue
+            marked[nc] = 1
+            q.push(nc)
+          }
         }
       }
-      if (around >= 5) tower++
-      else lip++
+      if (n > pit) pit = n
     }
+    if (pit > islandMax) islandMax = pit
   }
-  if (!Array.isArray(shapes) || shapes.length < 2) {
-    fail('no per-opening shape list (' + JSON.stringify(shapes) + ')')
-  } else if (shapes.some((v) => !(v >= 0 && v < 3))) {
-    fail('a shape index is out of range: ' + shapes.join(','))
-  } else if (new Set(shapes).size < 2) {
-    fail('every opening came out the same shape (' + shapes.join(',') + '): the mix is broken')
+  roundness.sort((a, b) => a - b)
+  const widest = roundness.length > 0 ? roundness[roundness.length - 1] : 0
+  const narrowest = roundness.length > 0 ? roundness[0] : 0
+  if (belowN < 20) {
+    fail('no opening in the field (' + belowN + ' cells below the level)')
+  } else if (!Array.isArray(aspects) || aspects.length < 2) {
+    fail('no per-opening aspect list (' + JSON.stringify(aspects) + ')')
+  } else if (aspects.some((v) => !(v > 0.2 && v <= 1))) {
+    fail('an aspect ratio is out of range: ' + aspects.join(','))
+  } else if (new Set(aspects).size < 2) {
+    fail('every opening came out with the same stretch (' + aspects.join(',') + ')')
   } else if (hollow.holeHi !== hollow.holeLevel) {
     fail('the mask threshold is not the opening level (' + hollow.holeHi + ' vs ' + hollow.holeLevel + ')')
-  } else if (!(raised > 0)) {
-    fail('no cell was raised above the flat field: neither a tower nor a lip came out')
-  } else if (!(tower > 0)) {
-    fail('no enclosed raised cell: the donut shape never stands a tower inside an opening')
-  } else if (!(lip > 0)) {
-    fail('no free-standing raised cell: the wedge shape never lifts a rim')
-  } else if (raised > lowered * 0.5) {
-    fail('the raised parts (' + raised + ') are not small beside the carved ones (' + lowered + ')')
+  } else if (islandMax >= 12) {
+    fail('a ' + islandMax + '-cell island stands inside an opening: a pillar came back')
+  } else if (!(narrowest >= 1.08)) {
+    fail('an opening is within ' + ((narrowest - 1) * 100).toFixed(1)
+      + '% of a circle (max/min radius): the outline is not karst')
+  } else if (!(widest >= 1.25)) {
+    fail('no opening is strongly lobed (widest max/min radius ' + widest.toFixed(2) + ')')
   } else {
-    ok('shapes ' + shapes.length + ' openings ' + JSON.stringify(Array.from(new Set(shapes)).sort())
-      + ': ' + tower + ' tower cells inside openings, ' + lip + ' lip cells outside, mask = opening level')
+    ok('karst outlines: ' + roundness.length + ' openings, max/min radius '
+      + narrowest.toFixed(2) + '..' + widest.toFixed(2) + ', largest enclosed run '
+      + islandMax + ' cells, aspects '
+      + JSON.stringify(Array.from(new Set(aspects)).slice(0, 6)))
   }
 }
 

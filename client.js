@@ -2037,10 +2037,8 @@ function apply(ctx) {
            CONTOUR_HOLLOW_SHARE of the area opens, whatever range this terrain has. */
         const bins = 256
         let mx = 0
-        let mnSm = Infinity
         for (let i = 0; i < cw * ch; i++) {
           if (sm[i] > mx) mx = sm[i]
-          if (sm[i] < mnSm) mnSm = sm[i]
         }
         const scale = mx > 0 ? (bins - 1) / mx : 0
         let lvl = 0
@@ -2055,20 +2053,11 @@ function apply(ctx) {
           }
         }
         if (lvl > 0) {
-          /* Normalise over the pit's OWN depth: the percentile level down to the
-             smoothed minimum. Dividing by the level instead (first attempt) left the
-             funnel's centre at half strength, because the 12th percentile of a
-             blurred field is already a small number. */
-          const denom = Math.max(lvl - (mnSm === Infinity ? 0 : mnSm), 1e-3)
           const depthMax = hollow * CONTOUR_HOLLOW_DEPTH
           const wdelta = (d, m) => {
             let v = ((d % m) + m) % m
             if (v > m / 2) v -= m
             return v
-          }
-          const smooth01 = (x) => {
-            const t = x < 0 ? 0 : x > 1 ? 1 : x
-            return t * t * (3 - 2 * t)
           }
           /* Connected openings on the wrapped grid, each with a centroid and a radius
              measured with WRAPPED deltas from its first cell: an opening that straddles
@@ -2120,83 +2109,97 @@ function apply(ctx) {
               if (d > rm) rm = d
             }
             g.rm = rm
-            const h1 = ((g.cells[0] * 2654435761) >>> 0) / 4294967296
-            g.shape = Math.min(CONTOUR_HOLLOW_SHAPES - 1, Math.floor(h1 * CONTOUR_HOLLOW_SHAPES))
-            const h2 = ((g.cells[0] * 2246822519 + 374761393) >>> 0) / 4294967296
-            g.ang = h2 * Math.PI * 2
+            /* One xorshift32 seeded from the opening's first cell: stateless, so the
+               same seed always draws the same landscape (the tests pin it), and every
+               opening gets its own outline instead of sharing one template. */
+            let sd = (((g.cells[0] * 2654435761) >>> 0) | 1) >>> 0
+            const rnd = () => {
+              sd ^= sd << 13
+              sd >>>= 0
+              sd ^= sd >>> 17
+              sd ^= sd << 5
+              sd >>>= 0
+              return sd / 4294967296
+            }
+            g.ang = rnd() * Math.PI * 2
+            /* Fracture control: the long axis. 1 = round, smaller = stretched. */
+            g.elong = 1 - CONTOUR_KARST_ELONG * (0.25 + 0.75 * rnd())
+            g.lobe1 = CONTOUR_KARST_LOBE * (0.45 + 0.55 * rnd())
+            g.n1 = 2 + Math.floor(rnd() * 3)
+            g.p1 = rnd() * Math.PI * 2
+            g.lobe2 = CONTOUR_KARST_LOBE2 * (0.45 + 0.55 * rnd())
+            g.n2 = 5 + Math.floor(rnd() * 3)
+            g.p2 = rnd() * Math.PI * 2
+            /* Solution doline (broad, shallow) to collapse doline (narrow, steep). */
+            g.prof = 0.72 + 0.55 * rnd()
+            g.steep = 0.85 + 0.75 * rnd()
+            /* Real dolines with a collapse history keep a rim of debris; solution
+               dolines have none. Both are here, because a landscape where every hole
+               has the same edge is the artifact this rewrite is about. */
+            g.rim = rnd() < 0.55 ? CONTOUR_KARST_RIM * (0.5 + 0.5 * rnd()) : 0
+          }
+          /* Carve every doline over its own bounding window and keep the MAXIMUM, not
+             the sum: two dolines in a chain have to merge into one compound outline
+             (a real karst field does exactly that) instead of stacking their depths
+             into a well with a waist. */
+          const carve = new Float32Array(nCell)
+          const raise = new Float32Array(nCell)
+          for (const g of regions) {
+            if (!(g.rm >= CONTOUR_KARST_MIN_R)) continue
+            const ox = Math.round(g.i0 + g.cx)
+            const oy = Math.round(g.j0 + g.cy)
+            const ca = Math.cos(g.ang)
+            const sa = Math.sin(g.ang)
+            const inv = 1 / (g.elong > 1e-3 ? g.elong : 1e-3)
+            const reach = Math.ceil(g.rm * 1.6) + 2
+            for (let dj = -reach; dj <= reach; dj++) {
+              for (let di = -reach; di <= reach; di++) {
+                /* Into the stretched frame: u along the fracture, v across it. */
+                const u = di * ca + dj * sa
+                const v = (-di * sa + dj * ca) * inv
+                const rr0 = Math.sqrt(u * u + v * v) / (g.rm > 1e-3 ? g.rm : 1e-3)
+                if (rr0 > 2.2) continue
+                const a = Math.atan2(v, u)
+                const warp = 1 + g.lobe1 * Math.cos(g.n1 * a + g.p1)
+                  + g.lobe2 * Math.cos(g.n2 * a + g.p2)
+                const rr = rr0 / (warp > 0.15 ? warp : 0.15)
+                const ci = wi(ox + di)
+                const cj = wj(oy + dj)
+                const cell = cj * cw + ci
+                if (rr < 1) {
+                  /* Linear-ish in (1 - rr) so the opening's edge is a clean contour of
+                     the warped radius; the exponent only decides how the wall leans. */
+                  const w = g.prof * Math.pow(1 - rr, g.steep)
+                  if (w > carve[cell]) carve[cell] = w
+                } else if (g.rim > 0 && rr < 1.6) {
+                  const band = (rr - 1.15) / 0.2
+                  const w = g.rim * Math.exp(-band * band)
+                  if (w > raise[cell]) raise[cell] = w
+                }
+              }
+            }
           }
           for (let j = 0; j < ch; j++) {
             const row = j * cols
             for (let i = 0; i < cw; i++) {
-              const m = sm[j * cw + i]
-              if (m >= lvl) continue
-              pit[j * cw + i] = 1
-              const t = (lvl - m) / denom
-              const g = regions[comp[j * cw + i]]
-              const dx = wdelta(i - g.i0, cw) - g.cx
-              const dy = wdelta(j - g.j0, ch) - g.cy
-              const rr = Math.sqrt(dx * dx + dy * dy) / g.rm
-              let depth = Math.pow(t, CONTOUR_HOLLOW_SHARP)
-              if (g.shape === 1) {
-                /* Donut: the middle of the opening is NOT carved. What stands there is
-                   the remnant tower raised below -- a collapse doline with the massif
-                   still in it. */
-                depth *= smooth01((rr - 0.30) / 0.26)
-              } else if (g.shape === 2) {
-                /* Wedge: one side drops much further than the other, so the floor tilts
-                   and the far wall leans over the near one once the parallax displaces
-                   it -- an overhang a single-valued height field cannot express, built
-                   out of the DISPLACEMENT instead of the geometry. */
-                const val = 0.5 + 0.5 * Math.cos(Math.atan2(dy, dx) - g.ang)
-                depth *= 0.45 + 1.05 * val
+              const k = j * cw + i
+              const a = carve[k]
+              const b = raise[k]
+              if (a <= 0) {
+                if (b > 0) U[row + i] += depthMax * b
+                continue
               }
-              U[row + i] -= depthMax * depth
+              pit[k] = 1
+              U[row + i] -= depthMax * a
             }
           }
-          /* The raised parts, added AFTER the carve so they are independent of it: the
-             tower must end up above the opening level (that is what makes it read as an
-             island inside the hole) and the lip must end up above the ground beside it
-             (that is what lets it occlude the far wall). */
-          if (depthMax > 0) {
-            for (const g of regions) {
-              if (g.shape === 1) {
-                const rise = depthMax * CONTOUR_HOLLOW_PILLAR_RISE
-                for (const c of g.cells) {
-                  const ci = c % cw
-                  const cj = (c - ci) / cw
-                  const dx = wdelta(ci - g.i0, cw) - g.cx
-                  const dy = wdelta(cj - g.j0, ch) - g.cy
-                  const rr = Math.sqrt(dx * dx + dy * dy) / g.rm
-                  if (rr > 0.62) continue
-                  const w = 1 - smooth01((rr - 0.06) / 0.36)
-                  U[cj * cols + ci] += rise * w
-                }
-              } else if (g.shape === 2) {
-                const lift = depthMax * CONTOUR_HOLLOW_LIP_LIFT
-                const span = g.rm * 1.45
-                const inner = g.rm * 0.92
-                const reach = Math.ceil(span) + 2
-                for (let dj = -reach; dj <= reach; dj++) {
-                  for (let di = -reach; di <= reach; di++) {
-                    const dist = Math.sqrt(di * di + dj * dj)
-                    if (dist > span || dist < inner) continue
-                    const val = 0.5 + 0.5 * Math.cos(Math.atan2(dj, di) - g.ang)
-                    const w = val * val * (1 - smooth01((dist - inner) / (span - inner)))
-                    if (w <= 0) continue
-                    const ci = wi(g.i0 + Math.round(g.cx + di))
-                    const cj = wj(g.j0 + Math.round(g.cy + dj))
-                    U[cj * cols + ci] += lift * w
-                  }
-                }
-              }
-            }
-          }
-          /* The mask's threshold is the opening LEVEL, not a percentile of the carved
-             cells: a donut's tower IS a carved cell whose final height is above the
-             rim, so a percentile would report the tower's height as the rim and the mask
-             would swallow it. */
+          /* The mask opens wherever the surface is below the opening LEVEL. That level
+             is the percentile the dolines were placed at, in final height units, so the
+             opening's edge is exactly where the carved surface crosses the surrounding
+             ground -- the rim of the doline. No tower, no island: the middle of every
+             opening is below the level like the rest of it. */
           field.holeLevel = baseMn + lvl * baseSpan
-          field.holeShapes = regions.map((g) => g.shape)
+          field.holeAspect = regions.map((g) => Math.round(g.elong * 1000) / 1000)
         }
       }
       /* --- stage 6: back into the base range, with the real extremes ---------- */
@@ -2659,7 +2662,7 @@ function apply(ctx) {
       const field = {
         cols, rows, step, tw, th, F, mn, mx, hCount,
         /* Filled by the carve; null means this sheet has no cavities. */
-        holeLo: null, holeHi: null, holeShare: 0, holeLevel: null, holeShapes: null,
+        holeLo: null, holeHi: null, holeShare: 0, holeLevel: null, holeAspect: null,
         uScratch: new Float32Array(cols * rows),
         featAmt: new Float32Array(cols * rows),
         featKind: new Uint8Array(cols * rows),
@@ -3517,7 +3520,6 @@ function apply(ctx) {
     /* Small on purpose: a cavity is an accent in the landscape, not a feature of the
        layout. 4% of the cells at a 2.9x-viewport sheet made one very large oval. */
     const CONTOUR_HOLLOW_SHARE = 0.025
-    const CONTOUR_HOLLOW_SHARP = 2.4    // exponent: only the lowest ground opens
     const CONTOUR_HOLLOW_DEPTH = 0.90   // how far the funnel floor drops, in range units
     /* Half-width of the low-pass that decides WHERE ground opens, in field cells.
        The carve follows the smoothed field, not the raw one: the raw field dips
@@ -3525,17 +3527,25 @@ function apply(ctx) {
        a funnel per basin. The funnel's floor keeps the raw detail, which is what
        puts contour rings inside the cavity. */
     const CONTOUR_HOLLOW_RADIUS = 6
-    /* Not every opening is a bowl. Real karst leaves three recognisable kinds, and the
-       difference is not decoration: a bowl is a dent you look INTO, a doline with a
-       remnant massif in the middle is a ring you look AROUND, and an entrance whose
-       ceiling juts out shows a raised rim on one side that hides the far wall. Only the
-       last two can occlude themselves through the parallax, which is what makes a hole
-       read as rock rather than as a shading trick. Shape is chosen per connected
-       opening from a hash of its first cell: no state, so one seed always draws the same
-       landscape and the tests can pin it. */
-    const CONTOUR_HOLLOW_SHAPES = 3        // 0 bowl, 1 donut (ring + tower), 2 wedge (raised lip)
-    const CONTOUR_HOLLOW_PILLAR_RISE = 0.62 // how far the remnant tower stands above the rim, in carve-depth units
-    const CONTOUR_HOLLOW_LIP_LIFT = 0.55    // how far a wedge's near rim is lifted, same units
+    /* ---------- KARST DOLINES, not funnels ----------
+       The first implementation carved a circular cone around each opening, so every
+       cave read as a perfectly round funnel; the donut variant then stood a remnant
+       tower in the middle of one, which no real doline has. Overturned: the outline
+       of an opening is now set the way soluble rock sets it -- by the joint pattern
+       -- not by a radius. Per opening, from one hash: an elongation axis, two outline
+       harmonics (a lobed, kidney/peanut boundary that is never a circle), a depth
+       profile exponent (a shallow solution doline vs a steep-walled collapse one) and,
+       for roughly half of them, a debris rim. Neighbouring outlines are combined with
+       max(), so two overlapping dolines become ONE compound opening instead of a
+       deeper pit with a waist.
+
+       The mask downstream is untouched and stays binary: 100% transparent wherever the
+       surface is below the opening level, 0% everywhere else. */
+    const CONTOUR_KARST_ELONG = 0.42  // 0 = round, 1 = infinitely stretched: minor = 1 - k*x
+    const CONTOUR_KARST_LOBE = 0.20   // amplitude of the primary outline harmonic (2..4 lobes)
+    const CONTOUR_KARST_LOBE2 = 0.09  // amplitude of the secondary harmonic (5..7 crenulations)
+    const CONTOUR_KARST_RIM = 0.55    // debris rim height, in carve-depth units; 0 = none
+    const CONTOUR_KARST_MIN_R = 1.6   // narrower than this (field cells) it is a dimple, not a doline
     /* Half-width of the mask's anti-aliasing band, as a fraction of the height span. The
        mask is BINARY (a hole is 100% transparent: nothing of the near ground is drawn
        inside it, and the far ground is invisible outside it) and this is the only soft
