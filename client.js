@@ -2061,8 +2061,8 @@ function apply(ctx) {
         }
         if (vals.length > 8) {
           vals.sort((a, b) => a - b)
-          field.holeLo = vals[Math.floor(vals.length * 0.45)]
-          field.holeHi = vals[Math.floor(vals.length * 0.92)]
+          field.holeLo = vals[Math.floor(vals.length * 0.55)]
+          field.holeHi = vals[Math.floor(vals.length * 0.78)]
           field.holeShare = vals.length / pitCells.length
         }
       }
@@ -3056,7 +3056,9 @@ function apply(ctx) {
        ground through them. The flat sheet never sees it (contourHollowWanted is keyed
        on the 3D view), so the 2D drawing is byte-identical to before. */
     const CONTOUR_HOLLOW_ENABLED = true
-    const CONTOUR_HOLLOW_SHARE = 0.04
+    /* Small on purpose: a cavity is an accent in the landscape, not a feature of the
+       layout. 4% of the cells at a 2.9x-viewport sheet made one very large oval. */
+    const CONTOUR_HOLLOW_SHARE = 0.025
     const CONTOUR_HOLLOW_SHARP = 2.4    // exponent: only the lowest ground opens
     const CONTOUR_HOLLOW_DEPTH = 0.90   // how far the funnel floor drops, in range units
     /* Half-width of the low-pass that decides WHERE ground opens, in field cells.
@@ -3242,15 +3244,18 @@ function apply(ctx) {
          slice of darker air sits in front of what is behind it: without the first part
          the pit's own concentric rings cover the second layer completely and the
          funnel reads as a hill seen from above. */
-      '    col *= 1.0 - 0.88 * hole;',
-      '    col += deep * hole * 0.5;',
-      /* A void reads as a void because it is DARK, and a rim reads as a rim because it
-         is LIT: the tint is the air in front of the far ground, the band is the lip of
-         the hole catching the light. Without the two, a pit is just a region with more
-         contour lines on it. */
-      '    col += vec4(0.030, 0.030, 0.026, 0.22) * hole;',
+      '    col *= 1.0 - 0.55 * hole;',
+      '    col += deep * hole * 0.55;',
+      /* NO ADDITIVE COLOUR ANYWHERE. Painting the lip and the void as added colour also
+         paints the transparent pixels between the strokes, and on a dark theme that
+         renders as a glowing oval floating over the map (reported from the live app:
+         "这么个圈不突兀吗"). Everything below only MODULATES coverage that is already
+         there: the void dims the strokes inside the pit, the lip brightens the strokes
+         at its edge. A hole is a place with less drawing on it, not a shape drawn on
+         top of the map. */
       '    float rim = clamp(1.0 - abs(hole * 2.0 - 1.0), 0.0, 1.0);',
-      '    col += vec4(0.40, 0.36, 0.19, 0.16) * rim * rim;',
+      '    col.rgb *= 1.0 - 0.35 * hole;',
+      '    col.rgb += vec3(0.30, 0.27, 0.14) * rim * rim * col.a;',
       '  }',
       '  gl_FragColor = col;',
       '}',
@@ -3346,7 +3351,15 @@ function apply(ctx) {
       try { cv = document.createElement('canvas') } catch (e) { return { ok: false, why: 'no canvas' } }
       let gl = null
       try {
-        gl = cv.getContext('webgl', { antialias: false, depth: false, alpha: true, premultipliedAlpha: true })
+        gl = cv.getContext('webgl', {
+          antialias: false, depth: false, alpha: true, premultipliedAlpha: true,
+          /* KEEP THE LAST FRAME. The layer is only redrawn when the camera moved enough
+             to change a pixel (see the sub-pixel gate in contourBlit), and without this
+             a page that re-composites in between -- expanding a thinking panel, opening
+             the sidebar -- can present an EMPTY buffer, which reads as a black flash.
+             One full-screen buffer is a small price for a frame that survives. */
+          preserveDrawingBuffer: true,
+        })
           || cv.getContext('experimental-webgl')
       } catch (e) { gl = null }
       if (!gl) return { ok: false, why: 'webgl unavailable' }
@@ -3460,7 +3473,15 @@ function apply(ctx) {
            z-index 0 and pointer-events none). */
         cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none'
         contourWrap.appendChild(cv)
-        gl = cv.getContext('webgl', { antialias: false, depth: false, alpha: true, premultipliedAlpha: true })
+        gl = cv.getContext('webgl', {
+          antialias: false, depth: false, alpha: true, premultipliedAlpha: true,
+          /* KEEP THE LAST FRAME. The layer is only redrawn when the camera moved enough
+             to change a pixel (see the sub-pixel gate in contourBlit), and without this
+             a page that re-composites in between -- expanding a thinking panel, opening
+             the sidebar -- can present an EMPTY buffer, which reads as a black flash.
+             One full-screen buffer is a small price for a frame that survives. */
+          preserveDrawingBuffer: true,
+        })
           || cv.getContext('experimental-webgl')
       } catch (e) { gl = null }
       if (!gl) {

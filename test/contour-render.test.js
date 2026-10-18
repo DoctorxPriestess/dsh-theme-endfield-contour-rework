@@ -434,6 +434,9 @@ async function main() {
       /* Sampled WITH events still arriving: once the debounce has fired the sheet is
          allowed to move again (and one repaint restarts the transform at zero), so a
          pause measured after the drag proves nothing. */
+      /* Let any debounce armed by the burst above fire first: a repaint is legitimate
+         once the drag has stopped, and it restarts the transform at zero. */
+      await sleep(500)
       const dragOnce=async()=>{
         const r=frame.getBoundingClientRect()
         frame.style.width=Math.round(r.width+20)+'px'

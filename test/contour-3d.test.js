@@ -356,11 +356,29 @@ const wrap = (x) => ((x % 1) + 1) % 1
   if (!/col \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
     fail('the near layer is not suppressed inside the cavity, so nothing occludes the far ground')
   } else ok('the near layer stops inside the cavity (occlusion)')
-  if (!/vec4\(0\.\d+, 0\.\d+, 0\.\d+, 0\.\d+\) \* hole;/.test(SRC)) {
-    fail('no void tint inside the cavity -- a hole that is not darker does not read as a hole')
-  } else if (!/rim \* rim/.test(SRC)) {
-    fail('no lit rim on the cavity lip')
-  } else ok('void tint + lit rim (depth cue)')
+  /* NOTHING ADDITIVE. Painting the lip or the void as added colour also paints the
+     transparent pixels between the strokes, which on a dark theme renders as a glowing
+     oval over the map -- reported from the live app ("这么个圈不突兀吗"). Every
+     contribution has to be gated on coverage that already exists. */
+  const added = SRC.match(/col \+= (vec4|deep|vec3)\(?[^\n]*/g) || []
+  const additive = added.filter((line) => !/\* col\.a|^col \+= deep \* hole/.test(line))
+  if (additive.length > 0) {
+    fail('additive colour over transparent pixels: ' + additive[0].trim())
+  } else if (!/col\.rgb \+= [^\n]*\* col\.a;/.test(SRC)) {
+    fail('the lit lip does not modulate existing stroke coverage')
+  } else if (!/col\.rgb \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
+    fail('the cavity does not darken the strokes inside it')
+  } else ok('no additive colour: the lip only brightens existing strokes, the void only dims them')
+
+  /* The drawing buffer has to survive a re-composite: the layer is only redrawn when
+     the camera moved enough to change a pixel, and without preserveDrawingBuffer a
+     page that re-composites in between (expanding a thinking panel) can present an
+     EMPTY buffer -- which the user sees as a black flash. */
+  const ctxCalls = SRC.match(/getContext\('webgl', \{[^}]*\}/g) || []
+  if (ctxCalls.length < 2) fail('expected the probe and the layer contexts, found ' + ctxCalls.length)
+  else if (ctxCalls.some((c) => !/preserveDrawingBuffer: true/.test(c))) {
+    fail('a WebGL context is created without preserveDrawingBuffer: the last frame can be lost on a re-composite')
+  } else ok('both WebGL contexts keep the last frame (preserveDrawingBuffer)')
 
   /* ...and off in the flat view: the uniform gate is what keeps 2D byte-identical. */
   const gate = SRC.match(/const hasHoles = ([^\n]*)/)
