@@ -4710,6 +4710,116 @@ function apply(ctx) {
       return true
     }
 
+    /* ---- opaque-panel audit (temporary: fix22 diagnosis) ----------------------
+       The black block was reported as a HARD-EDGED RECTANGLE in the 3D view, i.e. not
+       the canvas failing but some app element painting an opaque fill over the layer.
+       Finding it by eye is hopeless (the app rehashes its css-module names every
+       build), so the plugin reports the culprits itself: every element inside the app
+       frame that paints an opaque background and covers real area, with its class name
+       and rect. Two channels because either can be blocked by the page:
+         - POST to a localhost listener (mode: no-cors, fire-and-forget), and
+         - a tiny on-screen panel, so a screenshot still carries the answer.
+       Self-limiting: a budget of runs, a 1.2s throttle, and the run is wired to the
+       mutation channel, i.e. it samples WHILE the page is streaming -- which is the
+       only time the panel exists. Delete this block and CONTOUR_AUDIT once the class
+       name is known. */
+    const CONTOUR_AUDIT = true
+    const CONTOUR_AUDIT_URL = 'http://127.0.0.1:8791/audit'
+    const CONTOUR_AUDIT_RUNS = 40
+    let contourAuditRuns = 0
+    let contourAuditAt = -1e9
+    let contourAuditLast = ''
+    let contourAuditPanel = null
+    const contourAuditOpacity = (cs) => {
+      const bg = cs.backgroundColor
+      const m = /^rgba?\(([^)]+)\)$/.exec(bg)
+      if (m === null) return 0
+      const p = m[1].split(',')
+      return p.length > 3 ? parseFloat(p[3]) : 1
+    }
+    const contourAuditOnce = () => {
+      if (CONTOUR_AUDIT !== true) return
+      if (typeof document === 'undefined' || contourHost === null) return
+      if (contourAuditRuns >= CONTOUR_AUDIT_RUNS) return
+      const nowMs = typeof Date !== 'undefined' ? Date.now() : 0
+      if (nowMs - contourAuditAt < 1200) return
+      contourAuditAt = nowMs
+      contourAuditRuns++
+      const fr = contourHost.getBoundingClientRect()
+      const list = []
+      const all = contourHost.querySelectorAll('*')
+      for (let i = 0; i < all.length && list.length < 80; i++) {
+        const el = all[i]
+        if (el.getAttribute('data-endfield-contour') !== null
+          || el.hasAttribute('data-endfield-contour-audit')) continue
+        const r = el.getBoundingClientRect()
+        /* Area first: a rect read is cheap, a computed-style read is not. */
+        if (r.width * r.height < 6000) continue
+        if (r.right < fr.left || r.bottom < fr.top || r.left > fr.right || r.top > fr.bottom) continue
+        const cs = window.getComputedStyle(el)
+        if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity) < 0.05) continue
+        const alpha = contourAuditOpacity(cs)
+        const img = cs.backgroundImage !== 'none' ? cs.backgroundImage.slice(0, 48) : ''
+        if (alpha < 0.5 && img === '') continue
+        const cls = el.getAttribute('class') || el.tagName
+        list.push({
+          k: String(cls).slice(0, 140),
+          b: cs.backgroundColor,
+          i: img,
+          r: [Math.round(r.left - fr.left), Math.round(r.top - fr.top),
+            Math.round(r.width), Math.round(r.height)],
+          p: cs.position,
+          z: cs.zIndex,
+          t: cs.transform !== 'none' ? 'T' : '',
+          m: cs.maskImage !== 'none' && cs.maskImage !== '' ? 'M' : '',
+        })
+      }
+      /* The stack under the middle of the message column: the panel that wins the
+         paint order there is named even if its class is not in the list above. */
+      const col = contourHost.querySelector('[class$="_centerCol"]')
+      const cr = col !== null ? col.getBoundingClientRect() : fr
+      const stack = []
+      try {
+        const pts = [[cr.left + cr.width * 0.5, cr.top + cr.height * 0.45],
+          [cr.left + cr.width * 0.5, cr.top + cr.height * 0.75]]
+        for (const [px, py] of pts) {
+          const chain = document.elementsFromPoint(Math.round(px), Math.round(py))
+          stack.push(chain.slice(0, 8).map((e) => String(e.getAttribute('class') || e.tagName).slice(0, 100)))
+        }
+      } catch (e) { /* no hit-testing in a screenshot harness */ }
+      const body = JSON.stringify({
+        t: Math.round(nowMs), run: contourAuditRuns,
+        layer: contourWrap !== null, three: isContourView3D(),
+        frame: [Math.round(fr.width), Math.round(fr.height)], list, stack,
+      })
+      if (body === contourAuditLast) return
+      contourAuditLast = body
+      if (typeof fetch === 'function') {
+        try {
+          fetch(CONTOUR_AUDIT_URL, { method: 'POST', mode: 'no-cors', body: body })
+            .catch(() => {})
+        } catch (e) { /* listener down */ }
+      }
+      /* Fallback channel: the same names, on screen, small and out of the way. */
+      if (contourAuditPanel === null) {
+        const p = document.createElement('div')
+        p.setAttribute('data-endfield-contour-audit', '')
+        p.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483000;'
+          + 'background:#000;color:#0f0;font:10px/1.25 monospace;padding:3px 5px;'
+          + 'max-width:64%;max-height:40%;overflow:hidden;white-space:pre;'
+          + 'pointer-events:none;opacity:.92'
+        if (document.body !== null) document.body.appendChild(p)
+        contourAuditPanel = p
+      }
+      const lines = []
+      for (const e of list.slice(0, 6)) {
+        lines.push(e.k.slice(0, 52) + ' ' + e.r[2] + 'x' + e.r[3] + ' ' + e.b)
+      }
+      if (list.length === 0) lines.push('no opaque panel found (run ' + contourAuditRuns + ')')
+      contourAuditPanel.textContent = 'AUDIT r' + contourAuditRuns + ' n' + list.length
+        + ' ' + (isContourView3D() ? '3D' : '2D') + '\n' + lines.join('\n')
+    }
+
     /** Build/refresh/remove the layer to match the switches and the current page. */
     const syncContour = () => {
       const on = isEnabled() && isContourOn()
@@ -4826,6 +4936,9 @@ function apply(ctx) {
         }
       }
       contourApplySwitches()
+      /* Sample the DOM from the SAME channel that samples it for mutation: streaming is
+         a mutation storm, so this is the only moment a streaming-only panel exists. */
+      contourAuditOnce()
     }
 
     /* Pause the sheet while the user scrolls the page, resume shortly after the
