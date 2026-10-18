@@ -20,8 +20,8 @@
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
 | 分支 / HEAD | `main` / `176487c`（`client.js` sha256 `948eee89…`） |
-| 已安装版本 | **已同步**：sha256 同样是 `948eee89…`（fix20 = 发布版，`CONTOUR_DIAG = false`，**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix20.tgz` |
+| 已安装版本 | **已同步**：sha256 `06073be6…`（fix21 = 发布版 + 看门狗自愈，**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix21.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
 | 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
 | 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
