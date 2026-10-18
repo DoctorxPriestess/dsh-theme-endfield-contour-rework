@@ -176,8 +176,10 @@ function closureCase(pw, ph) {
     worstRowRatio.toFixed(3) + 'x)')
   else fail('map ' + w + 'x' + h + ': the wrap jumps ' + worstRowRatio.toFixed(2) + 'x the worst step inside its own row')
 }
-closureCase(320, 160)
-closureCase(84, 44)
+/* The map rounds UP to a power of two, so these periods have to be multiples of those
+   dimensions: 513 cells / 4 = 128 bins, 257 / 4 = 64 rows; 129 / 4 = 32, 65 / 4 = 16. */
+closureCase(512, 256)
+closureCase(128, 64)
 
 /* ------------------------------------------------------- B. the open sheet ------ */
 
@@ -192,8 +194,9 @@ closureCase(84, 44)
   f.th = ph * STEP + 5
   const m = heightMap(f)
   /* Reference: the pre-fix algorithm, run on the same field. */
-  const w = Math.max(8, Math.min(192, Math.round(f.cols / 4)))
-  const h = Math.max(8, Math.min(192, Math.round(f.rows / 4)))
+  const pot = (n) => { let v = 8; while (v < n) v *= 2; return v }
+  const w = pot(Math.max(8, Math.min(192, Math.round(f.cols / 4))))
+  const h = pot(Math.max(8, Math.min(192, Math.round(f.rows / 4))))
   const span = (f.mx - f.mn) || 1
   const acc = new Float32Array(w * h)
   const cnt = new Float32Array(w * h)

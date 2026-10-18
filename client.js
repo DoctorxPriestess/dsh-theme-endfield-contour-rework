@@ -3101,6 +3101,7 @@ function apply(ctx) {
       const cv = contourLineCv
       if (cv === null) return
       if (cv.style != null && typeof cv.style.transform === 'string') cv.style.transform = 'translate3d(0,0,0)'
+      if (cv.style != null) { cv.style.left = '0px'; cv.style.top = '0px' }
       /* Resizing also wipes the pixels, so no separate clearRect is needed. */
       if (cv.width !== 1 || cv.height !== 1) {
         cv.width = 1
@@ -3114,8 +3115,6 @@ function apply(ctx) {
        SHADER's wrap is (uv.x/y crossing an integer), so the answer to "is that line
        the seam?" is in the screenshot instead of in a hypothesis. */
     let contourDiagHud = null
-    let contourDiagVx = null
-    let contourDiagHy = null
     let contourDiagBuilds = 0
     let contourDiagRemounts = 0
     let contourDiagResizes = 0
@@ -3131,8 +3130,8 @@ function apply(ctx) {
       contourDiagHud = mk('position:absolute;left:6px;top:6px;font:10px/1.35 ui-monospace,monospace;'
         + 'color:#fff;background:rgba(0,0,0,.78);padding:4px 6px;white-space:pre;max-width:92%;'
         + 'border-radius:3px;text-shadow:none')
-      contourDiagVx = mk('position:absolute;top:0;bottom:0;width:1px;background:#ff00ff;opacity:.85')
-      contourDiagHy = mk('position:absolute;left:0;right:0;height:1px;background:#00e5ff;opacity:.85')
+      /* No DOM marker lines: the wrap is per pixel (the marched height moves it), so
+         the shader marks it instead -- see u_diagWrap. */
     }
     const contourDiagUpdate = () => {
       if (!CONTOUR_DIAG || contourDiagHud === null || contourView === null || contourTex === null) return
@@ -3151,25 +3150,9 @@ function apply(ctx) {
         'offset=' + contourOffsetX.toFixed(1) + ',' + contourOffsetY.toFixed(1)
           + '  builds=' + contourDiagBuilds + '  moves=' + contourDiagRemounts
           + '  resizes=' + contourDiagResizes,
+        three ? 'MAGENTA = u wrap, CYAN = v wrap (exact, per pixel)' : 'no wrap markers in 2D',
       ]
       contourDiagHud.textContent = lines.join(String.fromCharCode(10))
-      /* Where the shader's fract() wraps, at the reference height (s = 1): uv.x = 0 at
-         p.x = vW/2 - cam. Markers only mean something in 3D -- in 2D the sheet is
-         larger than the surface, so its wrap is off-screen. */
-      let vx = -1
-      let hy = -1
-      if (three) {
-        const vW = Math.max(1, Math.round(contourView.w * dpr))
-        const vH = Math.max(1, Math.round(contourView.h * dpr))
-        const sx = ((Math.floor(contourOffsetX) % tw) + tw) % tw
-        const sy = ((Math.floor(contourOffsetY) % th) + th) % th
-        for (let p = vW * 0.5 - sx; p < vW; p += tw) if (p > 1) { vx = p; break }
-        for (let p = vH * 0.5 - sy; p < vH; p += th) if (p > 1) { hy = p; break }
-      }
-      contourDiagVx.style.display = vx < 0 ? 'none' : 'block'
-      contourDiagHy.style.display = hy < 0 ? 'none' : 'block'
-      if (vx >= 0) contourDiagVx.style.left = (vx / dpr) + 'px'
-      if (hy >= 0) contourDiagHy.style.top = (hy / dpr) + 'px'
     }
 
     const contourBlit = () => {
@@ -3276,6 +3259,10 @@ function apply(ctx) {
          viewport from the cache, as every previous version did. */
       const ctx = contourLineCv.getContext('2d')
       if (!ctx) return
+      if (contourLineCv.style != null && (contourLineCv.style.left !== '0px' || contourLineCv.style.top !== '0px')) {
+        contourLineCv.style.left = '0px'
+        contourLineCv.style.top = '0px'
+      }
       const w = contourLineCv.width
       const h = contourLineCv.height
       ctx.clearRect(0, 0, w, h)
@@ -3452,6 +3439,10 @@ function apply(ctx) {
          UNDER the surface wherever the raymarch hit land inside the pit's height band.
          Two taps of one texture -- no second sheet, no extra memory. */
       'uniform float u_holeOn;',
+      /* Diagnostic only (0 in a release build). Marks the pixels where fract(uv)
+         wraps -- the only exact answer: the wrap moves with the marched height, so a
+         DOM line drawn at the reference height can be tens of pixels away. */
+      'uniform float u_diagWrap;',
       'uniform float u_holeLo;',
       'uniform float u_holeHi;',
       'uniform float u_drop;',
@@ -3564,6 +3555,11 @@ function apply(ctx) {
       '    float rim = clamp(1.0 - abs(hole * 2.0 - 1.0), 0.0, 1.0);',
       '    col.rgb *= 1.0 - 0.35 * hole;',
       '    col.rgb += vec3(0.30, 0.27, 0.14) * rim * rim * col.a;',
+      '  }',
+      '  if (u_diagWrap > 0.5) {',
+      '    vec2 f = fract(uv) * u_sheetSize;',
+      '    if (min(f.x, u_sheetSize.x - f.x) < 1.0) col = vec4(1.0, 0.0, 1.0, 1.0);',
+      '    else if (min(f.y, u_sheetSize.y - f.y) < 1.0) col = vec4(0.0, 0.9, 1.0, 1.0);',
       '  }',
       '  gl_FragColor = col;',
       '}',
@@ -3696,8 +3692,19 @@ function apply(ctx) {
        field, then two separable box passes. Values are 0..1 across the field's own
        range. Pure function of the field, so it is testable on the CPU. */
     const contourHeightMap = (f) => {
-      const w = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.cols / CONTOUR_3D_HEIGHT_DIV)))
-      const h = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.rows / CONTOUR_3D_HEIGHT_DIV)))
+      /* POWER-OF-TWO ON PURPOSE. The shader reads this map with fract(uv), so the last
+         half texel of one edge and the first half of the other are the same place on
+         screen -- and WebGL1 only permits REPEAT on a power-of-two texture. At a POT
+         size the wrap is exact; at an arbitrary size the read is CLAMPed and the
+         displacement bends by up to ~1.5 device px along a straight line. The aspect
+         ratio does not matter (this is a smooth field), only that both sides are POT. */
+      const pot = (n) => {
+        let v = 8
+        while (v < n) v *= 2
+        return v
+      }
+      const w = pot(Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.cols / CONTOUR_3D_HEIGHT_DIV))))
+      const h = pot(Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.rows / CONTOUR_3D_HEIGHT_DIV))))
       const span = (f.mx - f.mn) || 1
       /* ONE PERIOD, NOT THE WHOLE BUFFER. The shader samples this map with
          fract(uv), so texel w-1 and texel 0 are neighbours on screen -- and the map is
@@ -3864,13 +3871,17 @@ function apply(ctx) {
         uRise: gl.getUniformLocation(prog, 'u_rise'),
         uSteps: gl.getUniformLocation(prog, 'u_steps'),
         uHoleOn: gl.getUniformLocation(prog, 'u_holeOn'),
+        uDiagWrap: gl.getUniformLocation(prog, 'u_diagWrap'),
         uHoleLo: gl.getUniformLocation(prog, 'u_holeLo'),
         uHoleHi: gl.getUniformLocation(prog, 'u_holeHi'),
         uDrop: gl.getUniformLocation(prog, 'u_drop'),
         uDeepShift: gl.getUniformLocation(prog, 'u_deepShift'),
         uDeepScale: gl.getUniformLocation(prog, 'u_deepScale'),
+        /* The sheet stays CLAMPed: its period has to be exact, so it cannot be a
+           power of two, so REPEAT is not available for it. The height map can be, and
+           is -- see contourHeightMap. */
         sheet: makeTexture(gl.CLAMP_TO_EDGE),
-        height: makeTexture(gl.CLAMP_TO_EDGE),
+        height: makeTexture(gl.REPEAT),
         sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null,
       }
       contourGlWhy = hw.why
@@ -3999,6 +4010,7 @@ function apply(ctx) {
       gl.uniform2f(st.uViewSize, vW, vH)
       gl.uniform2f(st.uCenter, vW * 0.5, vH * 0.5)
       gl.uniform2f(st.uCam, sx, sy)
+      if (st.uDiagWrap !== null) gl.uniform1f(st.uDiagWrap, CONTOUR_DIAG ? 1 : 0)
       gl.uniform1f(st.uDepth, CONTOUR_3D_DEPTH)
       gl.uniform1f(st.uRef, CONTOUR_3D_REF)
       gl.uniform1f(st.uRise, CONTOUR_3D_RISE)
@@ -4053,6 +4065,15 @@ function apply(ctx) {
         contourSurfaceOn = false
         return
       }
+      if (cv.style != null) {
+        /* EVERY paint, not only when the size changed. The surface is dropped to a
+           viewport-sized flat canvas on a resize (and permanently when the viewport is
+           too large for a surface), and that canvas is drawn from its own origin -- left
+           where the surface put it, the sheet would sit half a pad off and leave a blank
+           band along two edges. */
+        cv.style.left = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
+        cv.style.top = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
+      }
       if (cv.width !== wDev || cv.height !== hDev) {
         cv.width = wDev
         cv.height = hDev
@@ -4067,8 +4088,6 @@ function apply(ctx) {
              the viewport on the left and the top, the allowed +-half-pad translate
              cannot uncover any edge. The tiling origin is shifted by the same half pad
              below, so the picture does not move. */
-          cv.style.left = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
-          cv.style.top = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
         }
       }
       const ctx = cv.getContext('2d')
@@ -4299,11 +4318,28 @@ function apply(ctx) {
       if (contourSurfaceOn && contourTex !== null && contourLineCv !== null) {
         const needW = Math.round(w * dpr) + CONTOUR_SURFACE_PAD
         const needH = Math.round(h * dpr) + CONTOUR_SURFACE_PAD
-        if (contourLineCv.width < needW || contourLineCv.height < needH) contourSurfaceOn = false
+        if (contourLineCv.width < needW || contourLineCv.height < needH) {
+          contourSurfaceOn = false
+          /* The surface leaves a translate behind. The flat path draws at (0,0), so
+             without this the whole sheet stays up to half a pad out of place and one
+             of its edges is a hard line -- until something else happens to write the
+             transform. */
+          if (contourLineCv.style != null) {
+            contourLineCv.style.transform = 'translate3d(0,0,0)'
+            contourLineCv.style.left = '0px'
+            contourLineCv.style.top = '0px'
+          }
+        }
       }
       if (contourLineCv !== null && !contourSurfaceOn) {
         const bw = Math.max(1, Math.round(w * dpr))
         const bh = Math.max(1, Math.round(h * dpr))
+        /* The flat path draws from the canvas origin, so the element has to sit at the
+           origin too; the surface leaves it half a pad out. */
+        if (contourLineCv.style != null) {
+          contourLineCv.style.left = '0px'
+          contourLineCv.style.top = '0px'
+        }
         if (contourLineCv.width !== bw || contourLineCv.height !== bh) {
           contourLineCv.width = bw
           contourLineCv.height = bh
