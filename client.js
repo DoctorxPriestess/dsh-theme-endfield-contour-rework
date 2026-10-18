@@ -3182,6 +3182,7 @@ function apply(ctx) {
     }
 
     const contourBlit = () => {
+      if (typeof contourPulseCommits === 'number') contourPulseCommits++
       if (typeof contourDiagUpdate === 'function') { try { contourDiagUpdate() } catch (e) {} }
       if (contourLineCv === null || contourTex === null) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
@@ -4092,6 +4093,7 @@ function apply(ctx) {
       gl.uniform1f(st.uDeepScale, CONTOUR_3D_HOLE_SCALE)
       gl.uniform2f(st.uDeepShift, CONTOUR_3D_HOLE_SHIFT_X, CONTOUR_3D_HOLE_SHIFT_Y)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      if (typeof contourPulseDraws === 'number') contourPulseDraws++
       return true
     }
 
@@ -4459,7 +4461,8 @@ function apply(ctx) {
       if (!contourWantsScroll()) return
       const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
         ? performance.now() : Date.now()
-      let dt = contourLastT < 0 ? 0 : (now - contourLastT) / 1000
+      const rawMs = contourLastT < 0 ? 0 : now - contourLastT
+      let dt = rawMs / 1000
       contourLastT = now
       if (dt > 0.1) dt = 0.1 // clamp tab-switch gaps so the sheet never jumps
       /* A frozen sheet is frozen in TIME, not in drawing. The freeze exists so the
@@ -4470,6 +4473,7 @@ function apply(ctx) {
          offsets stay put and the frame is still drawn. */
       const frozen = contourScrollPaused
       if (frozen) dt = 0
+      if (typeof contourPulseTick === 'function') contourPulseTick(rawMs, frozen)
       contourWatchFrame(frozen ? 0 : dt)
       const twDev = contourTex.cv.width
       const thDev = contourTex.cv.height
@@ -4716,118 +4720,88 @@ function apply(ctx) {
       return true
     }
 
-    /* ---- opaque-panel audit (temporary: fix22 diagnosis) ----------------------
-       The black block was reported as a HARD-EDGED RECTANGLE in the 3D view, i.e. not
-       the canvas failing but some app element painting an opaque fill over the layer.
-       Finding it by eye is hopeless (the app rehashes its css-module names every
-       build), so the plugin reports the culprits itself: every element inside the app
-       frame that paints an opaque background and covers real area, with its class name
-       and rect. Two channels because either can be blocked by the page:
-         - POST to a localhost listener (mode: no-cors, fire-and-forget), and
-         - a tiny on-screen panel, so a screenshot still carries the answer.
-       Self-limiting: a budget of runs, a 1.2s throttle, and the run is wired to the
-       mutation channel, i.e. it samples WHILE the page is streaming -- which is the
-       only time the panel exists. Delete this block and CONTOUR_AUDIT once the class
-       name is known. */
-    const CONTOUR_AUDIT = true
-    const CONTOUR_AUDIT_URL = 'http://127.0.0.1:8791/audit'
-    const CONTOUR_AUDIT_RUNS = 40
-    let contourAuditRuns = 0
-    let contourAuditAt = -1e9
-    let contourAuditLast = ''
-    let contourAuditPanel = null
-    const contourAuditOpacity = (cs) => {
-      const bg = cs.backgroundColor
-      const m = /^rgba?\(([^)]+)\)$/.exec(bg)
-      if (m === null) return 0
-      const p = m[1].split(',')
-      return p.length > 3 ? parseFloat(p[3]) : 1
+    /* ---- streaming pulse (temporary: fix24 diagnosis) ------------------------
+       The previous build shipped a DOM audit that walked every element in the frame with
+       getComputedStyle, to name whatever panel was painting over the sheet. It answered
+       its question -- measurement on the live window: NO panel hides the terrain, ink
+       inside every opaque panel's rect was 0.176 against 0.202 in a control area -- and
+       then became the prime suspect for the next report ("流式传输还是会闪"), because
+       that walk is a 100-300ms main-thread stall, and fix23 proved on this very machine
+       that a window with no canvas commit shows up as a black block (that is what the
+       scroll bug was). The walk is gone. What is left costs nothing: counters of frame
+       ticks, commits, rebuilds, remounts and mutations, plus every commit GAP over
+       80ms, batched to a localhost listener once every 2s. No DOM reads, no styles.
+       Delete this block (and the calls) once streaming has stopped flashing. */
+    const CONTOUR_PULSE = true
+    const CONTOUR_PULSE_URL = 'http://127.0.0.1:8791/pulse'
+    const CONTOUR_PULSE_MS = 2000
+    const CONTOUR_PULSE_SENDS = 80
+    const CONTOUR_GAP_MS = 80
+    let contourPulseAt = -1e9
+    let contourPulseSends = 0
+    let contourPulseFrames = 0
+    let contourPulseCommits = 0
+    let contourPulseMuts = 0
+    let contourPulseDraws = 0
+    let contourPulseGaps = []
+    const contourPulseGap = (ms, why) => {
+      if (contourPulseGaps.length < 24) {
+        contourPulseGaps.push({ ms: Math.round(ms), why: why })
+      }
     }
-    const contourAuditOnce = () => {
-      if (CONTOUR_AUDIT !== true) return
-      if (typeof document === 'undefined' || contourHost === null) return
-      if (contourAuditRuns >= CONTOUR_AUDIT_RUNS) return
-      const nowMs = typeof Date !== 'undefined' ? Date.now() : 0
-      if (nowMs - contourAuditAt < 1200) return
-      contourAuditAt = nowMs
-      contourAuditRuns++
-      const fr = contourHost.getBoundingClientRect()
-      const list = []
-      const all = contourHost.querySelectorAll('*')
-      for (let i = 0; i < all.length && list.length < 80; i++) {
-        const el = all[i]
-        if (el.getAttribute('data-endfield-contour') !== null
-          || el.hasAttribute('data-endfield-contour-audit')) continue
-        const r = el.getBoundingClientRect()
-        /* Area first: a rect read is cheap, a computed-style read is not. */
-        if (r.width * r.height < 6000) continue
-        if (r.right < fr.left || r.bottom < fr.top || r.left > fr.right || r.top > fr.bottom) continue
-        const cs = window.getComputedStyle(el)
-        if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity) < 0.05) continue
-        const alpha = contourAuditOpacity(cs)
-        const img = cs.backgroundImage !== 'none' ? cs.backgroundImage.slice(0, 48) : ''
-        if (alpha < 0.5 && img === '') continue
-        const cls = el.getAttribute('class') || el.tagName
-        list.push({
-          k: String(cls).slice(0, 140),
-          b: cs.backgroundColor,
-          i: img,
-          r: [Math.round(r.left - fr.left), Math.round(r.top - fr.top),
-            Math.round(r.width), Math.round(r.height)],
-          p: cs.position,
-          z: cs.zIndex,
-          t: cs.transform !== 'none' ? 'T' : '',
-          m: cs.maskImage !== 'none' && cs.maskImage !== '' ? 'M' : '',
-        })
+    /* One call from the frame loop: counts the tick and records a stall. A no-commit
+       window is the one thing fix23 proved turns into a black block on this machine, so
+       the gaps are what this build is actually collecting. */
+    const contourPulseTick = (elapsedMs, frozen) => {
+      contourPulseFrames++
+      if (elapsedMs > CONTOUR_GAP_MS) {
+        contourPulseGap(elapsedMs, frozen ? 'frozen' : ((typeof docHidden === 'function' && docHidden()) ? 'hidden' : 'busy'))
       }
-      /* The stack under the middle of the message column: the panel that wins the
-         paint order there is named even if its class is not in the list above. */
-      const col = contourHost.querySelector('[class$="_centerCol"]')
-      const cr = col !== null ? col.getBoundingClientRect() : fr
-      const stack = []
-      try {
-        const pts = [[cr.left + cr.width * 0.5, cr.top + cr.height * 0.45],
-          [cr.left + cr.width * 0.5, cr.top + cr.height * 0.75]]
-        for (const [px, py] of pts) {
-          const chain = document.elementsFromPoint(Math.round(px), Math.round(py))
-          stack.push(chain.slice(0, 8).map((e) => String(e.getAttribute('class') || e.tagName).slice(0, 100)))
-        }
-      } catch (e) { /* no hit-testing in a screenshot harness */ }
+    }
+    const contourPulseOnce = () => {
+      if (CONTOUR_PULSE !== true) return
+      if (contourPulseSends >= CONTOUR_PULSE_SENDS) return
+      if (typeof Date.now !== 'function') return
+      const nowMs = Date.now()
+      if (nowMs - contourPulseAt < CONTOUR_PULSE_MS) return
+      contourPulseAt = nowMs
+      contourPulseSends++
+      const tex = contourTex
       const body = JSON.stringify({
-        t: Math.round(nowMs), run: contourAuditRuns,
-        layer: contourWrap !== null, three: isContourView3D(),
-        frame: [Math.round(fr.width), Math.round(fr.height)], list, stack,
+        t: nowMs,
+        n: contourPulseSends,
+        three: isContourView3D() ? 1 : 0,
+        surface: contourSurfaceOn ? 1 : 0,
+        frozen: contourScrollPaused ? 1 : 0,
+        gl: contourGl !== null ? 1 : 0,
+        sheet: tex === null ? null : [tex.cv.width, tex.cv.height],
+        view: contourView === null ? null : [contourView.w, contourView.h, contourView.dpr],
+        frames: contourPulseFrames,
+        commits: contourPulseCommits,
+        draws: contourPulseDraws,
+        muts: contourPulseMuts,
+        builds: typeof contourDiagBuilds === 'number' ? contourDiagBuilds : -1,
+        remounts: typeof contourDiagRemounts === 'number' ? contourDiagRemounts : -1,
+        resizes: typeof contourDiagResizes === 'number' ? contourDiagResizes : -1,
+        /* How many times the 250ms watchdog had to put the layer back: a layer that the
+           page keeps removing is a gap of up to 250ms, i.e. the same black-block shape. */
+        hits: typeof contourWatchHits === 'number' ? contourWatchHits : -1,
+        gaps: contourPulseGaps,
       })
-      if (body === contourAuditLast) return
-      contourAuditLast = body
-      if (typeof fetch === 'function') {
-        try {
-          fetch(CONTOUR_AUDIT_URL, { method: 'POST', mode: 'no-cors', body: body })
-            .catch(() => {})
-        } catch (e) { /* listener down */ }
-      }
-      /* Fallback channel: the same names, on screen, small and out of the way. */
-      if (contourAuditPanel === null) {
-        const p = document.createElement('div')
-        p.setAttribute('data-endfield-contour-audit', '')
-        p.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483000;'
-          + 'background:#000;color:#0f0;font:10px/1.25 monospace;padding:3px 5px;'
-          + 'max-width:64%;max-height:40%;overflow:hidden;white-space:pre;'
-          + 'pointer-events:none;opacity:.92'
-        if (document.body !== null) document.body.appendChild(p)
-        contourAuditPanel = p
-      }
-      const lines = []
-      for (const e of list.slice(0, 6)) {
-        lines.push(e.k.slice(0, 52) + ' ' + e.r[2] + 'x' + e.r[3] + ' ' + e.b)
-      }
-      if (list.length === 0) lines.push('no opaque panel found (run ' + contourAuditRuns + ')')
-      contourAuditPanel.textContent = 'AUDIT r' + contourAuditRuns + ' n' + list.length
-        + ' ' + (isContourView3D() ? '3D' : '2D') + '\n' + lines.join('\n')
+      contourPulseFrames = 0
+      contourPulseCommits = 0
+      contourPulseMuts = 0
+      contourPulseDraws = 0
+      contourPulseGaps = []
+      if (typeof fetch !== 'function') return
+      try {
+        fetch(CONTOUR_PULSE_URL, { method: 'POST', mode: 'no-cors', body: body }).catch(() => {})
+      } catch (e) { /* listener down: the counters cost nothing and say nothing */ }
     }
 
     /** Build/refresh/remove the layer to match the switches and the current page. */
     const syncContour = () => {
+      if (typeof contourPulseMuts === 'number') contourPulseMuts++
       const on = isEnabled() && isContourOn()
       if (!on) {
         if (contourWrap !== null) contourTeardown()
@@ -4944,7 +4918,7 @@ function apply(ctx) {
       contourApplySwitches()
       /* Sample the DOM from the SAME channel that samples it for mutation: streaming is
          a mutation storm, so this is the only moment a streaming-only panel exists. */
-      contourAuditOnce()
+      contourPulseOnce()
     }
 
     /* Pause the sheet while the user scrolls the page, resume shortly after the
