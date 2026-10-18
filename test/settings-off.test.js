@@ -67,6 +67,7 @@ fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><style>
 </style></head><body>
 <div class="panel" id="panel"></div>
 <script>window.__ModuleLoader__={load:(m)=>{window.__MOD__=m}}</script>
+<script>window.__CONTOUR_SYNC_BUILD__=true</script>
 <script src="./client.js"></script>
 <script>
 /* Recording React: enough to capture the real element tree the settings panel
@@ -200,7 +201,7 @@ document.title = 'DONE ' + JSON.stringify(window.__RESULTS__)
 const html = fs.readFileSync(page, 'utf8')
 fs.writeFileSync(page, html.replace(
   '<script src="./client.js"></script>',
-  '<script>var APP_TOKENS_JS = ' + JSON.stringify(APP_TOKENS) + '</script>\n<script src="./client.js"></script>'
+  '<script>var APP_TOKENS_JS = ' + JSON.stringify(APP_TOKENS) + '</script>\n<script>window.__CONTOUR_SYNC_BUILD__=true</script>\n<script src="./client.js"></script>'
 ))
 
 const out = execFileSync(chrome, ['--headless', '--disable-gpu', '--no-sandbox',

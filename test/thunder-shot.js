@@ -74,6 +74,7 @@ const mk = (dark) => `<!doctype html><html><head><meta charset="utf-8"><style>
   <div>再补几行文字，把版面填满一些，这样截图里可以同时看到压暗底、白色字形与下层正文之间的关系。等高线与水印在这张图里没有开启，避免干扰对比判断。</div>
 </div>
 <script>window.__ModuleLoader__={load:(m)=>{window.__MOD__=m}}</script>
+<script>window.__CONTOUR_SYNC_BUILD__=true</script>
 <script src="./client.js"></script>
 <script>
   /* The theme's switches no longer persist through localStorage — it reads and

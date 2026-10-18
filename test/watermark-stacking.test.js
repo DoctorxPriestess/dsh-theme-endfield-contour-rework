@@ -146,6 +146,7 @@ const mk = (alpha) => `<!doctype html><html><head><meta charset="utf-8"><style>
     </div></div>
   </div></div>
 <script>window.__ModuleLoader__={load:(m)=>{window.__MOD__=m}}</script>
+<script>window.__CONTOUR_SYNC_BUILD__=true</script>
 <script src="./client.js"></script>
 <script>
   ${DARK ? "document.body.setAttribute('data-ds-dark-theme','')" : ''}

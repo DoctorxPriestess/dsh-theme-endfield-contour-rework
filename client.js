@@ -3131,10 +3131,59 @@ function apply(ctx) {
        pixels -- the property the wrap-around blit relies on. Skipped entirely at
        a 1x store or when the context has no setTransform (the spliced-in test
        harnesses), so a 1x render is byte-identical to a plain draw. */
-    const contourRenderCache = () => {
+    /* ---- chunked rendering -------------------------------------------------
+       The sheet is ~1.0M cubic segments on a 1578x909 viewport and one stroke pass
+       measured ~1s of raster on the reference machine. Doing it in a single task
+       froze the page for up to 2.2s on mount, on a resize that outgrows the sheet,
+       and on a roughness change. The work is now split by CONTOUR_RENDER_SLICE_POINTS
+       and yielded between slices, so the longest task is one slice (measured ~40ms
+       for the sheet sizes this theme builds) and the app keeps processing input.
+       Pixel equivalence: a slice only ever contains whole contours of ONE seam-shift
+       group, and contourSeamShifts() guarantees those contours are disjoint (every
+       sheet point belongs to exactly one translation), so splitting the group's
+       subpaths across strokes cannot composite any pixel twice.
+
+       One generation per request: a newer render (resize, density, palette) bumps
+       the generation and the old loop exits at its next slice. contourTex.ready is
+       false while a render is in flight, so the blit/upload paths keep showing the
+       last complete sheet instead of uploading a half-stroked canvas. */
+    const contourRenderCache = (onDone) => {
       if (contourTex === null) return
       const ctx = contourTex.cv.getContext('2d')
       if (!ctx) return
+      contourTex.ready = false
+      /* Everything the slice loop needs lives in this call: the Node harnesses slice
+         this function out on its own, and an outer constant or helper would simply be
+         undefined there. The token is the cancellation identity -- a newer render (or
+         teardown) replaces it, and the old loop exits at its next slice. */
+      const SLICE_POINTS = 40000
+      const canYield = () => typeof window !== 'undefined' && window !== null
+        && window.__CONTOUR_SYNC_BUILD__ !== true
+        && typeof window.requestAnimationFrame === 'function'
+      const yieldTo = (fn) => {
+        if (!canYield()) { fn(); return }
+        /* Prefer the frame boundary (the build stays in step with the compositor),
+           but never wait forever for it: a hidden or occluded window gets no
+           animation frames, so a short timer resumes the build there. Whichever
+           fires first wins and clears the other. */
+        let pending = true
+        const fire = () => {
+          if (!pending) return
+          pending = false
+          clearTimeout(timer)
+          fn()
+        }
+        const timer = setTimeout(fire, 120)
+        window.requestAnimationFrame(fire)
+      }
+      const token = {}
+      contourTex.renderToken = token
+      const current = () => contourTex !== null && contourTex.renderToken === token
+      /* Observable readiness: the chunked render has no single synchronous end, so
+         the wrapper carries the state (tests wait for it instead of guessing a
+         timeout; the diagnostics HUD reads it too). Removed at the start of the
+         next render, set again by finish(). */
+      if (contourWrap !== null) contourWrap.setAttribute('data-endfield-contour-ready', '0')
       const sx = (contourTex.wCss > 0 && contourTex.cv.width !== contourTex.wCss)
         ? contourTex.cv.width / contourTex.wCss : 1
       const sy = (contourTex.hCss > 0 && contourTex.cv.height !== contourTex.hCss)
@@ -3330,26 +3379,60 @@ function apply(ctx) {
           list.push(i)
         }
       }
+      /* Slice each group into whole-contour batches (see the chunked-rendering
+         note above the function). A batch carries the group's translation, so a
+         batch never needs more than one setTransform + beginPath + stroke. */
+      const batches = []
       for (const [key, list] of groups) {
         const comma = key.indexOf(',')
         const dx = Number(key.slice(0, comma)) * perX
         const dy = Number(key.slice(comma + 1)) * perY
+        let first = 0
+        let points = 0
+        for (let k = 0; k < list.length; k++) {
+          points += contourPaths[list[k]].length / 2
+          if (points >= SLICE_POINTS || k === list.length - 1) {
+            batches.push({ dx, dy, list: list.slice(first, k + 1) })
+            first = k + 1
+            points = 0
+          }
+        }
+      }
+      const strokeBatch = (b) => {
         if (typeof ctx.setTransform === 'function') {
-          ctx.setTransform(sx, 0, 0, sy, sx * dx, sy * dy)
+          ctx.setTransform(sx, 0, 0, sy, sx * b.dx, sy * b.dy)
         }
         ctx.beginPath()
-        for (let k = 0; k < list.length; k++) drawSmoothPath(smoothPath(contourPaths[list[k]]))
+        for (let k = 0; k < b.list.length; k++) drawSmoothPath(smoothPath(contourPaths[b.list[k]]))
         ctx.stroke()
       }
-      /* The sheet's CONTENT changed while its canvas object and size did not (a density
-         change re-extracts into the same cache canvas, a palette change repaints it).
-         The 3D layer uploads the sheet texture by identity + size, so without a
-         generation counter it keeps showing the old picture for the rest of the
-         session -- reported as "视差模式下等高线密集度不能调整". Bumping this, and
-         forcing the next 3D frame to draw, is what makes those two settings apply in
-         the parallax view. */
-      contourSheetGen += 1
-      contourGlLastDrawAt = -1
+      const finish = () => {
+        if (!current()) return
+        contourTex.ready = true
+        if (contourWrap !== null) contourWrap.setAttribute('data-endfield-contour-ready', '1')
+        /* The sheet's CONTENT changed while its canvas object and size did not (a density
+           change re-extracts into the same cache canvas, a palette change repaints it).
+           The 3D layer uploads the sheet texture by identity + size, so without a
+           generation counter it keeps showing the old picture for the rest of the
+           session -- reported as "视差模式下等高线密集度不能调整". Bumping this, and
+           forcing the next 3D frame to draw, is what makes those two settings apply in
+           the parallax view. */
+        contourSheetGen += 1
+        contourGlLastDrawAt = -1
+        if (typeof onDone === 'function') onDone()
+      }
+      let next = 0
+      const step = () => {
+        if (!current()) return
+        /* Synchronous environments take every remaining batch in this task (exactly
+           the old behaviour, one stroke per group would have been the same ink); a
+           browser takes one slice and yields. */
+        const stop = canYield() ? next + 1 : batches.length
+        while (next < stop && next < batches.length) strokeBatch(batches[next++])
+        if (next >= batches.length) { finish(); return }
+        yieldTo(step)
+      }
+      step()
     }
 
     /* Blit the cached texture onto the visible viewport canvas with wrap-around.
@@ -3432,6 +3515,9 @@ function apply(ctx) {
       if (typeof contourPulseCommits === 'number') contourPulseCommits++
       if (typeof contourDiagUpdate === 'function') { try { contourDiagUpdate() } catch (e) {} }
       if (contourLineCv === null || contourTex === null) return
+      /* A chunked render is in flight: the sheet canvas holds a partial picture.
+         Keep the last complete frame (the surface, or the preserved GL buffer). */
+      if (contourTex.ready === false) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
          sheet. When the GPU says no, this returns false and the flat path below
          draws instead -- the sheet is always on screen, one way or the other. */
@@ -4288,6 +4374,9 @@ function apply(ctx) {
     const contourGlUpload = () => {
       const st = contourGl
       if (st === null || contourTex === null) return false
+      /* Never upload a half-stroked canvas: the preserved GL frame stays on screen
+         until the chunked render finishes. */
+      if (contourTex.ready === false) return false
       const gl = st.gl
       const src = contourTex.cv
       if (st.sheetSrc !== src || st.sheetW !== src.width || st.sheetH !== src.height
@@ -4450,6 +4539,10 @@ function apply(ctx) {
        target size, a colour flip, a first mount), never per frame. */
     const contourPaintSurface = () => {
       if (contourLineCv === null || contourTex === null || contourView === null) return
+      /* The finish callback is the only caller that sees ready=true during a build;
+         a rebuild that lands while a slice loop is running must not paint the
+         partial canvas into the surface. */
+      if (contourTex.ready === false) return
       const cv = contourLineCv
       /* Two ways the surface stays off, both falling back to the per-frame blit
          into a viewport-sized canvas: the size plan did not budget for it, or the
@@ -4690,11 +4783,18 @@ function apply(ctx) {
       contourTex = {
         cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true,
         hollow: contourHollowStrength(), three,
+        /* Not ready until the chunked render finishes; the blit/upload guards read
+           this so neither the surface nor the GL texture ever sees a partial sheet. */
+        ready: false,
       }
-      contourRenderCache()
-      /* The sheet is static until the next rebuild, so this is where it goes
-         onto the scroll surface (one full-surface paint, not one per frame). */
-      contourPaintSurface()
+      /* The sheet is static until the next rebuild, so this is where it goes onto
+         the scroll surface (one full-surface paint, not one per frame). It runs from
+         the render's completion callback: a browser renders in slices and yields,
+         the Node harnesses take the synchronous path and call it before returning. */
+      contourRenderCache(() => {
+        contourPaintSurface()
+        if (contourWrap !== null) contourBlit()
+      })
       // Keep the scroll offset inside the (possibly new) texture period.
       contourOffsetX = ((contourOffsetX % t.twDev) + t.twDev) % t.twDev
       contourOffsetY = ((contourOffsetY % t.thDev) + t.thDev) % t.thDev
@@ -4873,8 +4973,12 @@ function apply(ctx) {
     const contourRetune = () => {
       if (contourField === null || contourTex === null) return
       contourExtractAll()
-      contourRenderCache()
-      contourBlit()
+      /* Re-extracted paths go into the same canvas; repaint the surface from the
+         finished render (the 2D surface holds the old sheet until then) and blit. */
+      contourRenderCache(() => {
+        contourPaintSurface()
+        contourBlit()
+      })
     }
 
     /* Roughness change: the terrain ITSELF is regenerated -- the one setting that
@@ -4949,6 +5053,9 @@ function apply(ctx) {
 
     const contourTeardown = () => {
       contourStopLoop()
+      /* Cancel a chunked render in flight: the canvas and the layer are going away,
+         and a queued slice must not stroke into a detached canvas. */
+      if (contourTex !== null) contourTex.renderToken = null
       if (contourWatchTimer !== null) {
         clearInterval(contourWatchTimer)
         contourWatchTimer = null
@@ -5207,6 +5314,9 @@ function apply(ctx) {
           const wrap = document.createElement('div')
           wrap.setAttribute('data-endfield-contour', '')
           wrap.setAttribute('aria-hidden', 'true')
+          /* 0 until the first chunked render finishes (see contourRenderCache);
+             tests and the diagnostics HUD read this instead of guessing a delay. */
+          wrap.setAttribute('data-endfield-contour-ready', '0')
           const line = document.createElement('canvas')
           line.setAttribute('data-endfield-contour-lines', '')
           wrap.appendChild(line)
@@ -5348,10 +5458,12 @@ function apply(ctx) {
        a rebuild. */
     const contourRepaint = () => {
       if (contourWrap === null || contourTex === null) return
-      contourRenderCache()
       /* The cached texture changed under the surface, so the surface has to be
-         repainted (not just re-positioned). */
-      contourPaintSurface()
+         repainted (not just re-positioned) once the chunked render finishes. */
+      contourRenderCache(() => {
+        contourPaintSurface()
+        contourBlit()
+      })
     }
 
     /* Colour scheme changes are a token flip on <body>, not a resize, so the

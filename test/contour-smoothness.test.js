@@ -107,7 +107,7 @@ if (ROUGH === undefined) throw new Error('client.js declares no CONTOUR_ROUGHNES
 let api
 try {
   api = new Function(`
-let contourField=null, contourPaths=[], contourTex=null
+let contourField=null, contourPaths=[], contourTex=null, contourWrap=null
 /* contourRenderCache also bumps fix32's content generation and resets the 3D
    refresh marker; the harness needs both bindings even though it never uploads. */
 let contourSheetGen = 0, contourGlLastDrawAt = -1

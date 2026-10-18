@@ -280,7 +280,7 @@ return {
        terrain while it is on screen, and contourRebuildForRoughness() reads the
        viewport back from here. */
     contourView = { w, h, dpr }
-    contourWrap = contourWrap || {}
+    contourWrap = contourWrap || { setAttribute() {} }
     contourLineCv = Object.assign({}, canvas, { _ctx: null })
     contourLineCv.width = Math.round(w * dpr)
     contourLineCv.height = Math.round(h * dpr)
@@ -304,7 +304,7 @@ return {
        to say which view it is in before building. */
     contourDpr = dpr
     contourView = { w, h, dpr }
-    contourWrap = contourWrap || {}
+    contourWrap = contourWrap || { setAttribute() {} }
     contourLineCv = Object.assign({}, canvas, { _ctx: null })
     contourLineCv.width = Math.round(w * dpr)
     contourLineCv.height = Math.round(h * dpr)
