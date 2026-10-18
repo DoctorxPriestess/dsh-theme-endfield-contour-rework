@@ -5562,6 +5562,20 @@ function apply(ctx) {
       [class*='_frame']:has(> [data-endfield-contour]) [class$='_sidebarCol'] {
         background: transparent !important;
       }
+      /* The columns' own 1px dividers are the ONE straight line the sheet cannot hide.
+         With the fills cleared above, the divider is a border-l1 hairline drawn over the
+         field -- in the dark palette #343633 over a near-black sheet, i.e. a light line
+         crossing the whole frame, which reads exactly like a tiling seam (it was
+         reported as one). Clearing only the COLOUR keeps the 1px of layout intact, so
+         nothing shifts, and the sheet that now runs behind both columns is itself the
+         separation. Same reasoning as the sidebar fill: what the sheet replaces, the
+         theme removes. */
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_sidebarCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_centerCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_rightbarCol'] {
+        border-left-color: transparent !important;
+        border-right-color: transparent !important;
+      }
       /* The composer seat fades content out behind the input with a gradient to
          bg-base. Left alone it would show as an opaque band cutting across the
          sheet, so it fades to the base colour with alpha instead — same visual

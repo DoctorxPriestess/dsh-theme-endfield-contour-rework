@@ -177,6 +177,12 @@ async function main() {
     R('on: conversation bg cleared (was hiding layer)', cbgOn==='rgba(0, 0, 0, 0)', cbgOn)
     const sb=document.querySelector('.pI_x6G_sidebarCol')
     R('on: sidebar bg cleared', getComputedStyle(sb).backgroundColor==='rgba(0, 0, 0, 0)')
+    /* The column divider is the one straight line the sheet cannot hide: a border-l1
+       hairline over the field reads as a tiling seam. Colour cleared, 1px of layout kept. */
+    const sbs=getComputedStyle(sb)
+    R('on: column divider not drawn over the sheet',
+      sbs.borderRightColor==='rgba(0, 0, 0, 0)' && sbs.borderRightWidth==='1px',
+      sbs.borderRightColor+' / '+sbs.borderRightWidth)
     // z-order / hit-testing: the layer must never eat clicks
     R('on: layer ignores pointer events', getComputedStyle(wrap).pointerEvents==='none')
     const st=px(lines)
