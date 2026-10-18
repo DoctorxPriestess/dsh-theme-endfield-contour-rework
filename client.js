@@ -3116,6 +3116,8 @@ function apply(ctx) {
        SHADER's wrap is (uv.x/y crossing an integer), so the answer to "is that line
        the seam?" is in the screenshot instead of in a hypothesis. */
     let contourDiagHud = null
+    let contourWatchTimer = null
+    let contourWatchHits = 0
     let contourDiagBuilds = 0
     let contourDiagRemounts = 0
     let contourDiagResizes = 0
@@ -3824,6 +3826,25 @@ function apply(ctx) {
         contourGlWhy = 'webgl context refused'
         return false
       }
+      /* A lost context draws nothing and says nothing: the canvas stays in the
+         document, empty, so the layer is blank until the page is reloaded. Streaming a
+         long answer is exactly when a GPU process is most likely to reset, so treat it
+         as a normal event: drop to the flat sheet now (it is already built) and let the
+         next frame probe for a fresh context. */
+      cv.addEventListener('webglcontextlost', (ev) => {
+        if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
+        contourGlWhy = 'context lost'
+        contourGlChecked = false
+        contourGlNextTry = 0
+        try { contourGlDispose() } catch (e) {}
+        contourReleaseFlat()
+        contourSurfaceOn = false
+        contourBlit()
+      }, false)
+      cv.addEventListener('webglcontextrestored', () => {
+        contourGlChecked = false
+        contourGlNextTry = 0
+      }, false)
       const vs = contourGlCompile(gl, gl.VERTEX_SHADER, CONTOUR_GL_VERT)
       /* The footprint filter needs one extension. Try it, keep it only if it
          compiles, and record the outcome for the diagnostics line. */
@@ -4523,6 +4544,10 @@ function apply(ctx) {
 
     const contourTeardown = () => {
       contourStopLoop()
+      if (contourWatchTimer !== null) {
+        clearInterval(contourWatchTimer)
+        contourWatchTimer = null
+      }
       contourCancelRoughnessRebuild()
       if (contourResizeTimer !== null) {
         clearTimeout(contourResizeTimer)
@@ -4614,6 +4639,31 @@ function apply(ctx) {
       contourBlit()
     }
 
+    /* Put the layer back if the page took it out. Two cases, both cheap to test:
+       the host element was replaced (still connected elsewhere -> move the wrapper),
+       or the wrapper was detached from a host that is still there (a re-render that
+       removed an unknown child -> insert it again as the first child). Either way the
+       canvas keeps its pixels, so the picture does not even flicker. */
+    const contourReattach = () => {
+      if (contourWrap === null) return false
+      if (!isEnabled() || !isContourOn()) return false
+      if (contourHost !== null && contourHost.isConnected && contourWrap.parentNode === contourHost) {
+        return false
+      }
+      const host = contourHost !== null && contourHost.isConnected ? contourHost : findAppFrame()
+      if (host === null) return false
+      if (host.firstChild) host.insertBefore(contourWrap, host.firstChild)
+      else host.appendChild(contourWrap)
+      contourHost = host
+      contourSizeTo(host)
+      /* The canvas survives a move, but a host that changed size (or a context that was
+         lost) does not, so one blit is what makes the layer correct immediately rather
+         than at the next animation frame -- which, with the movement paused, may be a
+         long way off. */
+      contourBlit()
+      return true
+    }
+
     /** Build/refresh/remove the layer to match the switches and the current page. */
     const syncContour = () => {
       const on = isEnabled() && isContourOn()
@@ -4683,6 +4733,17 @@ function apply(ctx) {
              never rendered. */
           contourBuildTexture(contourView.w, contourView.h)
           contourBlit()
+          /* A re-render that replaces the frame, drops an unknown child, or loses the
+             GL context can take the layer away without ever telling us. 250ms is four
+             frames of a 60Hz page: fast enough that a flashing block becomes a single
+             blip, and cheap enough to keep forever (the check is two property reads
+             until something is actually wrong). */
+          if (typeof setInterval === 'function' && contourWatchTimer === null) {
+            contourWatchTimer = setInterval(() => {
+              if (contourWrap === null) return
+              if (contourReattach()) contourWatchHits++
+            }, 250)
+          }
           // First child: keeps the layer at the bottom of the frame's paint order.
           if (host.firstChild) host.insertBefore(wrap, host.firstChild)
           else host.appendChild(wrap)

@@ -470,6 +470,27 @@ async function main() {
         (()=>{const c=live(); return c?('opaquePx='+px(c).opaque):'no canvas'})())
     }
 
+    // ---------- 8.5 self-healing: the page removes the layer ----------
+    /* A re-render that replaces the frame, or wipes an unknown child, takes the layer
+       with it and nothing in the theme is told. The watchdog runs every 250ms; virtual
+       time makes the wait instant here. */
+    {
+      const before = document.querySelector('[data-endfield-contour]')
+      const hostEl = before.parentNode
+      hostEl.removeChild(before)
+      let back = null
+      for (let t = 0; t < 40 && back === null; t++) {
+        await sleep(60)
+        back = document.querySelector('[data-endfield-contour]')
+      }
+      R('watchdog: a layer the page removed is put back', back !== null && back === before,
+        back === null ? 'gone' : (back === before ? 'same node' : 'a new node'))
+      R('watchdog: exactly one layer', document.querySelectorAll('[data-endfield-contour]').length === 1,
+        'n=' + document.querySelectorAll('[data-endfield-contour]').length)
+      const st = back === null ? {opaque: 0} : px(document.querySelector('[data-endfield-contour-lines]'))
+      R('watchdog: and it still has its picture', st.opaque > 3000, 'opaquePx=' + st.opaque)
+    }
+
     // ---------- 9. teardown ----------
     if(typeof window.__dispose__==='function') window.__dispose__()
     await sleep(150)
