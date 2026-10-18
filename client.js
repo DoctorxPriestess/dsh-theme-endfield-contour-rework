@@ -1200,7 +1200,7 @@ function apply(ctx) {
        frame, so growing it there buys nothing and costs twice. */
     const CONTOUR_SCROLL_AREA = 12e6        // CSS px^2
     const CONTOUR_SCROLL_DIM = 8192         // device px per side
-    const CONTOUR_TEX_QUANT = 128           // CSS px
+    const CONTOUR_TEX_QUANT = 128           // CSS px: step-down notch for the period, rounded up to SNAP
     /* Ceiling on the BACKING STORES this one effect may hold: the contour texture
        plus the scroll surface it is painted into (see contourPaintSurface). The
        surface is the VIEWPORT plus a small pad -- it is cropped, not period-sized --
