@@ -19,9 +19,9 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `2f30843`（代码 HEAD；其后只有文档与测试提交） |
-| 已安装版本 | **已同步**：`profiles\desktop\node_modules\…\client.js` 的 sha256 同样是 `0ec1071c…`（装的是 fix15，**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix15.tgz` |
+| 分支 / HEAD | `main` / `cadd384`（`client.js` sha256 `5c03b58e…`） |
+| 已安装版本 | **已同步**：`profiles\desktop\node_modules\…\client.js` 的 sha256 同样是 `5c03b58e…`（装的是 fix16，**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix16.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
 | 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
 | 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
@@ -36,7 +36,7 @@
 
 ### 回滚方式
 - 代码：`git revert d30fbf5`（或 `git reset --hard fa05b97`）。
-- 安装回滚：`undo_restore mode=id snapshot_id=20261019-022505-4f4f`（或 `mode=undo`），然后重启 DSH。该快照在装 fix15 **之前**取，profile 里记录的依赖因此会回到 fix14。
+- 安装回滚：`undo_restore mode=id snapshot_id=20261019-033147-a421`（装 fix16 前）或 `20261019-022505-4f4f`（装 fix15 前），然后重启 DSH。
 
 ---
 
