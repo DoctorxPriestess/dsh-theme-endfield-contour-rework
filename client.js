@@ -2598,45 +2598,34 @@ function apply(ctx) {
          that stop dead in the middle of the sheet.
          A sheet that does not close on the grid is not a torus, so nothing here may
          wrap: those callers keep the bounded behaviour exactly as it was. */
-      const PAD = 0
-      const wrapI = (i) => {
-        if (!torus) return i
-        const m = i % pw
-        return m < 0 ? m + pw : m
-      }
-      const wrapJ = (j) => {
-        if (!torus) return j
-        const m = j % ph
-        return m < 0 ? m + ph : m
-      }
-      const at = (i, j) => F[wrapJ(j) * cols + wrapI(i)]
       /* Edge ids live on ONE period of cells: 2 * pw * ph slots, horizontal first.
          Two cells that face each other across the seam therefore stamp the identical
-         id, which is what stitches the contour there.
-         A sheet that does not close is NOT a torus, so there the ids keep the original
-         row stride of cols for the vertical edges: the period-based formula would alias
-         the last column's right edge with the next row's first left edge (i = pw wraps
-         to 0), which showed up as contours jumping a whole period. */
-      const hEdge = torus
-        ? (i, j) => wrapJ(j) * pw + wrapI(i)
-        : (i, j) => j * pw + i
-      const vEdge = torus
-        ? (i, j) => pw * ph + wrapJ(j) * pw + wrapI(i)
-        : (i, j) => hCount + j * cols + i
-      const pt = (id, i0, j0, i1, j1) => {
+         id, which is what stitches the contour there. The cell loop below walks one
+         period directly -- node (pw, j) IS node (0, j) and reads the same value out of
+         F, because the generator writes that duplicate row and column -- so the only
+         wrap in the hot path is the two boundary edge references, and neither needs a
+         modulo: this is the per-cell cost that matters, 12 levels per sheet.
+         A sheet that does not close is NOT a torus, so there the vertical ids keep the
+         original row stride of cols: the period-based formula would alias the last
+         column's right edge with the next row's first left edge, which showed up as
+         contours jumping a whole period. */
+      const torusVBase = pw * ph
+      const pt = (id, a, b, x0, y0, x1, y1) => {
         if (es[id] === st) return id
-        const a = at(i0, j0)
-        const b = at(i1, j1)
         let t = (L - a) / (b - a)
         if (!(t >= 0)) t = 0
         else if (t > 1) t = 1
-        let px = (i0 + (i1 - i0) * t) * step
-        let py = (j0 + (j1 - j0) * t) * step
+        let px = (x0 + (x1 - x0) * t) * step
+        let py = (y0 + (y1 - y0) * t) * step
+        /* Canonical, so the vertex position does not depend on which of the equivalent
+           cells happened to stamp it first. On a torus the positions this can produce
+           are already inside [0, period]: only the far edge needs folding onto zero.
+           A sheet that does not close has no duplicate far edge, so folding there would
+           put the last column's vertices on top of column zero and stretch every
+           contour that reaches it by a whole period. */
         if (torus) {
-          /* Canonical, so the vertex position does not depend on which of the
-             equivalent cells happened to stamp it first. */
-          px -= Math.floor(px / periodX) * periodX
-          py -= Math.floor(py / periodY) * periodY
+          if (px >= periodX) px -= periodX
+          if (py >= periodY) py -= periodY
         }
         ex[id] = px
         ey[id] = py
@@ -2652,12 +2641,19 @@ function apply(ctx) {
         if (n1[b] < 0) n1[b] = a
         else if (n2[b] < 0) n2[b] = a
       }
-      for (let j = -PAD; j < rows - 1 + PAD; j++) {
-        for (let i = -PAD; i < cols - 1 + PAD; i++) {
-          const v0 = at(i, j)
-          const v1 = at(i + 1, j)
-          const v3 = at(i, j + 1)
-          const v2 = at(i + 1, j + 1)
+      for (let j = 0; j < ph; j++) {
+        const row0 = j * cols
+        const row1 = row0 + cols
+        /* The cell below the last row is the first row again (torus only). */
+        const jB = j + 1 === ph ? 0 : j + 1
+        const hT = j * pw
+        const hB = (torus ? jB : j + 1) * pw
+        const vRow = torus ? torusVBase + j * pw : hCount + j * cols
+        for (let i = 0; i < pw; i++) {
+          const v0 = F[row0 + i]
+          const v1 = F[row0 + i + 1]
+          const v3 = F[row1 + i]
+          const v2 = F[row1 + i + 1]
           let mn = v0, mx = v0
           if (v1 < mn) mn = v1; else if (v1 > mx) mx = v1
           if (v2 < mn) mn = v2; else if (v2 > mx) mx = v2
@@ -2665,10 +2661,13 @@ function apply(ctx) {
           // Whole cell on one side of the level: nothing crosses it.
           if (L <= mn || L > mx) continue
           const idx = (v0 > L ? 1 : 0) | (v1 > L ? 2 : 0) | (v2 > L ? 4 : 0) | (v3 > L ? 8 : 0)
-          const T = () => pt(hEdge(i, j), i, j, i + 1, j)
-          const B = () => pt(hEdge(i, j + 1), i, j + 1, i + 1, j + 1)
-          const Le = () => pt(vEdge(i, j), i, j, i, j + 1)
-          const Ri = () => pt(vEdge(i + 1, j), i + 1, j, i + 1, j + 1)
+          /* The right edge of the last column is the left edge of column zero. */
+          const iR = i + 1 === pw ? 0 : i + 1
+          const vR = torus ? torusVBase + j * pw + iR : hCount + j * cols + i + 1
+          const T = () => pt(hT + i, v0, v1, i, j, i + 1, j)
+          const B = () => pt(hB + i, v3, v2, i, j + 1, i + 1, j + 1)
+          const Le = () => pt(vRow + i, v0, v3, i, j, i, j + 1)
+          const Ri = () => pt(vR, v1, v2, i + 1, j, i + 1, j + 1)
           switch (idx) {
             case 1: case 14: link(T(), Le()); break
             case 2: case 13: link(T(), Ri()); break
@@ -2724,14 +2723,6 @@ function apply(ctx) {
         }
         return path
       }
-      /* How close a vertex is to a corner of the period: the walk starts at the
-         closest one, so a contour that winds around the sheet ends (and therefore
-         loses its cyclic smoothing) out in the pad band instead of mid-frame. */
-      const cornerGap = (id) => {
-        const x = ex[id]
-        const y = ey[id]
-        return Math.min(x, periodX - x) + Math.min(y, periodY - y)
-      }
       /* Reject debris before it reaches the draw list. The field covers the
          texture exactly (that is what makes the scroll seamless), so there is no
          "off-canvas" case any more: every vertex is on the texture. What remains
@@ -2772,18 +2763,15 @@ function apply(ctx) {
           if (keep(p)) out.push(p)
         }
       }
-      /* Rings are entered nearest a corner first (see cornerGap). Sorted once per
-         level: re-scanning the whole touch list per ring is the one way this could
-         turn quadratic on a dense level. */
-      let ringOrder = touched
-      if (torus) {
-        const idx = new Array(tn)
-        for (let k = 0; k < tn; k++) idx[k] = touched[k]
-        idx.sort((a, b) => cornerGap(a) - cornerGap(b))
-        ringOrder = idx
-      }
+      /* Rings are walked in the order the scan first touched them, which is the
+         top-left of the sheet. A contour that WINDS around the sheet therefore comes
+         back to its own start one period away, and that one join is smoothed as an open
+         end; sorting the vertices by distance to a corner to move that join was measured
+         at 120ms per rebuild on a 4300x2260 sheet, which is not a trade worth making for
+         a sub-pixel difference at one vertex (the cusps test's worst drawn turn is 1.1
+         degrees either way). */
       for (let k = 0; k < tn; k++) {
-        const id = ringOrder[k]
+        const id = touched[k]
         if (seen[id] !== st) {
           const p = walk(id)
           if (keep(p)) out.push(p)

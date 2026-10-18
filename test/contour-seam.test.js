@@ -154,11 +154,26 @@ return {
     let maxStep = 0
     let outside = 0
     let shortest = Infinity
+    /* A contour that winds around the sheet is unwrapped as it is walked, so its
+       coordinates legitimately run outside the tile -- by at most as far as the contour
+       is long, which is the only bound that does not need a magic constant. A break in
+       the unwrap shows up here immediately: it stretches a short contour by a whole
+       period (the defect this check caught, 1150px of span on a 50px contour). */
+    let worstStretch = 0
     for (const p of contourPaths) {
       const n = p.length
+      let len = 0
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
       for (let k = 2; k < n; k += 2) {
         const d = Math.hypot(p[k] - p[k - 2], p[k + 1] - p[k - 1])
+        len += d
         if (d > maxStep) maxStep = d
+      }
+      for (let k = 0; k < n; k += 2) {
+        if (p[k] < minX) minX = p[k]
+        if (p[k] > maxX) maxX = p[k]
+        if (p[k + 1] < minY) minY = p[k + 1]
+        if (p[k + 1] > maxY) maxY = p[k + 1]
       }
       if (n / 2 < shortest) shortest = n / 2
       let gx = p[0] - p[n - 2]
@@ -166,12 +181,15 @@ return {
       gx -= Math.round(gx / perX) * perX
       gy -= Math.round(gy / perY) * perY
       if (Math.hypot(gx, gy) > 2) freeEnds++
-      for (let k = 0; k < n; k += 2) {
-        if (p[k] < -perX || p[k] > tw + perX || p[k + 1] < -perY || p[k + 1] > th + perY) outside++
+      const slack = f.step * 2
+      if (maxX - minX > len + slack || maxY - minY > len + slack) {
+        outside++
+        const stretch = Math.max(maxX - minX, maxY - minY) / Math.max(1, len)
+        if (stretch > worstStretch) worstStretch = stretch
       }
     }
     return { fieldSeam, paths: contourPaths.length, freeEnds, maxStep, outside, shortest,
-      range: f.mx - f.mn, perX, perY }
+      worstStretch, range: f.mx - f.mn, perX, perY }
   },
   torusAt(tw, th) {
     const f = contourField
@@ -254,6 +272,7 @@ const CHECK = [[1920, 1280, 'plain'], [3720, 1560, '2D sheet at 1432x753@2x'],
 let worstFieldSeam = 0
 let freeEnds = 0
 let torusSheets = 0
+let worstStretch = 0
 let maxStep = 0
 let outside = 0
 let degenerate = 0
@@ -268,6 +287,7 @@ for (const [tw, th, label] of CHECK) {
   freeEnds += b.freeEnds
   if (b.maxStep > maxStep) maxStep = b.maxStep
   outside += b.outside
+  if (b.worstStretch > worstStretch) worstStretch = b.worstStretch
   if (b.paths < 20) {
     degenerate++
     console.error('      ' + label + ' ' + tw + 'x' + th + ': only ' + b.paths + ' contours')
@@ -287,8 +307,9 @@ else {
   if (maxStep < api.step * 2.5) ok('no vertex jump inside a contour (worst step ' + maxStep.toFixed(1) + 'px)')
   else fail('a contour jumps ' + maxStep.toFixed(1) + 'px between vertices — the unwrap broke')
 
-  if (outside === 0) ok('every vertex stays within one period of the sheet')
-  else fail(outside + ' vertex(es) drifted more than one period outside the sheet')
+  if (outside === 0) ok('no contour is stretched by the unwrap (span never exceeds its own length)')
+  else fail(outside + ' contour(s) span further than their length allows (worst '
+    + worstStretch.toFixed(1) + 'x) — the unwrap broke')
 
   if (degenerate === 0) ok('every sheet carries a full contour set')
 }
@@ -303,7 +324,7 @@ else {
   const endsMeanNothing = b.maxStep < 25
   if (torus) fail('a sheet 3px off the grid was treated as a torus')
   else if (!endsMeanNothing) fail('off-grid sheet: a contour jumps ' + b.maxStep.toFixed(1) + 'px between vertices')
-  else if (b.outside > 0) fail('off-grid sheet: ' + b.outside + ' vertex(es) outside the tile + one period')
+  else if (b.outside > 0) fail('off-grid sheet: a contour spans further than its length allows')
   else ok('an off-grid sheet is not wrapped: ' + b.paths + ' contours, worst step '
     + b.maxStep.toFixed(1) + 'px, all vertices inside the tile')
 }
