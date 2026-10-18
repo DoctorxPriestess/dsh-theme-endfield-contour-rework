@@ -72,7 +72,8 @@ try {
   const body = [
     grabNum('CONTOUR_GL_REFRESH_MS'),
     grabNum('CONTOUR_GL_HALF_PX'),
-    grabOne('contourGlWantsFrame'),
+    grabNum('CONTOUR_GL_MIN_MS'),
+    grab('contourGlWantsFrame'),
     grab('contourPageScrolled'),
     grab('onContourScrollEvent'),
     grab('onContourScrollEndEvent'),
@@ -134,7 +135,7 @@ return {
   pause: contourPauseOnScroll,
   frame: contourFrame,
   glFrame: contourGlWantsFrame,
-  consts: { REFRESH: CONTOUR_GL_REFRESH_MS, HALF: CONTOUR_GL_HALF_PX },
+  consts: { REFRESH: CONTOUR_GL_REFRESH_MS, HALF: CONTOUR_GL_HALF_PX, MIN: CONTOUR_GL_MIN_MS },
   hooks: () => ({ scroll: scrollHookCalls, scrollEnd: scrollEndHookCalls }),
   doc,
   setLayer: (wrap, tex) => { contourWrap = wrap; contourTex = tex },
@@ -232,22 +233,34 @@ if (frozen.blits[0].x === 100 && frozen.blits[0].y === 50) {
 } else {
   fail('a frozen frame moved the camera to ' + frozen.blits[0].x + ',' + frozen.blits[0].y)
 }
-if (frozen.blits[0].at === -1) ok('a frozen frame forces the 3D draw past the sub-pixel gate')
-else fail('a frozen frame left contourGlLastDrawAt at ' + frozen.blits[0].at + ' -- the gate can drop it')
 if (frozen.watch.length === 1 && frozen.watch[0] === 0) {
   ok('a frozen frame is not counted by the slow-frame watchdog (a scroll must not disable 3D)')
 } else {
   fail('a frozen frame fed dt=' + JSON.stringify(frozen.watch) + ' to the watchdog')
 }
 
-/* ------------------------------------------- 3. the 3D frame refresh floor ---- */
+/* ------------------------------- 3. the 3D gate: 60Hz ceiling, then the floor ---- */
 const F = api.glFrame
 if (F(0, 0, 0) === false) ok('a still camera that just drew does not redraw (the sub-pixel gate still skips)')
 else fail('a still camera redrew immediately -- the gate is gone')
-if (F(0.4, -0.4, 10) === false) ok('sub-half-pixel drift is still skipped')
+if (F(0.4, -0.4, 40) === false) ok('sub-half-pixel drift is still skipped')
 else fail('sub-half-pixel drift forced a redraw')
-if (F(0.5, 0, 10) === true && F(0, -0.6, 10) === true) ok('half a device pixel of drift forces a redraw')
+if (F(0.5, 0, 40) === true && F(0, -0.6, 40) === true) ok('half a device pixel of drift forces a redraw')
 else fail('half a device pixel of drift did not force a redraw')
+/* The machine this was reported on runs a 240Hz panel: without a ceiling the loop drew
+   60-140 full-screen marches per 2s window for a sheet moving 0.8px per 60Hz frame. */
+if (F(0.9, 0.9, 0) === false && F(0.9, 0.9, 7) === false) {
+  ok('the 3D layer is never committed faster than ' + api.consts.MIN + 'ms (60Hz ceiling)')
+} else {
+  fail('the 3D layer can still be committed faster than ' + api.consts.MIN + 'ms')
+}
+if (F(0.9, 0.9, 16) === true) ok('the ceiling lets a moved camera draw again at ' + api.consts.MIN + 'ms')
+else fail('the ceiling never releases')
+if (F(0, 0, 0, true) === true && F(0, 0, 4, true) === true) {
+  ok('a FROZEN frame bypasses the ceiling (the scroll fix depends on committing it)')
+} else {
+  fail('a frozen frame was throttled by the 60Hz ceiling')
+}
 if (F(0, 0, 199) === false && F(0, 0, 200) === true) {
   ok('a still camera redraws after ' + api.consts.REFRESH + 'ms, not before')
 } else {
@@ -260,6 +273,8 @@ else fail('a never-drawn layer skipped its first frame')
 const blitSrc = grab('contourBlit')
 if (/contourGlWantsFrame\(/.test(blitSrc)) ok('contourBlit uses the refresh rule')
 else fail('contourBlit does not use contourGlWantsFrame')
+if (/contourScrollPaused\)/.test(blitSrc)) ok('contourBlit tells the gate whether the sheet is frozen')
+else fail('contourBlit does not pass the freeze state to the gate')
 if (/contourGlLastDrawAt = contourGlNow\(\)/.test(blitSrc)) ok('a successful 3D draw records when it was committed')
 else fail('contourBlit does not record contourGlLastDrawAt')
 if (/contourGlLastDrawAt = -1/.test(src) && /webglcontextlost/.test(src)) {

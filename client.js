@@ -3213,7 +3213,7 @@ function apply(ctx) {
         const sinceMs = contourGlLastDrawAt < 0 ? Infinity : contourGlNow() - contourGlLastDrawAt
         const movedEnough = contourGl === null || viewKey !== contourGlLastKey
           || contourGlWantsFrame(contourOffsetX - contourGlLastX,
-            contourOffsetY - contourGlLastY, sinceMs)
+            contourOffsetY - contourGlLastY, sinceMs, contourScrollPaused)
         if (movedEnough) {
           if (contourGlDraw()) {
             contourGlLastX = contourOffsetX
@@ -4015,10 +4015,25 @@ function apply(ctx) {
        page is otherwise idle. */
     const CONTOUR_GL_REFRESH_MS = 200
     const CONTOUR_GL_HALF_PX = 0.5
+    /* ...and never faster than this, whatever the panel's refresh rate. Measured on the
+       machine this was reported on: rAF runs at 160-240Hz there, so the half-pixel gate
+       alone still produced 60-140 full-screen marches per 2s window -- and, because the
+       context keeps its drawing buffer (preserveDrawingBuffer), the same number of
+       full-frame copies for the compositor -- for a sheet that advances 0.8 CSS px per
+       60Hz frame. A saturated GPU queue is one of the ways a canvas frame goes missing,
+       which is the black block. 16ms is the rate the picture actually needs. The frozen
+       case ignores the ceiling on purpose: a still sheet is only committed at all
+       because the scroll fix depends on it. */
+    const CONTOUR_GL_MIN_MS = 16
     /* Pure: does this frame need a new shader pass? `sinceMs` is how long ago the last
-       one was committed. Separated from contourBlit so the rule can be tested without a
-       canvas. */
-    const contourGlWantsFrame = (dx, dy, sinceMs) => Math.abs(dx) >= CONTOUR_GL_HALF_PX || Math.abs(dy) >= CONTOUR_GL_HALF_PX || !(sinceMs < CONTOUR_GL_REFRESH_MS)
+       one was committed, `frozen` is the scroll freeze. Separated from contourBlit so the
+       rule can be tested without a canvas. */
+    const contourGlWantsFrame = (dx, dy, sinceMs, frozen) => {
+      if (frozen === true) return true
+      if (sinceMs < CONTOUR_GL_MIN_MS) return false
+      return Math.abs(dx) >= CONTOUR_GL_HALF_PX || Math.abs(dy) >= CONTOUR_GL_HALF_PX
+        || !(sinceMs < CONTOUR_GL_REFRESH_MS)
+    }
     let contourGlNextTry = 0
     const contourGlNow = () => (typeof Date.now === 'function' ? Date.now() : 0)
 
@@ -4484,9 +4499,8 @@ function apply(ctx) {
       const vy = contourVelY * contourSpeedPx * contourDpr
       contourOffsetX = contourStepOffset(contourOffsetX, vx, dt, twDev)
       contourOffsetY = contourStepOffset(contourOffsetY, vy, dt, thDev)
-      /* ...and while frozen the 3D gate must not coalesce those commits back into
-         nothing: with the camera still, "did it move" is always no. */
-      if (frozen) contourGlLastDrawAt = -1
+      /* The 3D gate is told about the freeze (see contourBlit) instead of being forced
+         here: frozen frames bypass the 60Hz ceiling, everything else respects it. */
       /* contourBlit is also where a refused 3D layer's cooldown gets re-probed, and
          where entering/leaving 3D is noticed -- so this call is the loop's whole
          reconciliation as well as its motion. It runs EVERY frame: the panel's refresh
