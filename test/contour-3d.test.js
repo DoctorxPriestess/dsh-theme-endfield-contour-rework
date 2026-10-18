@@ -324,11 +324,11 @@ const wrap = (x) => ((x % 1) + 1) % 1
      coordinate: a ray that runs out of steps ends near hh = 0 and would open the
      second layer over every low valley (measured: 14.8% of the screen instead of the
      ~4% that is carved). */
-  const mask = SRC.match(/float hole = u_holeOn \* \(1\.0 - smoothstep\(u_holeLo, u_holeHi, ([^)]*)\)\)/)
+  const mask = SRC.match(/float cover = smoothstep\(u_holeHi - feather, u_holeHi \+ feather, ([^)]*)\)/)
   if (mask === null) fail('the cavity mask is not in the shader')
-  else if (!/surfaceAt\(uv\)/.test(mask[0])) {
+  else if (mask[1] !== 'sunH' || !/float sunH = surfaceAt\(uv\);/.test(SRC)) {
     fail('the cavity mask does not read the hit point terrain height: ' + mask[0])
-  } else ok('cavity mask = terrain height at the hit point')
+  } else ok('cavity mask = terrain height at the hit point, binary threshold at the rim')
 
   /* The far ground is on its OWN plane, so it sweeps at a different speed. */
   const deep = SRC.match(/vec2 uvDeep = ([^;]*);/)
@@ -353,9 +353,11 @@ const wrap = (x) => ((x % 1) + 1) % 1
   /* Occlusion must be visible: the near layer has to stop inside the cavity, or the
      pit's own rings cover the far ground completely (that was the first attempt, and
      it rendered as a hill with dense contours). */
-  if (!/col \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
-    fail('the near layer is not suppressed inside the cavity, so nothing occludes the far ground')
-  } else ok('the near layer stops inside the cavity (occlusion)')
+  if (!/col = mix\(deep, col, cover\);/.test(SRC)) {
+    fail('the near layer is not replaced inside the cavity, so nothing occludes the far ground')
+  } else if (/col \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
+    fail('the cavity still blends the two layers instead of replacing one with the other')
+  } else ok('the near layer is replaced by the far one inside the cavity (100% transparent)')
   /* NOTHING ADDITIVE. Painting the lip or the void as added colour also paints the
      transparent pixels between the strokes, which on a dark theme renders as a glowing
      oval over the map -- reported from the live app ("这么个圈不突兀吗"). Every
@@ -364,11 +366,11 @@ const wrap = (x) => ((x % 1) + 1) % 1
   const additive = added.filter((line) => !/\* col\.a|^col \+= deep \* hole/.test(line))
   if (additive.length > 0) {
     fail('additive colour over transparent pixels: ' + additive[0].trim())
-  } else if (!/col\.rgb \+= [^\n]*\* col\.a;/.test(SRC)) {
+  } else if (!/col\.rgb \+= [^\n]*\* lip \* lip \* col\.a;/.test(SRC)) {
     fail('the lit lip does not modulate existing stroke coverage')
-  } else if (!/col\.rgb \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
-    fail('the cavity does not darken the strokes inside it')
-  } else ok('no additive colour: the lip only brightens existing strokes, the void only dims them')
+  } else if (/col\.rgb \*= 1\.0 - 0\.\d+ \* hole;/.test(SRC)) {
+    fail('the old void tint survived: inside a hole the near layer must be GONE, not dimmed')
+  } else ok('no additive colour: the lip only brightens existing strokes, the void removes them')
 
   /* The drawing buffer has to survive a re-composite: the layer is only redrawn when
      the camera moved enough to change a pixel, and without preserveDrawingBuffer a
@@ -384,6 +386,7 @@ const wrap = (x) => ((x % 1) + 1) % 1
   const gate = SRC.match(/const hasHoles = ([^\n]*)/)
   if (gate === null) fail('the cavity gate is missing in contourGlDraw')
   else if (!/holeLo !== null/.test(gate[1])) fail('the cavity gate does not check for a band: ' + gate[1])
+  else if (/uHoleLo/.test(SRC)) fail('the shader still binds u_holeLo, which the binary mask does not use')
   else ok('cavities are gated on the field carrying a band (2D sheet: none)')
 }
 

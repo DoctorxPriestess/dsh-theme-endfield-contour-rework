@@ -2060,6 +2060,71 @@ function apply(ctx) {
              funnel's centre at half strength, because the 12th percentile of a
              blurred field is already a small number. */
           const denom = Math.max(lvl - (mnSm === Infinity ? 0 : mnSm), 1e-3)
+          const depthMax = hollow * CONTOUR_HOLLOW_DEPTH
+          const wdelta = (d, m) => {
+            let v = ((d % m) + m) % m
+            if (v > m / 2) v -= m
+            return v
+          }
+          const smooth01 = (x) => {
+            const t = x < 0 ? 0 : x > 1 ? 1 : x
+            return t * t * (3 - 2 * t)
+          }
+          /* Connected openings on the wrapped grid, each with a centroid and a radius
+             measured with WRAPPED deltas from its first cell: an opening that straddles
+             the tile edge still gets one sensible centre, so the result stays exactly
+             periodic -- the whole point of the torus extraction. */
+          const nCell = cw * ch
+          const comp = new Int32Array(nCell).fill(-1)
+          const stack = new Int32Array(nCell)
+          const regions = []
+          for (let s0 = 0; s0 < nCell; s0++) {
+            if (comp[s0] >= 0 || sm[s0] >= lvl) continue
+            const rid = regions.length
+            const cells = []
+            let sp = 0
+            stack[sp++] = s0
+            comp[s0] = rid
+            while (sp > 0) {
+              const c = stack[--sp]
+              cells.push(c)
+              const ci = c % cw
+              const cj = (c - ci) / cw
+              const nb = [wj(cj) * cw + wi(ci + 1), wj(cj) * cw + wi(ci - 1),
+                wj(cj + 1) * cw + ci, wj(cj - 1) * cw + ci]
+              for (let k = 0; k < 4; k++) {
+                const nc = nb[k]
+                if (comp[nc] < 0 && sm[nc] < lvl) { comp[nc] = rid; stack[sp++] = nc }
+              }
+            }
+            regions.push({ cells: cells, i0: cells[0] % cw, j0: Math.floor(cells[0] / cw) })
+          }
+          for (const g of regions) {
+            let sx = 0
+            let sy = 0
+            for (const c of g.cells) {
+              const ci = c % cw
+              const cj = (c - ci) / cw
+              sx += wdelta(ci - g.i0, cw)
+              sy += wdelta(cj - g.j0, ch)
+            }
+            g.cx = sx / g.cells.length
+            g.cy = sy / g.cells.length
+            let rm = 0.5
+            for (const c of g.cells) {
+              const ci = c % cw
+              const cj = (c - ci) / cw
+              const dx = wdelta(ci - g.i0, cw) - g.cx
+              const dy = wdelta(cj - g.j0, ch) - g.cy
+              const d = Math.sqrt(dx * dx + dy * dy)
+              if (d > rm) rm = d
+            }
+            g.rm = rm
+            const h1 = ((g.cells[0] * 2654435761) >>> 0) / 4294967296
+            g.shape = Math.min(CONTOUR_HOLLOW_SHAPES - 1, Math.floor(h1 * CONTOUR_HOLLOW_SHAPES))
+            const h2 = ((g.cells[0] * 2246822519 + 374761393) >>> 0) / 4294967296
+            g.ang = h2 * Math.PI * 2
+          }
           for (let j = 0; j < ch; j++) {
             const row = j * cols
             for (let i = 0; i < cw; i++) {
@@ -2067,9 +2132,71 @@ function apply(ctx) {
               if (m >= lvl) continue
               pit[j * cw + i] = 1
               const t = (lvl - m) / denom
-              U[row + i] -= hollow * CONTOUR_HOLLOW_DEPTH * Math.pow(t, CONTOUR_HOLLOW_SHARP)
+              const g = regions[comp[j * cw + i]]
+              const dx = wdelta(i - g.i0, cw) - g.cx
+              const dy = wdelta(j - g.j0, ch) - g.cy
+              const rr = Math.sqrt(dx * dx + dy * dy) / g.rm
+              let depth = Math.pow(t, CONTOUR_HOLLOW_SHARP)
+              if (g.shape === 1) {
+                /* Donut: the middle of the opening is NOT carved. What stands there is
+                   the remnant tower raised below -- a collapse doline with the massif
+                   still in it. */
+                depth *= smooth01((rr - 0.30) / 0.26)
+              } else if (g.shape === 2) {
+                /* Wedge: one side drops much further than the other, so the floor tilts
+                   and the far wall leans over the near one once the parallax displaces
+                   it -- an overhang a single-valued height field cannot express, built
+                   out of the DISPLACEMENT instead of the geometry. */
+                const val = 0.5 + 0.5 * Math.cos(Math.atan2(dy, dx) - g.ang)
+                depth *= 0.45 + 1.05 * val
+              }
+              U[row + i] -= depthMax * depth
             }
           }
+          /* The raised parts, added AFTER the carve so they are independent of it: the
+             tower must end up above the opening level (that is what makes it read as an
+             island inside the hole) and the lip must end up above the ground beside it
+             (that is what lets it occlude the far wall). */
+          if (depthMax > 0) {
+            for (const g of regions) {
+              if (g.shape === 1) {
+                const rise = depthMax * CONTOUR_HOLLOW_PILLAR_RISE
+                for (const c of g.cells) {
+                  const ci = c % cw
+                  const cj = (c - ci) / cw
+                  const dx = wdelta(ci - g.i0, cw) - g.cx
+                  const dy = wdelta(cj - g.j0, ch) - g.cy
+                  const rr = Math.sqrt(dx * dx + dy * dy) / g.rm
+                  if (rr > 0.62) continue
+                  const w = 1 - smooth01((rr - 0.06) / 0.36)
+                  U[cj * cols + ci] += rise * w
+                }
+              } else if (g.shape === 2) {
+                const lift = depthMax * CONTOUR_HOLLOW_LIP_LIFT
+                const span = g.rm * 1.45
+                const inner = g.rm * 0.92
+                const reach = Math.ceil(span) + 2
+                for (let dj = -reach; dj <= reach; dj++) {
+                  for (let di = -reach; di <= reach; di++) {
+                    const dist = Math.sqrt(di * di + dj * dj)
+                    if (dist > span || dist < inner) continue
+                    const val = 0.5 + 0.5 * Math.cos(Math.atan2(dj, di) - g.ang)
+                    const w = val * val * (1 - smooth01((dist - inner) / (span - inner)))
+                    if (w <= 0) continue
+                    const ci = wi(g.i0 + Math.round(g.cx + di))
+                    const cj = wj(g.j0 + Math.round(g.cy + dj))
+                    U[cj * cols + ci] += lift * w
+                  }
+                }
+              }
+            }
+          }
+          /* The mask's threshold is the opening LEVEL, not a percentile of the carved
+             cells: a donut's tower IS a carved cell whose final height is above the
+             rim, so a percentile would report the tower's height as the rim and the mask
+             would swallow it. */
+          field.holeLevel = baseMn + lvl * baseSpan
+          field.holeShapes = regions.map((g) => g.shape)
         }
       }
       /* --- stage 6: back into the base range, with the real extremes ---------- */
@@ -2116,7 +2243,8 @@ function apply(ctx) {
              character, so a narrow band (p55..p78) renders as a hard fault line across
              the pit ("洞穴那里有不自然的断层"). Half the pit cells fade in. */
           field.holeLo = vals[Math.floor(vals.length * 0.30)]
-          field.holeHi = vals[Math.floor(vals.length * 0.95)]
+          /* The rim: the level the opening was cut at. */
+          field.holeHi = field.holeLevel != null ? field.holeLevel : vals[Math.floor(vals.length * 0.95)]
           field.holeShare = vals.length / pitCells.length
         }
       }
@@ -2522,7 +2650,7 @@ function apply(ctx) {
       const field = {
         cols, rows, step, tw, th, F, mn, mx, hCount,
         /* Filled by the carve; null means this sheet has no cavities. */
-        holeLo: null, holeHi: null, holeShare: 0,
+        holeLo: null, holeHi: null, holeShare: 0, holeLevel: null, holeShapes: null,
         uScratch: new Float32Array(cols * rows),
         featAmt: new Float32Array(cols * rows),
         featKind: new Uint8Array(cols * rows),
@@ -3388,6 +3516,22 @@ function apply(ctx) {
        a funnel per basin. The funnel's floor keeps the raw detail, which is what
        puts contour rings inside the cavity. */
     const CONTOUR_HOLLOW_RADIUS = 6
+    /* Not every opening is a bowl. Real karst leaves three recognisable kinds, and the
+       difference is not decoration: a bowl is a dent you look INTO, a doline with a
+       remnant massif in the middle is a ring you look AROUND, and an entrance whose
+       ceiling juts out shows a raised rim on one side that hides the far wall. Only the
+       last two can occlude themselves through the parallax, which is what makes a hole
+       read as rock rather than as a shading trick. Shape is chosen per connected
+       opening from a hash of its first cell: no state, so one seed always draws the same
+       landscape and the tests can pin it. */
+    const CONTOUR_HOLLOW_SHAPES = 3        // 0 bowl, 1 donut (ring + tower), 2 wedge (raised lip)
+    const CONTOUR_HOLLOW_PILLAR_RISE = 0.62 // how far the remnant tower stands above the rim, in carve-depth units
+    const CONTOUR_HOLLOW_LIP_LIFT = 0.55    // how far a wedge's near rim is lifted, same units
+    /* Half-width of the mask's anti-aliasing band, as a fraction of the height span. The
+       mask is BINARY (a hole is 100% transparent: nothing of the near ground is drawn
+       inside it, and the far ground is invisible outside it) and this is the only soft
+       part of that edge -- about a pixel of the sheet's height gradient. */
+    const CONTOUR_HOLLOW_FEATHER = 0.004
     /* The second layer's own depth, in height units, and where its terrain is taken
        from (a fraction of the sheet, so the ground behind a hole is a different part
        of the landscape instead of the same lines shifted). */
@@ -3472,8 +3616,8 @@ function apply(ctx) {
          wraps -- the only exact answer: the wrap moves with the marched height, so a
          DOM line drawn at the reference height can be tens of pixels away. */
       'uniform float u_diagWrap;',
-      'uniform float u_holeLo;',
       'uniform float u_holeHi;',
+      'uniform float u_holeFeather;',
       'uniform float u_drop;',
       'uniform vec2 u_deepShift;',
       'uniform float u_deepScale;',
@@ -3560,8 +3704,16 @@ function apply(ctx) {
          screen instead of the 4% that is actually carved). Asking the height field
          directly keeps the mask on the pit floor and nowhere else -- the occlusion is
          the raymarch's, not a painted-on ring. */
-      '  float hole = u_holeOn * (1.0 - smoothstep(u_holeLo, u_holeHi, surfaceAt(uv)));',
-      '  if (hole > 0.002) {',
+      /* BINARY, by request: inside the opening the near ground is 100% absent and the
+         far layer is all you see; outside it the far layer is invisible. Two layers,
+         one mask, no blending -- "洞为100%透明, 透过这个洞可以看到b; 别的地方为0%透明, b不可见".
+         `cover` is 1 on untouched ground and 0 inside the opening; the only soft part is
+         the feather, about a pixel of height gradient, so the edge is anti-aliased
+         rather than stair-stepped. */
+      '  float sunH = surfaceAt(uv);',
+      '  float feather = u_holeFeather;',
+      '  float cover = smoothstep(u_holeHi - feather, u_holeHi + feather, sunH);',
+      '  if (u_holeOn > 0.5 && cover < 0.999) {',
       /* The far ground is sampled on its OWN plane: a fixed, much smaller
          magnification, so it drifts at u_deepScale of the surface's speed. Deriving it
          from the height instead (uvAt with a lowered height) gave 0.94 against the
@@ -3572,8 +3724,7 @@ function apply(ctx) {
          slice of darker air sits in front of what is behind it: without the first part
          the pit's own concentric rings cover the second layer completely and the
          funnel reads as a hill seen from above. */
-      '    col *= 1.0 - 0.42 * hole;',
-      '    col += deep * hole * 0.42;',
+      '    col = mix(deep, col, cover);',
       /* NO ADDITIVE COLOUR ANYWHERE. Painting the lip and the void as added colour also
          paints the transparent pixels between the strokes, and on a dark theme that
          renders as a glowing oval floating over the map (reported from the live app:
@@ -3581,9 +3732,12 @@ function apply(ctx) {
          there: the void dims the strokes inside the pit, the lip brightens the strokes
          at its edge. A hole is a place with less drawing on it, not a shape drawn on
          top of the map. */
-      '    float rim = clamp(1.0 - abs(hole * 2.0 - 1.0), 0.0, 1.0);',
-      '    col.rgb *= 1.0 - 0.35 * hole;',
-      '    col.rgb += vec3(0.30, 0.27, 0.14) * rim * rim * col.a;',
+      /* The lip highlights only the strokes JUST OUTSIDE the rim: a ring of lifted ink
+         that reads as the rock's edge. It modulates existing coverage (no additive
+         colour between the strokes -- see the note above). */
+      '    float lip = cover * (1.0 - smoothstep(u_holeHi + feather * 2.0,',
+      '      u_holeHi + feather * 26.0, sunH));',
+      '    col.rgb += vec3(0.30, 0.27, 0.14) * lip * lip * col.a;',
       '  }',
       '  if (u_diagWrap > 0.5) {',
       '    vec2 f = fract(uv) * u_sheetSize;',
@@ -3920,7 +4074,7 @@ function apply(ctx) {
         uSteps: gl.getUniformLocation(prog, 'u_steps'),
         uHoleOn: gl.getUniformLocation(prog, 'u_holeOn'),
         uDiagWrap: gl.getUniformLocation(prog, 'u_diagWrap'),
-        uHoleLo: gl.getUniformLocation(prog, 'u_holeLo'),
+        uHoleFeather: gl.getUniformLocation(prog, 'u_holeFeather'),
         uHoleHi: gl.getUniformLocation(prog, 'u_holeHi'),
         uDrop: gl.getUniformLocation(prog, 'u_drop'),
         uDeepShift: gl.getUniformLocation(prog, 'u_deepShift'),
@@ -4102,8 +4256,8 @@ function apply(ctx) {
          second layer never drew. */
       const hSpan = fl !== null ? ((fl.mx - fl.mn) || 1) : 1
       gl.uniform1f(st.uHoleOn, hasHoles ? 1 : 0)
-      gl.uniform1f(st.uHoleLo, hasHoles ? (fl.holeLo - fl.mn) / hSpan : 0)
       gl.uniform1f(st.uHoleHi, hasHoles ? (fl.holeHi - fl.mn) / hSpan : 1)
+      gl.uniform1f(st.uHoleFeather, CONTOUR_HOLLOW_FEATHER)
       gl.uniform1f(st.uDrop, CONTOUR_3D_HOLE_DROP)
       gl.uniform1f(st.uDeepScale, CONTOUR_3D_HOLE_SCALE)
       gl.uniform2f(st.uDeepShift, CONTOUR_3D_HOLE_SHIFT_X, CONTOUR_3D_HOLE_SHIFT_Y)

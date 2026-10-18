@@ -86,6 +86,8 @@ const NUM_NAMES = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES', 'CONT
   'CONTOUR_LANDFORM_RIDGE', 'CONTOUR_LANDFORM_VALLEY', 'CONTOUR_BAND_GRAIN_X',
   'CONTOUR_BAND_GRAIN_Y', 'CONTOUR_CONTRAST_SCALE', 'CONTOUR_LEVEL_MARGIN',
   'CONTOUR_HOLLOW_SHARE', 'CONTOUR_HOLLOW_SHARP', 'CONTOUR_HOLLOW_DEPTH', 'CONTOUR_HOLLOW_RADIUS',
+  'CONTOUR_HOLLOW_SHAPES', 'CONTOUR_HOLLOW_PILLAR_RISE', 'CONTOUR_HOLLOW_LIP_LIFT',
+  'CONTOUR_HOLLOW_FEATHER',
   'CONTOUR_3D_REF', 'CONTOUR_3D_DEPTH', 'CONTOUR_3D_RISE', 'CONTOUR_3D_STEPS']
 const KIND_NAMES = ['CONTOUR_FEAT_NONE', 'CONTOUR_FEAT_PLATEAU', 'CONTOUR_FEAT_CLIFF',
   'CONTOUR_FEAT_FAN', 'CONTOUR_FEAT_CONE', 'CONTOUR_FEAT_CRATER', 'CONTOUR_FEAT_DUNE',
@@ -207,6 +209,88 @@ else fail('carve depth out of range: ' + (100 * drop).toFixed(0) + '% of the fla
   if (pct > 0.5 && pct < 10) ok('carved area is ' + pct.toFixed(1) + '% of the sheet (sparse)')
   else fail('carved area out of range: ' + pct.toFixed(1) + '%')
 }
+
+/* A3.5 THE OPENINGS HAVE THREE SHAPES, and the mask that reads them is BINARY.
+   Shipped kinds: 0 bowl, 1 donut (a remnant tower stands INSIDE the opening, above the
+   rim, so the mask counts it as ground -- a hole with a hole in it), 2 wedge (one side
+   drops further and the near rim is LIFTED, above the rim, outside the opening: that is
+   the only way a single-valued height field can occlude the far wall, by displacement
+   rather than geometry). Both raised parts are the cells the carve RAISED relative to
+   the flat field, which is what makes them measurable. */
+{
+  const shapes = hollow.holeShapes
+  const span = flatSpan
+  const cols = hollow.cols
+  const rows = hollow.rows
+  let raised = 0
+  let lowered = 0
+  let tower = 0
+  let lip = 0
+  const raiseAt = new Uint8Array(cols * rows)
+  const lowerAt = new Uint8Array(cols * rows)
+  for (let i = 0; i < hollow.F.length; i++) {
+    const d = hollow.F[i] - flat.F[i]
+    if (d > span * 0.05) { raised++; raiseAt[i] = 1 }
+    else if (d < -span * 0.05) { lowered++; lowerAt[i] = 1 }
+  }
+  for (let j = 3; j < rows - 3; j++) {
+    for (let i = 3; i < cols - 3; i++) {
+      const k = j * cols + i
+      if (raiseAt[k] !== 1) continue
+      let around = 0
+      for (let dj = -4; dj <= 4; dj += 4) {
+        for (let di = -4; di <= 4; di += 4) {
+          if (di === 0 && dj === 0) continue
+          if (lowerAt[(j + dj) * cols + (i + di)] === 1) around++
+        }
+      }
+      if (around >= 5) tower++
+      else lip++
+    }
+  }
+  if (!Array.isArray(shapes) || shapes.length < 2) {
+    fail('no per-opening shape list (' + JSON.stringify(shapes) + ')')
+  } else if (shapes.some((v) => !(v >= 0 && v < 3))) {
+    fail('a shape index is out of range: ' + shapes.join(','))
+  } else if (new Set(shapes).size < 2) {
+    fail('every opening came out the same shape (' + shapes.join(',') + '): the mix is broken')
+  } else if (hollow.holeHi !== hollow.holeLevel) {
+    fail('the mask threshold is not the opening level (' + hollow.holeHi + ' vs ' + hollow.holeLevel + ')')
+  } else if (!(raised > 0)) {
+    fail('no cell was raised above the flat field: neither a tower nor a lip came out')
+  } else if (!(tower > 0)) {
+    fail('no enclosed raised cell: the donut shape never stands a tower inside an opening')
+  } else if (!(lip > 0)) {
+    fail('no free-standing raised cell: the wedge shape never lifts a rim')
+  } else if (raised > lowered * 0.5) {
+    fail('the raised parts (' + raised + ') are not small beside the carved ones (' + lowered + ')')
+  } else {
+    ok('shapes ' + shapes.length + ' openings ' + JSON.stringify(Array.from(new Set(shapes)).sort())
+      + ': ' + tower + ' tower cells inside openings, ' + lip + ' lip cells outside, mask = opening level')
+  }
+}
+
+/* A3.6 THE MASK IS BINARY: inside the opening the near ground contributes NOTHING and
+   the far layer is everything; outside it the far layer is invisible. The old build
+   blended 42% of each ("洞为100%透明" was the request, and a blend is not transparent).
+   Asserted on the shader source because the composite is GPU-only. */
+{
+  const shader = src.slice(src.indexOf('float sunH = surfaceAt(uv);'),
+    src.indexOf('if (u_diagWrap > 0.5)'))
+  if (!/col = mix\(deep, col, cover\)/.test(shader)) {
+    fail('the cavity composite is not a two-layer mix (deep, ground)')
+  } else if (/0\.42/.test(shader)) {
+    fail('the old 42% blend is still in the cavity composite')
+  } else if (!/u_holeFeather/.test(shader)) {
+    fail('the mask edge has no feather uniform')
+  } else if (!/uniform float u_holeFeather;/.test(src)
+    || !/uniform1f\(st\.uHoleFeather,/.test(src)) {
+    fail('u_holeFeather is not declared/uploaded')
+  } else {
+    ok('cavity composite is binary: mix(deep, ground, cover), feathered edge, no 42% blend')
+  }
+}
+
 
 /* A4. Contour SPACING is preserved: more levels when the range grew, not wider gaps.
    Without this the surface visibly thinned the moment a pit appeared (~40% fewer
