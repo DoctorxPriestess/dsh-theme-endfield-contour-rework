@@ -1240,6 +1240,11 @@ function apply(ctx) {
        at 1610x1006@2x a 2.9x-period sheet is 134MB, so this caps that at 96MB. */
     const CONTOUR_SHEET_MAX_DEVICE_PX = 24e6
     const CONTOUR_SURFACE_PAD = 512
+    /* LOCAL DIAGNOSTIC BUILD ONLY. Draws a state HUD into the layer and marks where
+       the sheet's wrap is in the 3D view, so a screenshot answers "is the line I can
+       see the seam or the page?" without another round of guessing. Flip to false for
+       a release. */
+    const CONTOUR_DIAG = true
     /* Sized for the SLOWEST drift to stay cheap: half of this pad is the most the
        transform ever carries, so at 192 px/s the sheet is repainted about twice a
        second and at 12 px/s about once a minute. 512 device px costs 1.2x a viewport
@@ -3103,7 +3108,72 @@ function apply(ctx) {
       }
     }
 
+    /* ---- diagnostic overlay (CONTOUR_DIAG) -------------------------------------
+       The HUD is the only thing that can say with certainty which path is running and
+       which sizes it is running at, and the two marker lines are drawn where the
+       SHADER's wrap is (uv.x/y crossing an integer), so the answer to "is that line
+       the seam?" is in the screenshot instead of in a hypothesis. */
+    let contourDiagHud = null
+    let contourDiagVx = null
+    let contourDiagHy = null
+    let contourDiagBuilds = 0
+    let contourDiagRemounts = 0
+    let contourDiagResizes = 0
+    const contourDiagMount = (wrap) => {
+      if (!CONTOUR_DIAG || typeof document === 'undefined') return
+      const mk = (css) => {
+        const d = document.createElement('div')
+        d.setAttribute('aria-hidden', 'true')
+        d.style.cssText = css + ';pointer-events:none;z-index:3'
+        wrap.appendChild(d)
+        return d
+      }
+      contourDiagHud = mk('position:absolute;left:6px;top:6px;font:10px/1.35 ui-monospace,monospace;'
+        + 'color:#fff;background:rgba(0,0,0,.78);padding:4px 6px;white-space:pre;max-width:92%;'
+        + 'border-radius:3px;text-shadow:none')
+      contourDiagVx = mk('position:absolute;top:0;bottom:0;width:1px;background:#ff00ff;opacity:.85')
+      contourDiagHy = mk('position:absolute;left:0;right:0;height:1px;background:#00e5ff;opacity:.85')
+    }
+    const contourDiagUpdate = () => {
+      if (!CONTOUR_DIAG || contourDiagHud === null || contourView === null || contourTex === null) return
+      const dpr = contourView.dpr > 0 ? contourView.dpr : 1
+      const tw = contourTex.cv.width
+      const th = contourTex.cv.height
+      const three = isContourView3D()
+      const mode = three
+        ? (contourGl !== null ? 'gl' : 'gl-refused(' + contourGlWhy + ')')
+        : (contourSurfaceOn ? 'surface' : 'blit')
+      const lines = [
+        (three ? '3D' : '2D') + '  ' + mode + '  dpr=' + dpr
+          + '  view=' + contourView.w + 'x' + contourView.h + 'css',
+        'sheet=' + (tw / dpr).toFixed(0) + 'x' + (th / dpr).toFixed(0) + 'css'
+          + ' (' + tw + 'x' + th + 'dev)',
+        'offset=' + contourOffsetX.toFixed(1) + ',' + contourOffsetY.toFixed(1)
+          + '  builds=' + contourDiagBuilds + '  moves=' + contourDiagRemounts
+          + '  resizes=' + contourDiagResizes,
+      ]
+      contourDiagHud.textContent = lines.join(String.fromCharCode(10))
+      /* Where the shader's fract() wraps, at the reference height (s = 1): uv.x = 0 at
+         p.x = vW/2 - cam. Markers only mean something in 3D -- in 2D the sheet is
+         larger than the surface, so its wrap is off-screen. */
+      let vx = -1
+      let hy = -1
+      if (three) {
+        const vW = Math.max(1, Math.round(contourView.w * dpr))
+        const vH = Math.max(1, Math.round(contourView.h * dpr))
+        const sx = ((Math.floor(contourOffsetX) % tw) + tw) % tw
+        const sy = ((Math.floor(contourOffsetY) % th) + th) % th
+        for (let p = vW * 0.5 - sx; p < vW; p += tw) if (p > 1) { vx = p; break }
+        for (let p = vH * 0.5 - sy; p < vH; p += th) if (p > 1) { hy = p; break }
+      }
+      contourDiagVx.style.display = vx < 0 ? 'none' : 'block'
+      contourDiagHy.style.display = hy < 0 ? 'none' : 'block'
+      if (vx >= 0) contourDiagVx.style.left = (vx / dpr) + 'px'
+      if (hy >= 0) contourDiagHy.style.top = (hy / dpr) + 'px'
+    }
+
     const contourBlit = () => {
+      if (typeof contourDiagUpdate === 'function') { try { contourDiagUpdate() } catch (e) {} }
       if (contourLineCv === null || contourTex === null) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
          sheet. When the GPU says no, this returns false and the flat path below
@@ -3989,6 +4059,16 @@ function apply(ctx) {
         if (cv.style != null) {
           cv.style.width = (wDev / dpr) + 'px'
           cv.style.height = (hDev / dpr) + 'px'
+          /* THE PAD IS SPLIT, HALF ON EACH SIDE. Translating the surface moves its
+             own edges, and an edge that enters the viewport is a band with no ink in
+             it -- in the dark scheme a black block, which is exactly what was
+             reported while the sheet was scrolling up (the default direction) and the
+             transform went the other way. With the element hanging half a pad outside
+             the viewport on the left and the top, the allowed +-half-pad translate
+             cannot uncover any edge. The tiling origin is shifted by the same half pad
+             below, so the picture does not move. */
+          cv.style.left = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
+          cv.style.top = (-CONTOUR_SURFACE_PAD * 0.5 / dpr) + 'px'
         }
       }
       const ctx = cv.getContext('2d')
@@ -4000,8 +4080,13 @@ function apply(ctx) {
       const sx0 = ((contourSurfaceRefX % tw) + tw) % tw
       const sy0 = ((contourSurfaceRefY % th) + th) % th
       ctx.clearRect(0, 0, wDev, hDev)
-      for (let y = -sy0; y < hDev; y += th) {
-        for (let x = -sx0; x < wDev; x += tw) ctx.drawImage(contourTex.cv, x, y)
+      /* The element sits half a pad to the left and the top, so the canvas coordinate
+         of viewport (0,0) is (+half, +half) -- and the first tile starts one whole
+         period before that, or the band between them would be the only part of the
+         canvas left unpainted. */
+      const half = CONTOUR_SURFACE_PAD * 0.5
+      for (let y = half - sy0 - th; y < hDev; y += th) {
+        for (let x = half - sx0 - tw; x < wDev; x += tw) ctx.drawImage(contourTex.cv, x, y)
       }
       contourSurfaceOn = cv.style != null && typeof cv.style.transform === 'string'
       contourBlit()
@@ -4154,6 +4239,9 @@ function apply(ctx) {
        table are fixed for the page, so the same size rebuilds byte-identically
        and a different size regenerates deterministically instead of randomly. */
     const contourBuildTexture = (wCss, hCss) => {
+      /* typeof-guarded because the test harnesses slice this function out on its own
+         and run it without the diagnostic state. */
+      if (typeof contourDiagBuilds === 'number') contourDiagBuilds++
       const three = isContourView3D()
       const t = contourTargetTexture(wCss, hCss, contourDpr, three)
       contourField = contourGenerateField(t.twCss, t.thCss, contourHollowWanted() ? 1 : 0)
@@ -4511,13 +4599,28 @@ function apply(ctx) {
       if (!attached) {
         const host = findAppFrame()
         if (host === null) {
-          // The frame is not on screen yet (very early boot): a later mutation will
-          // bring us back here rather than the layer never mounting.
-          if (contourWrap !== null) contourTeardown()
+          /* No frame THIS tick (very early boot, or a re-render that momentarily
+             removed the centre column). Do NOT tear down: the layer we already have
+             is still correct, and this runs from a subtree MutationObserver, i.e.
+             dozens of times a second while a message streams -- so tearing down here
+             rebuilt the terrain (100-300ms, and with a NEW seed) once per mutation,
+             which is what a flickering black block came from. A later mutation brings
+             us back with a host. */
           contourSwitchSig = ''
           return
         }
-        if (contourWrap !== null && contourHost !== host) contourTeardown()
+        if (contourWrap !== null && contourHost !== host) {
+          /* The frame element was replaced (a re-render), not destroyed: MOVE the
+             layer. Tearing it down and rebuilding would blank it for the duration of
+             a whole build and re-seed the landscape, for a DOM change that has
+             nothing to do with the background. */
+          if (host.firstChild) host.insertBefore(contourWrap, host.firstChild)
+          else host.appendChild(contourWrap)
+          contourHost = host
+          contourSizeTo(host)
+          contourBlit()
+          contourDiagRemounts++
+        }
         if (contourWrap === null) {
           const wrap = document.createElement('div')
           wrap.setAttribute('data-endfield-contour', '')
@@ -4526,9 +4629,6 @@ function apply(ctx) {
           line.setAttribute('data-endfield-contour-lines', '')
           wrap.appendChild(line)
           contourLineCv = line
-          // First child: keeps the layer at the bottom of the frame's paint order.
-          if (host.firstChild) host.insertBefore(wrap, host.firstChild)
-          else host.appendChild(wrap)
           contourWrap = wrap
           contourHost = host
           contourSizeTo(host)
@@ -4536,18 +4636,26 @@ function apply(ctx) {
              permutation table BEFORE the build. Toggling the background off and on
              therefore gives a new landscape, while a resize (which only re-runs
              contourBuildTexture from the debounce) re-derives the same one. */
+          contourDiagMount(wrap)
           contourSeed = contourReseed(contourRollSeed())
-          /* One-time build: field, contours, cache, first blit. After this the
-             page's own observer keeps the sheet fed and nothing regenerates
-             unless a real size change lands. */
+          /* One-time build: field, contours, cache, first blit. AFTER THIS the
+             element goes into the document -- a canvas that is already on screen
+             while its terrain is being generated is a blank layer for the whole build
+             (100-300ms on a large window), which is the other half of the black
+             flash. Nothing drawn before insertion is lost: a canvas with no parent is
+             never rendered. */
           contourBuildTexture(contourView.w, contourView.h)
           contourBlit()
+          // First child: keeps the layer at the bottom of the frame's paint order.
+          if (host.firstChild) host.insertBefore(wrap, host.firstChild)
+          else host.appendChild(wrap)
           // A fresh mount has drawn nothing switch-specific yet, so force the
           // reconciliation below to run rather than trusting a stale signature.
           contourSwitchSig = ''
           if (typeof ResizeObserver !== 'undefined') {
             contourRo = new ResizeObserver(() => {
               if (contourHost === null) return
+              contourDiagResizes++
               if (contourScrollPaused) {
                 // Frozen by an active page scroll: remember that the viewport
                 // moved and let contourResumeAfterScroll() do the work, so the
