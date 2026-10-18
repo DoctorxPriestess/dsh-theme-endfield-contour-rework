@@ -19,7 +19,7 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `2f30843`（`client.js` sha256 `0ec1071c…`） |
+| 分支 / HEAD | `main` / `2f30843`（代码 HEAD；其后只有文档与测试提交） |
 | 已安装版本 | **已同步**：`profiles\desktop\node_modules\…\client.js` 的 sha256 同样是 `0ec1071c…`（装的是 fix15，**需重启 DSH 才生效**） |
 | 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix15.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
@@ -28,7 +28,7 @@
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
 ### 测试状态（FACT，本轮实测）
-- `npm run test:node`：**444 ok / 0 失败**（基线 432，新增 12 项：seam 11 + cusps 1）。
+- `npm run test:node`：**447 ok / 0 失败**（基线 432，新增 15 项：seam 11 + cusps 1 + hollow 3）。
 - `npm run test:browser`：通过（真实 Chromium 挂载、画布已绘制 1882x1270、样式/激活链路断言）。
 - `node check.js`：通过。
 - 非闭合尺寸（只有直接调 `contourGenerateField` 才会出现）的提取输出与上一版**逐字节相同**：
