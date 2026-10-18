@@ -1240,11 +1240,12 @@ function apply(ctx) {
        at 1610x1006@2x a 2.9x-period sheet is 134MB, so this caps that at 96MB. */
     const CONTOUR_SHEET_MAX_DEVICE_PX = 24e6
     const CONTOUR_SURFACE_PAD = 512
-    /* LOCAL DIAGNOSTIC BUILD ONLY. Draws a state HUD into the layer and marks where
-       the sheet's wrap is in the 3D view, so a screenshot answers "is the line I can
-       see the seam or the page?" without another round of guessing. Flip to false for
-       a release. */
-    const CONTOUR_DIAG = true
+    /* Diagnostic overlay: false in every release. When true it draws a state HUD into
+       the layer and marks the wrap in the shader (magenta = u, cyan = v), which is how
+       the last three defects in this area were pinned down. Kept as one constant
+       because "which path is actually running, at which size" is the question that
+       every round of this cost the most to answer. */
+    const CONTOUR_DIAG = false
     /* Sized for the SLOWEST drift to stay cheap: half of this pad is the most the
        transform ever carries, so at 192 px/s the sheet is repainted about twice a
        second and at 12 px/s about once a minute. 512 device px costs 1.2x a viewport
