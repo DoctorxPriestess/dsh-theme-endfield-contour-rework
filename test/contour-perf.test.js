@@ -172,6 +172,10 @@ let contourSurfaceOn=false
 let contourOffsetX=0, contourOffsetY=0, contourDpr=1, contourSpeedPx=48
 let contourVelX=0, contourVelY=-1, contourView=null, contourWrap=null
 let contourRaf=null, contourLastT=-1, contourResizeTimer=null
+/* fix32 gave the sheet a content generation (a density change re-extracts into the
+   SAME canvas, so identity/size alone cannot tell the 3D uploader that the pixels
+   moved). contourRenderCache increments it; the harness only needs the binding. */
+let contourSheetGen = 0
 let contourLoaderActive=false, contourScrollPaused=false, contourResizing=false, contourSwitchSig=''
 /* The preference KEY constants are derived from the namespace (single source of truth:
    a rename must not leave 14 literals behind), so the harness must define it before
@@ -213,8 +217,10 @@ const contourGlWantsFrame = (dx, dy, sinceMs) => Math.abs(dx) >= CONTOUR_GL_HALF
 /* Read straight from the pref store, exactly as the real one does. */
 const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
 /* Hollow terrain is 3D only and this harness measures the flat sheet, so the answer is
-   a constant here; contour-hollow.test.js owns the real wiring. */
-const contourHollowWanted = () => false
+   a constant here; contour-hollow.test.js owns the real wiring. The NAME is the shipped
+   one (fix33 replaced contourHollowWanted with the 0..1 strength): a rename in client.js
+   must break this harness loudly instead of silently measuring a different build. */
+const contourHollowStrength = () => 0
 ${body}
 ${gateDecls}
 const contourPerm = new Uint16Array(512)
