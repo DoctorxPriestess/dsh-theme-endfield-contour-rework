@@ -459,12 +459,20 @@ async function main() {
       await sleep(900)
       /* After the debounce the visible canvas must cover the enlarged frame again
          (a surface it can afford, or the viewport-sized fallback): during the drag it
-         was allowed to lag. */
+         was allowed to lag. Poll instead of trusting one fixed delay: under CI load
+         the debounced rebuild can land later than 900ms, and a single sample then
+         reports the previous surface size. */
+      const coversFrame=()=>{
+        const c=live(); if(!c) return false
+        const fr=frame.getBoundingClientRect()
+        const dpr=window.devicePixelRatio||1
+        return c.width>=Math.round(fr.width*dpr)-2 && c.height>=Math.round(fr.height*dpr)-2
+      }
+      for(let t=0;t<50 && !coversFrame();t++) await sleep(100)
       const cEnd=live()
       const frEnd=frame.getBoundingClientRect()
       const dprEnd=window.devicePixelRatio||1
-      R('resize done: the sheet covers the enlarged viewport',
-        !!cEnd && cEnd.width>=Math.round(frEnd.width*dprEnd)-2 && cEnd.height>=Math.round(frEnd.height*dprEnd)-2,
+      R('resize done: the sheet covers the enlarged viewport', coversFrame(),
         cEnd?(cEnd.width+'x'+cEnd.height+' for '+Math.round(frEnd.width*dprEnd)+'x'+Math.round(frEnd.height*dprEnd)):'no canvas')
       R('resize done: sheet still painted',
         (()=>{const c=live(); return !!c && px(c).opaque>3000})(),

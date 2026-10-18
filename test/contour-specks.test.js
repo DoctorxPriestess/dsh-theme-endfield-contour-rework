@@ -91,9 +91,18 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   const C=CanvasRenderingContext2D.prototype
   const om=C.moveTo, ob=C.beginPath, ol=C.lineTo, oz=C.bezierCurveTo
   window.__PATHS__=[]
+  window.__PWW__=[]
   let cur=null
-  C.beginPath=function(){ window.__PATHS__=[]; cur=null; return ob.apply(this,arguments) }
-  C.moveTo=function(x,y){ cur=[x,y]; window.__PATHS__.push(cur); return om.apply(this,arguments) }
+  /* Do NOT clear __PATHS__ on beginPath: a chunked render calls beginPath once per
+     slice, so clearing here would leave only the last batch measured. cur is reset
+     so the next moveTo starts a new path. __PWW__ carries the canvas each path was
+     drawn on (the tile sheet), for the per-path bounds check. */
+  C.beginPath=function(){ cur=null; return ob.apply(this,arguments) }
+  C.moveTo=function(x,y){
+    cur=[x,y]; window.__PATHS__.push(cur)
+    window.__PWW__.push([this.canvas.width, this.canvas.height])
+    return om.apply(this,arguments)
+  }
   C.lineTo=function(x,y){ if(cur){cur.push(x,y)} return ol.apply(this,arguments) }
   C.bezierCurveTo=function(_c1x,_c1y,_c2x,_c2y,x,y){
     if(cur){cur.push(x,y)} return oz.apply(this,arguments)
@@ -105,20 +114,25 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
     const cv=document.querySelector('[data-endfield-contour-lines]')
     const W=cv.width,H=cv.height
     const P=window.__PATHS__||[]
+    const PWW=window.__PWW__||[]
     const inside=(x,y)=>x>=0&&x<=W&&y>=0&&y<=H
-    /* The tile is about 3x the viewport (CONTOUR_TEX_MULT=3, quantised to 128px, then
-       shrunk to respect the area cap). 4x is a safe upper bound that still catches a
-       path escaping the tile — the real defect class (coordinates running off to
-       multiples of the viewport, or going negative). */
-    const BX=W*4, BY=H*4
+    /* The paths are drawn on the TILE SHEET, not on the visible line canvas: the sheet
+       is ~3x the viewport (CONTOUR_TEX_MULT=3, quantised, area-capped), so a path can
+       legitimately sit far outside the line canvas. Bound each path against its OWN
+       canvas: 4x that sheet still catches the real defect class (coordinates running
+       off to multiples of the tile) without flagging the wrap copies or a contour that
+       crosses the sheet edge (the outside part is clipped; contourSeamShifts draws the
+       matching copy on the opposite edge). */
     const info=P.map((p,i)=>{
       let vis=0, any=false, nonFinite=0, outOfTile=0
       let ilen=0
+      const cw=(PWW[i]&&PWW[i][0])||W, ch=(PWW[i]&&PWW[i][1])||H
+      const BX=cw*4, BY=ch*4
       let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity
       for(let k=0;k<p.length;k+=2){
         const x=p[k],y=p[k+1]
         if(!Number.isFinite(x)||!Number.isFinite(y)){ nonFinite++; continue }
-        if(x<0||x>BX||y<0||y>BY) outOfTile++
+        if(x<-BX||x>BX||y<-BY||y>BY) outOfTile++
         if(x<minx)minx=x; if(x>maxx)maxx=x
         if(y<miny)miny=y; if(y>maxy)maxy=y
         if(inside(x,y)) any=true
