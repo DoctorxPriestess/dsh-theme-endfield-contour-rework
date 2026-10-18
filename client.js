@@ -1235,6 +1235,10 @@ function apply(ctx) {
        window size: the sheet is CROPPED, and once the translation has eaten half the
        pad the surface is repainted once at the new offset (~1ms, a few times a second
        at the fastest speed) and the transform restarts from zero. */
+    /* Hard ceiling on the SHEET's device pixels. Every change to it invalidates the
+       GPU texture Chromium keeps for the composited surface, i.e. a full re-upload;
+       at 1610x1006@2x a 2.9x-period sheet is 134MB, so this caps that at 96MB. */
+    const CONTOUR_SHEET_MAX_DEVICE_PX = 24e6
     const CONTOUR_SURFACE_PAD = 512
     /* Sized for the SLOWEST drift to stay cheap: half of this pad is the most the
        transform ever carries, so at 192 px/s the sheet is repainted about twice a
@@ -2738,6 +2742,8 @@ function apply(ctx) {
         ctx.setTransform(1, 0, 0, 1, 0, 0)
       }
       ctx.clearRect(0, 0, contourTex.wCss, contourTex.hCss)
+      /* Two bits is the whole of what contourStroke() reads. */
+      contourSchemeSig = (isDarkScheme() ? 'd' : 'l') + (isWulingPalette() ? 'c' : 'y')
       ctx.strokeStyle = contourStroke()
       ctx.lineWidth = 1
       ctx.lineJoin = 'round'
@@ -3873,6 +3879,7 @@ function apply(ctx) {
           const surfDevPx = (Math.round(w * dpr) + CONTOUR_SURFACE_PAD)
             * (Math.round(h * dpr) + CONTOUR_SURFACE_PAD)
           const memOk = (texDevPx + surfDevPx) * 4 <= CONTOUR_MEM_BUDGET * 1.02
+            && texDevPx <= CONTOUR_SHEET_MAX_DEVICE_PX
           if (areaOk && memOk) break
           if (twCss <= minTw && thCss <= minTh) break
           twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
@@ -4414,6 +4421,14 @@ function apply(ctx) {
        re-rendering (the strokes live there); the blit then repaints the viewport
        from it. */
     let contourSchemeObserver = null
+    /* The stroke colour is a 2-bit function of the scheme and the palette, so a
+       <body> class change almost never changes it. Repainting on the attribute alone
+       re-stroked the whole sheet AND invalidated its GPU texture, which meant a
+       full-sheet re-upload (134MB at 1610x1006) every time the app toggled a class --
+       exactly the kind of sustained load that ends in a stalled renderer. Measured:
+       13 body-class changes produced 14 whole-sheet re-strokes. */
+    let contourSchemeSig = ''
+    let contourSchemePending = false
     /* Deferred install for the same early-boot reason as the page observer above:
        body may not exist at apply() time, and a missed install here would leave a
        later-mounted sheet stuck on its first colour across a scheme flip. */
@@ -4422,7 +4437,20 @@ function apply(ctx) {
       if (typeof MutationObserver === 'undefined' || typeof document === 'undefined' || document.body === null) return
       contourSchemeObserver = new MutationObserver(() => {
         if (contourWrap === null) return
-        contourRepaint()
+        if (((isDarkScheme() ? 'd' : 'l') + (isWulingPalette() ? 'c' : 'y')) === contourSchemeSig) return
+        /* Coalesce: several attribute writes in one frame must cost one repaint. */
+        if (contourSchemePending) return
+        contourSchemePending = true
+        const run = () => {
+          contourSchemePending = false
+          if (contourWrap === null) return
+          const sig = (isDarkScheme() ? 'd' : 'l') + (isWulingPalette() ? 'c' : 'y')
+          if (sig === contourSchemeSig) return
+          contourSchemeSig = sig
+          contourRepaint()
+        }
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+        else run()
       })
       contourSchemeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'class'] })
     }
