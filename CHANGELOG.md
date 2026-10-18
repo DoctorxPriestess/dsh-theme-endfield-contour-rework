@@ -6,6 +6,60 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 分帧渲染：构建不再冻结主线程（fix34，1.5.16）
+
+**一、2D 纹理构建改成可让出的分片。**
+
+旧版 `contourRenderCache()` 把整张 6450×3540 地形的约 100 万段三次曲线一次性
+`stroke()` 完：参考机上单次 `stroke` 实测 0.9–1.2 s，整个构建任务 **2112 ms**。
+挂载、尺寸放大、密集度切换、粗糙度切换都会各冻一次页面。
+
+现在按「整条等高线」把每个接缝平移组切成 **≤ 40000 个地形点** 的批次，每个动画帧
+描一批，帧与帧之间让出主线程；批次之间不会重复合成任何像素——同一接缝平移组内的
+轮廓互不相交（`contourSeamShifts()` 保证每个地形点只属于一个平移）。同步环境
+（Node 测试切片、`window.__CONTOUR_SYNC_BUILD__ = true`）仍然一次描完，行为与旧版
+完全一致。
+
+配套的状态机：
+
+- **取消**：每次渲染生成一个 token，新渲染或 `contourTeardown()` 会让旧循环在下一个
+  分片处退出，已排队的分片不会再往已拆掉的画布上描。
+- **就绪**：`contourTex.ready` 在渲染期间为 `false`，`contourBlit()`、
+  `contourPaintSurface()`、`contourGlUpload()` 都会保留上一张完整画面（或保留的 GL
+  帧），绝不把描了一半的画布贴到屏幕上。外层 `<div data-endfield-contour>` 增加
+  `data-endfield-contour-ready`（`"0"` → `"1"`），测试与诊断 HUD 直接读它，不靠猜延时。
+- **完成回调**：`contourBuildTexture` / `contourRetune` / `contourRepaint` 改为在渲染
+  真正完成后才重绘 surface / blit；异步路径不会拿旧 offset 或半张图去画。
+- **隐藏窗口**：后台窗口拿不到动画帧，分片让出时同时挂一个 120 ms 定时器，谁先到谁
+  继续，后台挂载也能走完（定时器在后台会被节流，但页面此时不可见）。
+
+**二、3D 播放改走 `desynchronized` 上下文。**
+
+`contourGlMount()` 的 `getContext` 属性加入 `desynchronized: true`（探测上下文同样
+加入，保持一致性）。参考机上 3 秒视差播放的主线程耗时从 **1204 ms 降到 98.2 ms**；
+rAF 间隔随面板刷新档位变化（240 Hz 档 p50 4.2 ms，120 Hz 档实测 8.3 ms），主线程耗时
+是更稳定的指标。纹理上传、着色器与几何未改。
+
+**三、实测（真实 Edge / RTX 4090 Laptop，隔离 DSH_HOME + 独立 `dsh web` 实例，1578×909@1.5，固定种子，水印关闭）。**
+
+| 指标 | 同步（旧行为） | 分片（新） |
+|---|---|---|
+| 2D 构建最长主线程任务 | 2112 ms | **383 ms** |
+| 2D 首张画布可见 | 2505 ms | 2473 ms |
+| 2D 线画布像素 | — | **逐字节相同**（0 / 5,401,004 像素差；hash 1617012213，ink 407211） |
+| 3D 挂载最长任务 | （旧版同路径会整段冻结） | 269 ms |
+| 3D 播放主线程 / 3 s | 1204 ms（desync 前） | **98.2 ms** |
+
+生成 76 ms、提取 60 ms、surface 重绘 31 ms、分片描边总墙钟约 1.49 s；构建总时长与
+旧版基本持平（首帧 2473 vs 2505 ms），代价换成了**可交互**：构建期间页面不再整段死锁。
+
+**测试**：新增 `test/contour-async-build.test.js`（不设同步钩子，等待
+`data-endfield-contour-ready="1"`，并断言就绪前线画布没有像素）；浏览器 fixture 统一
+注入 `__CONTOUR_SYNC_BUILD__`，原有像素断言仍走同步路径。`npm run test:node`
+**525 ok / 0 失败**；`npm run test:browser` 通过；`contour-render` 45 项、
+`host-config-resolution` 通过。`settings-020-integration` 的 4 项失败在基线
+`b7be147` 上同样存在（与本改动无关，见交接报告）。
+
 ### 粗糙度不持久化 + 粗糙度决定洞穴密度（fix33）
 
 **一、粗糙度不持久化：优先级规则仍然是错的。**

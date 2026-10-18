@@ -7,10 +7,13 @@
 
 ## 1. 一句话状态
 
-**接缝已按「生成时就是一体」修好并测到数字**（子图按自身网格闭合 + 轮廓在环面上提取），
-全部 node 测试 **444 项 ok / 0 失败**，浏览器子集也通过。源码在
-`D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` HEAD = `d30fbf5`（`client.js` sha256
-前缀 `98c87a0f`），**未推送 origin、未重新打包安装**——需要在真机页面里由用户过目后再安装。
+**性能轮已完成、已打包并已装入 desktop profile**：2D 纹理构建从单个 **2112 ms** 长任务
+改为按 40k 地形点分片让出，最长任务 **383 ms**；2D 线画布与旧版**逐字节相同**
+（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。源码在
+`D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` HEAD = `4bd7754`（`client.js`
+sha256 前缀 `f7ad0a06`），版本 **1.5.16**，tgz 已放进 `local-build`，profile 已指向它，
+**重启 DSH 后生效**。`npm run test:node` **525 ok / 0 失败**，`test:browser` 通过；
+`settings-020-integration` 的 4 项失败在基线 `b7be147` 上同样存在（既有问题，非本轮引入）。
 
 ---
 
@@ -19,24 +22,29 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `176487c`（`client.js` sha256 `948eee89…`） |
-| 已安装版本 | **已同步**：sha256 `06073be6…`（fix21 = 发布版 + 看门狗自愈，**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix21.tgz` |
-| 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
-| 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
-| 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
+| 分支 / HEAD | `main` / `4bd7754`（`client.js` sha256 `f7ad0a06…`） |
+| 已安装版本 | **1.5.16**：sha256 `f7ad0a06…`（分帧渲染 + 3D desynchronized；**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.16.tgz` |
+| 版本号 | `package.json` **1.5.16**（已升版） |
+| 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
+| 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
 ### 测试状态（FACT，本轮实测）
-- `npm run test:node`：**454 ok / 0 失败**（基线 432；新增 seam 11 + cusps 1 + hollow 3 + heightmap 7）。
-- `npm run test:browser`：通过（真实 Chromium 挂载、画布已绘制 1882x1270、样式/激活链路断言）。
-- `node check.js`：通过。
-- 非闭合尺寸（只有直接调 `contourGenerateField` 才会出现）的提取输出与上一版**逐字节相同**：
-  cusps / smoothness 打印的 198/317/222/344 条轮廓、max deviation 2.5–2.6px 全部不变。
+- `npm run test:node`：**525 ok / 0 失败**。
+- `npm run test:browser`：通过（含新增 `contour-async-build.test.js`：不设同步钩子，
+  等 `data-endfield-contour-ready="1"`，并断言就绪前线画布 0 像素）。
+- `node test/contour-render.test.js`：**45 项通过**；`host-config-resolution` 通过。
+- `npm run test:ci`：在 `settings-020-integration.test.js` 的 4 项失败处中断；
+  **该失败在基线 `b7be147` 上同样复现**（用 `git archive` 的同源副本实测），非本轮引入。
+- 像素 A/B（同一源码、同步 vs 分片、固定种子）：线画布 PNG **0 / 5,401,004 像素差**，
+  hash 1617012213 / ink 407211 两边相同。
 
 ### 回滚方式
-- 代码：`git revert d30fbf5`（或 `git reset --hard fa05b97`）。
-- 安装回滚：重装上一版 `…-1.5.3-fix19.tgz`（带诊断 HUD 的那版，仍在 local-build），或 `undo_restore mode=id snapshot_id=20261019-035046-6979`（fix18 之前），然后重启 DSH。
+- 代码：`git revert 4bd7754`。
+- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.15-fix33.tgz`
+  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.15-fix33.tgz`），或
+  `undo_restore mode="id" snapshot_id="20261019-070416-0ad2"`，然后重启 DSH。
 
 ---
 
@@ -125,6 +133,28 @@ stop 都 bit 级相等）。也就是说：**场从来就是严格周期的**，
 JS/DOM 层无泄漏（98 秒浸泡、21335 帧、强制 GC 后堆 3–9MB 振荡）。若仍「长跑必卡」，
 剩余嫌疑是驱动层与 3D 全屏 shader 的持续负载；判断方法：看设置里 3D 是否被看门狗自动关掉、
 控制台是否有 `frame watchdog` 日志。
+
+### 6.4 分帧渲染 + 3D desynchronized（本轮，FACT）
+
+测量环境：隔离 `DSH_HOME`、独立 `dsh --profile web --port 5391`、真实 Edge（ANGLE
+Vulkan / RTX 4090 Laptop）、1578×909 @ DPR 1.5、固定随机种子、水印关闭。
+
+| 指标 | 同步（旧行为） | 分片（新） |
+|---|---|---|
+| 2D 构建最长主线程任务 | **2112 ms** | **383 ms** |
+| 2D 首张画布可见 | 2505 ms | 2473 ms |
+| 2D 线画布像素 | — | 逐字节相同（0 / 5,401,004 像素差） |
+| 3D 挂载最长任务 | — | 269 ms |
+| 3D 播放主线程 / 3 s | 1204 ms（desync 前） | **98.2 ms** |
+
+分片构建的阶段耗时（同一次挂载）：生成 76 ms、提取 60 ms、分片描边总墙钟 ~1490 ms、
+surface 重绘 31 ms。**总墙钟没有变短**（首帧 2473 vs 2505 ms）：省下的是主线程连续占用，
+不是总栅格量。要再缩短首帧需要把描边/平滑搬到 worker（OffscreenCanvas + CSP/GPU 兼容性
+未验证，本轮未做，标记 UNKNOWN）。
+
+证据文件：`D:\AI Misc\dsh-perf-lab\artifacts\measure-ab-async.json`、
+`measure-ab-sync.json`、`measure-chunk-3d.json`、`run-ab-async.log` / `run-ab-sync.log`；
+截图对比 `canvas-ab-async.png` / `canvas-ab-sync.png`。
 
 ---
 
