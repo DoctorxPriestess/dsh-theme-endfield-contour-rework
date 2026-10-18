@@ -9,11 +9,12 @@
 
 **性能轮已完成、已打包并已装入 desktop profile**：2D 纹理构建从单个 **2112 ms** 长任务
 改为按 40k 地形点分片让出，最长任务 **383 ms**；2D 线画布与旧版**逐字节相同**
-（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。源码在
-`D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` HEAD = `4bd7754`（`client.js`
-sha256 前缀 `f7ad0a06`），版本 **1.5.16**，tgz 已放进 `local-build`，profile 已指向它，
-**重启 DSH 后生效**。`npm run test:node` **525 ok / 0 失败**，`test:browser` 通过；
-`settings-020-integration` 的 4 项失败在基线 `b7be147` 上同样存在（既有问题，非本轮引入）。
+（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。同时修掉一个既有功能
+缺陷：0.2.x 的设置作用域快照没有 `mode` 字段，旧门槛把所有面板写入永久扣留（fix35）。
+源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` HEAD = `bb34745`（`client.js`
+sha256 前缀 `962a8339`），版本 **1.5.17**，tgz 已放进 `local-build`，profile 已指向它，
+**重启 DSH 后生效**。`npm run test:ci` **826 项 ok / 0 失败**（含此前失败的
+`settings-020-integration` 三个场景）。
 
 ---
 
@@ -22,29 +23,30 @@ sha256 前缀 `f7ad0a06`），版本 **1.5.16**，tgz 已放进 `local-build`，
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `4bd7754`（`client.js` sha256 `f7ad0a06…`） |
-| 已安装版本 | **1.5.16**：sha256 `f7ad0a06…`（分帧渲染 + 3D desynchronized；**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.16.tgz` |
-| 版本号 | `package.json` **1.5.16**（已升版） |
+| 分支 / HEAD | `main` / `bb34745`（`client.js` sha256 `962a8339…`；后续 docs 提交只动文档） |
+| 已安装版本 | **1.5.17**：sha256 `962a8339…`（分帧渲染 + 3D desynchronized + 0.2.x 设置写入修复；**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.17.tgz` |
+| 版本号 | `package.json` **1.5.17**（已升版） |
 | 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
 | 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
 ### 测试状态（FACT，本轮实测）
+- `npm run test:ci`：**826 项 ok / 0 失败**（完整套件，含浏览器与设置集成）。
 - `npm run test:node`：**525 ok / 0 失败**。
 - `npm run test:browser`：通过（含新增 `contour-async-build.test.js`：不设同步钩子，
   等 `data-endfield-contour-ready="1"`，并断言就绪前线画布 0 像素）。
-- `node test/contour-render.test.js`：**45 项通过**；`host-config-resolution` 通过。
-- `npm run test:ci`：在 `settings-020-integration.test.js` 的 4 项失败处中断；
-  **该失败在基线 `b7be147` 上同样复现**（用 `git archive` 的同源副本实测），非本轮引入。
+- `settings-020-integration`：A/B/C 三个场景全部通过（fix35 之前 4 项失败，基线
+  `b7be147` 上同样复现）。
 - 像素 A/B（同一源码、同步 vs 分片、固定种子）：线画布 PNG **0 / 5,401,004 像素差**，
   hash 1617012213 / ink 407211 两边相同。
 
 ### 回滚方式
-- 代码：`git revert 4bd7754`。
-- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.15-fix33.tgz`
-  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.15-fix33.tgz`），或
-  `undo_restore mode="id" snapshot_id="20261019-070416-0ad2"`，然后重启 DSH。
+- 代码：`git revert bb34745 249ec28 4bd7754`（测试修正 / 设置写入修复 / 分帧渲染）。
+- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.16.tgz`
+  或 `…-1.5.15-fix33.tgz`
+  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.16.tgz`），或
+  `undo_restore mode="id" snapshot_id="20261019-071525-b850"`（1.5.17 安装前），然后重启 DSH。
 
 ---
 

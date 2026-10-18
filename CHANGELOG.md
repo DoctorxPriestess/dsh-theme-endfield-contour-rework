@@ -6,6 +6,22 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 设置写入被永久扣留：0.2.x 快照没有 mode 字段（fix35，1.5.17）
+
+`prefsDurablyServed()` 要求作用域快照同时满足 `mode === 'host'`、`status === 'ready'`、
+`writable`。当前安装的 0.2.x `ConfigFormController.getSnapshot()` **根本不带 `mode` 字段**
+（已从 app.asar 里解包 `dsh-client-ui-settings` 确认，整个 bundle 没有这个字段），于是每个
+面板开关都被当成「命名空间尚未可靠提供」扣留：`remote.settings.mutate` 从未被调用，
+只有本地镜像文件被写入。设置面板看起来生效，重启后却从宿主读回旧值——与 fix30/fix31 的
+现场症状同源，但根因在写入门槛。
+
+修复：`mode` 缺失时按宿主作用域处理（`mode === undefined || mode === 'host'`），
+显式非 host 模式仍然拒绝。`test/settings-020-integration.test.js` 的假宿主同步补上
+`mode: 'host'`（对当前 bundle 不参与判定，但语义正确）。
+
+**验证**：该测试从 4 项失败变为全部通过（A/B/C 三个场景的开关都到达
+`remote.settings.mutate` 并写入宿主用户层）。
+
 ### 分帧渲染：构建不再冻结主线程（fix34，1.5.16）
 
 **一、2D 纹理构建改成可让出的分片。**
@@ -55,10 +71,11 @@ rAF 间隔随面板刷新档位变化（240 Hz 档 p50 4.2 ms，120 Hz 档实测
 
 **测试**：新增 `test/contour-async-build.test.js`（不设同步钩子，等待
 `data-endfield-contour-ready="1"`，并断言就绪前线画布没有像素）；浏览器 fixture 统一
-注入 `__CONTOUR_SYNC_BUILD__`，原有像素断言仍走同步路径。`npm run test:node`
-**525 ok / 0 失败**；`npm run test:browser` 通过；`contour-render` 45 项、
-`host-config-resolution` 通过。`settings-020-integration` 的 4 项失败在基线
-`b7be147` 上同样存在（与本改动无关，见交接报告）。
+注入 `__CONTOUR_SYNC_BUILD__`，原有像素断言仍走同步路径。分帧引入的两处测量偏差也已
+修正：`contour-specks` 不再在 `beginPath` 清空捕获（否则只测最后一个分片），且按
+「路径实际绘制到的那张画布」而不是更小的可见 surface 判断越界（跨边缘路径的负坐标
+是合法的，由接缝副本覆盖）；`contour-render` 的 resize 断言改为轮询而不是固定等 900 ms。
+`npm run test:ci` **826 项 ok / 0 失败**（含 `settings-020-integration` 的三个场景）。
 
 ### 粗糙度不持久化 + 粗糙度决定洞穴密度（fix33）
 
