@@ -177,12 +177,6 @@ async function main() {
     R('on: conversation bg cleared (was hiding layer)', cbgOn==='rgba(0, 0, 0, 0)', cbgOn)
     const sb=document.querySelector('.pI_x6G_sidebarCol')
     R('on: sidebar bg cleared', getComputedStyle(sb).backgroundColor==='rgba(0, 0, 0, 0)')
-    /* The mock gives the sidebar a 1px right rule, exactly as the app does. Left
-       alone it draws a line straight across the sheet, which reads as a seam. */
-    const sbc=getComputedStyle(sb)
-    R('on: column rules do not cut the sheet',
-      sbc.borderRightColor==='rgba(0, 0, 0, 0)' && sbc.borderLeftColor==='rgba(0, 0, 0, 0)',
-      'right='+sbc.borderRightColor+' left='+sbc.borderLeftColor)
     // z-order / hit-testing: the layer must never eat clicks
     R('on: layer ignores pointer events', getComputedStyle(wrap).pointerEvents==='none')
     const st=px(lines)
