@@ -335,15 +335,22 @@ function apply(ctx) {
     }
     /* Which value a field resolves to, given the three stores. Pure on purpose: the
        precedence is the whole bug (see PREFS_MIRROR_URL), so it is a function the
-       tests can pin instead of a branch buried in prefsGet. */
+       tests can pin instead of a branch buried in prefsGet.
+
+       THE MIRROR WINS WHEN IT HAS THE FIELD. It used to lose to any non-default host
+       value, on the theory that such a value proved the namespace had persisted
+       something. It proves no such thing: the namespace stopped accepting writes
+       entirely, so its value is whatever the last WORKING build left there -- stale
+       and non-default. Reported as "地形粗糙度没法持久化": the host still held the old
+       stop (10) while the mirror held the one the user had just chosen (11), and the
+       stale host value won. Every write goes to both stores, so the mirror only ever
+       holds the newest choice the panel made; it is the better authority by
+       construction. Fields the user has not touched since the mirror existed are
+       simply absent from it, and the host (or the shipped default) applies. */
     const prefsResolveField = (fromHost, def, fromMirror) => {
-      /* A host value that differs from the shipped default proves the namespace
-         really did persist something: that is the authority. */
-      if (fromHost !== undefined && fromHost !== null && String(fromHost) !== def) return String(fromHost)
-      /* A host value equal to the default cannot be told apart from "the host
-         dropped this write", so the theme's own file store fills in. */
       if (fromMirror !== undefined && fromMirror !== null) return String(fromMirror)
-      return fromHost !== undefined && fromHost !== null ? String(fromHost) : def
+      if (fromHost !== undefined && fromHost !== null) return String(fromHost)
+      return def
     }
     /** read one field as its raw stored string: <stored-or-default>, never null. */
     const prefsGet = (rawKey) => {
@@ -2126,7 +2133,12 @@ function apply(ctx) {
         if (scale > 0) {
           const hist = new Int32Array(bins)
           for (let i = 0; i < cw * ch; i++) hist[Math.min(bins - 1, Math.max(0, Math.round(sm[i] * scale)))]++
-          const want = Math.max(1, Math.round(CONTOUR_HOLLOW_SHARE * cw * ch))
+          /* The candidate area IS the cave density, so `hollow` (the roughness
+             strength, 0..1) scales it as well as the depth: at the 7th stop roughly
+             half the shipped area is a candidate (a few shallow pits), at the last stop
+             it is exactly CONTOUR_HOLLOW_SHARE. Never zero for a non-zero strength --
+             Math.max(1, ...) keeps at least one cell in the percentile. */
+          const want = Math.max(1, Math.round(CONTOUR_HOLLOW_SHARE * (0.35 + 0.65 * hollow) * cw * ch))
           let cum = 0
           for (let b = 0; b < bins; b++) {
             cum += hist[b]
@@ -3609,12 +3621,15 @@ function apply(ctx) {
        unchanged either way. Kept here rather than deleted so the decision is one
        constant, not a rewrite. */
     /* 3D only: the carve makes the cavities, the shader's second layer shows the
-       ground through them. The flat sheet never sees it (contourHollowWanted is keyed
+       ground through them. The flat sheet never sees it (contourHollowStrength is keyed
        on the 3D view), so the 2D drawing is byte-identical to before. */
     const CONTOUR_HOLLOW_ENABLED = true
     /* Small on purpose: a cavity is an accent in the landscape, not a feature of the
        layout. 4% of the cells at a 2.9x-viewport sheet made one very large oval. */
     const CONTOUR_HOLLOW_SHARE = 0.025
+    /* The 7th roughness stop (0-based 6) is where cavities start appearing, and the
+       last stop (11) is the strength they shipped with. See contourHollowStrength. */
+    const CONTOUR_HOLLOW_MIN_ROUGHNESS = 6
     const CONTOUR_HOLLOW_DEPTH = 0.90   // how far the funnel floor drops, in range units
     /* Half-width of the low-pass that decides WHERE ground opens, in field cells.
        The carve follows the smoothed field, not the raw one: the raw field dips
@@ -3982,8 +3997,28 @@ function apply(ctx) {
       return { ok: true, why: renderer, renderer }
     }
 
-    /* Is the hollow terrain in force right now? 3D view AND the shipped switch. */
-    const contourHollowWanted = () => CONTOUR_HOLLOW_ENABLED === true && isContourView3D()
+    /* HOW MANY CAVITIES, from the terrain-roughness setting (0..1, 0 = none).
+       Required by the user: "地形粗糙度也应该影响洞穴密度。1-6 无洞穴，7 开始有浅洞穴，
+       12 就按现在这个来". A sinkhole in perfectly calm terrain reads as a rendering
+       fault, so the two knobs are tied: below the 7th stop there is nothing to fall
+       into, the 7th stop opens a few shallow pits, and the last stop is exactly the
+       terrain the cavities shipped on (strength 1 -> CONTOUR_HOLLOW_SHARE and
+       CONTOUR_HOLLOW_DEPTH as they are today).
+
+       The strength scales BOTH: DEPTH (how far the floor drops) and SHARE (how much of
+       the sheet is a candidate at all, i.e. the count/size of the openings). Returns a
+       number in 0..1, not a boolean, so the caller can pass it straight into the field
+       generator and into the sheet-staleness check. */
+    const contourHollowStrength = () => {
+      if (CONTOUR_HOLLOW_ENABLED !== true || !isContourView3D()) return 0
+      const r = contourRoughnessIndex()
+      const min = CONTOUR_HOLLOW_MIN_ROUGHNESS
+      if (!(r >= min)) return 0
+      const span = CONTOUR_ROUGHNESS_BASE.length - 1 - min
+      if (!(span > 0)) return 1
+      const s = (r - min + 1) / (span + 1)
+      return s > 1 ? 1 : s
+    }
 
     /* Height map for the displacement: area-averaged downsample of the terrain
        field, then two separable box passes. Values are 0..1 across the field's own
@@ -4624,7 +4659,7 @@ function apply(ctx) {
       if (typeof contourDiagBuilds === 'number') contourDiagBuilds++
       const three = isContourView3D()
       const t = contourTargetTexture(wCss, hCss, contourDpr, three)
-      contourField = contourGenerateField(t.twCss, t.thCss, contourHollowWanted() ? 1 : 0)
+      contourField = contourGenerateField(t.twCss, t.thCss, contourHollowStrength())
       contourExtractAll()
       let cv = contourTex !== null ? contourTex.cv : null
       if (cv === null) cv = document.createElement('canvas')
@@ -4638,7 +4673,7 @@ function apply(ctx) {
       }
       contourTex = {
         cv, wCss: t.twCss, hCss: t.thCss, scroll: t.scroll === true,
-        hollow: contourHollowWanted(), three,
+        hollow: contourHollowStrength(), three,
       }
       contourRenderCache()
       /* The sheet is static until the next rebuild, so this is where it goes
@@ -4972,7 +5007,7 @@ function apply(ctx) {
        itself, so a flip rebuilds once -- measured 90-300ms -- and the seed is
        untouched, so it is the same landscape. */
     const contourSheetStale = () => contourTex === null
-      || (contourTex.hollow === true) !== contourHollowWanted()
+      || (contourTex.hollow || 0) !== contourHollowStrength()
       || (contourTex.three === true) !== isContourView3D()
 
     const contourApplyHollow = () => {

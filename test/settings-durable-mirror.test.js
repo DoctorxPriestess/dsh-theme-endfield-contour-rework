@@ -56,16 +56,19 @@ function grab(name) {
   const body = grab('prefsResolveField')
   // eslint-disable-next-line no-new-func
   const prefsResolveField = new Function(body + '\nreturn prefsResolveField')()
-  check('a non-default host value wins over the mirror',
-    prefsResolveField('1', '0', '0') === '1', prefsResolveField('1', '0', '0'))
-  check('the mirror fills in when the host only has the shipped default',
-    prefsResolveField('0', '0', '1') === '1', prefsResolveField('0', '0', '1'))
-  check('the mirror fills in when the host has no such field at all',
+  /* The reported failure this rule exists for: the namespace still held the OLD
+     roughness stop (10) because its writes stopped landing, while the mirror held the
+     one just chosen (11). The stale non-default host value used to win. */
+  check('the mirror wins over a stale non-default host value',
+    prefsResolveField('10', '7', '11') === '11', prefsResolveField('10', '7', '11'))
+  check('the mirror wins even when the host disagrees on a switch',
+    prefsResolveField('1', '0', '0') === '0', prefsResolveField('1', '0', '0'))
+  check('the mirror supplies a value the host never had',
     prefsResolveField(undefined, '0', '1') === '1', prefsResolveField(undefined, '0', '1'))
+  check('without a mirror the host value stands',
+    prefsResolveField('2', '0', undefined) === '2', prefsResolveField('2', '0', undefined))
   check('with neither store the shipped default stands',
     prefsResolveField(undefined, '0', undefined) === '0', prefsResolveField(undefined, '0', undefined))
-  check('host default and no mirror keeps the default',
-    prefsResolveField('0', '0', undefined) === '0', prefsResolveField('0', '0', undefined))
   check('mirror values are read back as stored strings',
     prefsResolveField(undefined, '0', 1) === '1', prefsResolveField(undefined, '0', 1))
 }

@@ -85,7 +85,7 @@ const NUM_NAMES = ['CONTOUR_STEP', 'CONTOUR_BASE_CELL', 'CONTOUR_OCTAVES', 'CONT
   'CONTOUR_GRAIN_OCTAVES', 'CONTOUR_RIDGED_GAIN', 'CONTOUR_WARP_SHARE', 'CONTOUR_WARP_SCALE',
   'CONTOUR_LANDFORM_RIDGE', 'CONTOUR_LANDFORM_VALLEY', 'CONTOUR_BAND_GRAIN_X',
   'CONTOUR_BAND_GRAIN_Y', 'CONTOUR_CONTRAST_SCALE', 'CONTOUR_LEVEL_MARGIN',
-  'CONTOUR_HOLLOW_SHARE', 'CONTOUR_HOLLOW_DEPTH', 'CONTOUR_HOLLOW_RADIUS',
+  'CONTOUR_HOLLOW_SHARE', 'CONTOUR_HOLLOW_MIN_ROUGHNESS', 'CONTOUR_HOLLOW_DEPTH', 'CONTOUR_HOLLOW_RADIUS',
   'CONTOUR_KARST_ELONG', 'CONTOUR_KARST_LOBE', 'CONTOUR_KARST_LOBE2', 'CONTOUR_KARST_RIM',
   'CONTOUR_KARST_MIN_R',
   'CONTOUR_HOLLOW_FEATHER',
@@ -115,13 +115,14 @@ try {
     ['contourSmooth', 'contourHash01'].map(grabOne).join('\n'),
     ['CONTOUR_HOLLOW_ENABLED', 'PREFS_NS', 'CONTOUR_VIEW_KEY'].map(grabOne).join('\n'),
     grabOne('isContourView3D'),
-    grabOne('contourHollowWanted'),
+    grab('contourHollowStrength'),
     FIELD_FNS.map(grab).join('\n'),
     grab('contourParallaxUV'),
     grab('contourOcclude'),
   ].join('\n')
   api = new Function(`
 let contourField = null, contourPaths = [], contourTex = null
+let contourViewShed = false
 let viewPref = '0'
 const prefsGet = (k) => (k === CONTOUR_VIEW_KEY ? viewPref : '')
 ${body}
@@ -135,8 +136,9 @@ const isDarkScheme = () => false
 const isWulingPalette = () => false
 return {
   contourGenerateField, contourReseed, contourLevels, contourParallaxUV, contourOcclude,
-  contourHollowWanted,
+  contourHollowStrength,
   setView: (v) => { viewPref = v },
+  setRoughness: (r) => { contourRoughnessIdx = r },
   hollowEnabled: () => CONTOUR_HOLLOW_ENABLED === true,
   setField: (v) => { contourField = v },
   consts: { REF: CONTOUR_3D_REF, DEPTH: CONTOUR_3D_DEPTH, RISE: CONTOUR_3D_RISE,
@@ -542,22 +544,68 @@ const CAM = 412.5
 }
 
 /* ------------------------------------------------- C. who gets the holes ------- */
-/* The decision is "3D only, and on", which is a product choice, not a detail of the
-   carve: the flat sheet is what most people see and it is a still image, so a second
-   parallax layer there would cost memory and buy nothing. Pinned here so a future edit
-   to the switch cannot silently start carving the flat view -- the A-tests above would
-   still pass, because they call the generator with hollow = 0 directly. */
+/* The decision is "3D only, and how rough the terrain is", which is a product choice,
+   not a detail of the carve: the flat sheet is what most people see and it is a still
+   image, so a second parallax layer there would cost memory and buy nothing. And calm
+   terrain must not have sinkholes -- a cavity in a plain reads as a rendering fault.
+
+   Required behaviour, from the user: "地形粗糙度也应该影响洞穴密度。1-6 无洞穴，
+   7 开始有浅洞穴，12 就按现在这个来". So the strength is 0 below the 7th stop, a
+   sixth at the 7th (shallow), and exactly 1 at the last stop (what shipped). */
 {
   api.setView('1')
-  const in3d = api.contourHollowWanted()
+  api.setRoughness(11)
+  const w12 = api.contourHollowStrength()
+  api.setRoughness(6)
+  const w7 = api.contourHollowStrength()
+  api.setRoughness(5)
+  const w6 = api.contourHollowStrength()
+  api.setRoughness(0)
+  const w1 = api.contourHollowStrength()
+  api.setRoughness(11)
   api.setView('0')
-  const flat2d = api.contourHollowWanted()
-  if (in3d === true) ok('the 3D view gets the hollow terrain')
-  else fail('hollow terrain is not applied in the 3D view')
-  if (flat2d === false) ok('the flat view never does, whatever the switch says')
-  else fail('the flat view is carving cavities (it must stay byte-identical)')
+  const flat2d = api.contourHollowStrength()
+  if (Math.abs(w12 - 1) < 1e-9) ok('the last roughness stop gives the cavities their shipped strength (1)')
+  else fail('the last stop does not give strength 1: ' + w12)
+  if (Math.abs(w7 - 1 / 6) < 1e-9) ok('the 7th stop is shallow, not off (' + w7.toFixed(3) + ')')
+  else fail('the 7th stop should be 1/6, got ' + w7)
+  if (w6 === 0 && w1 === 0) ok('stops 1-6 have no cavities at all')
+  else fail('a calm terrain still carves cavities: stop 6 = ' + w6 + ', stop 1 = ' + w1)
+  if (flat2d === 0) ok('the flat view never carves, whatever the roughness says')
+  else fail('the flat view is carving cavities (it must stay byte-identical): ' + flat2d)
   if (api.hollowEnabled()) ok('CONTOUR_HOLLOW_ENABLED is on, so the 3D path is live')
   else fail('CONTOUR_HOLLOW_ENABLED is off: the 3D path above is dead code')
+}
+
+/* ------------------------------------------------- C2. strength scales the carve --- */
+/* Not just a switch: a 1/6-strength field must carve LESS area and shallower than a
+   full one, and more than nothing. Same seed, so the landscape is identical and only
+   the carving differs. */
+{
+  const full = build(1)
+  const shallow = build(1 / 6)
+  const areaOf = (f) => {
+    let n = 0
+    for (let i = 0; i < f.F.length; i++) if (f.F[i] < f.holeLevel) n++
+    return n / f.F.length
+  }
+  const dropOf = (f) => {
+    let mn = Infinity
+    for (let i = 0; i < f.F.length; i++) if (f.F[i] < mn) mn = f.F[i]
+    return mn
+  }
+  const aFull = areaOf(full)
+  const aShallow = areaOf(shallow)
+  if (!(aShallow > 0)) fail('a 1/6 strength carves nothing at all: the 7th stop would show no caves')
+  else if (!(aShallow < aFull)) fail('a 1/6 strength carves as much as the full one ('
+    + aShallow.toFixed(4) + ' vs ' + aFull.toFixed(4) + ')')
+  else if (!(dropOf(shallow) > dropOf(full))) fail('a 1/6 strength is as deep as the full one ('
+    + dropOf(shallow).toFixed(3) + ' vs ' + dropOf(full).toFixed(3) + ')')
+  else {
+    ok('strength scales the carve: area ' + (aShallow * 100).toFixed(2) + '% vs '
+      + (aFull * 100).toFixed(2) + '%, floor ' + dropOf(shallow).toFixed(3)
+      + ' vs ' + dropOf(full).toFixed(3))
+  }
 }
 
 if (bad) {
