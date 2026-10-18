@@ -19,16 +19,16 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `cadd384`（`client.js` sha256 `5c03b58e…`） |
-| 已安装版本 | **已同步**：`profiles\desktop\node_modules\…\client.js` 的 sha256 同样是 `5c03b58e…`（装的是 fix16，**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix16.tgz` |
+| 分支 / HEAD | `main` / `325f742`（`client.js` sha256 `eb86c020…`） |
+| 已安装版本 | **已同步**：sha256 同样是 `eb86c020…`（装的是 fix17，**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix17.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
 | 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
 | 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
 ### 测试状态（FACT，本轮实测）
-- `npm run test:node`：**447 ok / 0 失败**（基线 432，新增 15 项：seam 11 + cusps 1 + hollow 3）。
+- `npm run test:node`：**454 ok / 0 失败**（基线 432；新增 seam 11 + cusps 1 + hollow 3 + heightmap 7）。
 - `npm run test:browser`：通过（真实 Chromium 挂载、画布已绘制 1882x1270、样式/激活链路断言）。
 - `node check.js`：通过。
 - 非闭合尺寸（只有直接调 `contourGenerateField` 才会出现）的提取输出与上一版**逐字节相同**：
@@ -36,7 +36,7 @@
 
 ### 回滚方式
 - 代码：`git revert d30fbf5`（或 `git reset --hard fa05b97`）。
-- 安装回滚：`undo_restore mode=id snapshot_id=20261019-033147-a421`（装 fix16 前）或 `20261019-022505-4f4f`（装 fix15 前），然后重启 DSH。
+- 安装回滚：`undo_restore mode=id snapshot_id=20261019-034118-5785`（装 fix17 前）/ `20261019-033147-a421`（fix16 前）/ `20261019-022505-4f4f`（fix15 前），然后重启 DSH。
 
 ---
 
