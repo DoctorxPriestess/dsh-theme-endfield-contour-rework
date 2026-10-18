@@ -178,6 +178,12 @@ function mirrorWrite(patch, explicitPath) {
  * Registering twice is impossible (the flag below), and every failure mode here
  * degrades to "no mirror" instead of breaking the theme's host half: a profile
  * with no web server simply keeps using the settings namespace alone.
+ *
+ * The late-service dance lives HERE, not in apply(), because it is the part that
+ * was wrong: a service only exists on the context that injected it, so mounting
+ * from the ctx apply() was called with found nothing even after cordis had waited
+ * for `webServer` -- the route was never registered and every client write went
+ * nowhere. Self-healing keeps that in one testable place.
  */
 function mountSettingsMirror(ctx) {
   if (mountSettingsMirror.done === true) return;
@@ -188,7 +194,22 @@ function mountSettingsMirror(ctx) {
     } catch (e) { /* absent */ }
     return undefined;
   })();
-  if (!server || typeof server.register !== 'function') return;
+  if (!server || typeof server.register !== 'function') {
+    /* Not mounted yet: wait for the service through inject, and mount from the
+       CHILD context that actually carries it. The `waited` flag stops an injected
+       ctx that still has no server from re-entering this branch forever. */
+    if (mountSettingsMirror.waited !== true && ctx && typeof ctx.inject === 'function') {
+      mountSettingsMirror.waited = true;
+      try {
+        ctx.inject(['webServer'], (child) => {
+          if (child) mountSettingsMirror(child);
+        });
+      } catch (e) {
+        mountSettingsMirror.waited = false;
+      }
+    }
+    return;
+  }
   mountSettingsMirror.done = true;
   const register = () => server.register({
     kind: 'prefix',
@@ -459,15 +480,22 @@ function loadSchemastery() {
 function apply(ctx) {
   /* Own durable mirror first: it needs no schema builder and must work even on a
      profile where the settings service never becomes writable (see the note on
-     SETTINGS_ROUTE). Idempotent and failure-tolerant. */
+     SETTINGS_ROUTE). Idempotent, self-healing and failure-tolerant -- it waits for
+     the web server itself (mountSettingsMirror). */
   try { mountSettingsMirror(ctx); } catch (e) { /* no web server: namespace only */ }
-  try {
-    /* A server that mounts after this apply() still gets the route: inject waits
-       for the service instead of probing once. */
-    if (typeof ctx.inject === 'function') {
-      ctx.inject(['webServer'], () => { try { mountSettingsMirror(ctx); } catch (e) { /* ignore */ } });
-    }
-  } catch (e) { /* inject unsupported: the synchronous mount above is the only chance */ }
+  /* Belt and braces: the web server is provided by another plugin, and a profile is
+     free to mount it after this one in a way inject does not sequence. A handful of
+     cheap one-shot probes removes the ordering dependence entirely. */
+  const retryMount = (attempt) => {
+    if (mountSettingsMirror.done === true) return;
+    if (attempt >= 24) return;
+    if (typeof setTimeout !== 'function') return;
+    setTimeout(() => {
+      try { mountSettingsMirror(ctx); } catch (e) { /* still absent */ }
+      retryMount(attempt + 1);
+    }, 250);
+  };
+  try { retryMount(0); } catch (e) { /* no timers */ }
   // Register the durable namespace the moment the Host settings service stands.
   //
   // Deliberately NO early `ctx.get('settings')` bail here: mounting plugins run

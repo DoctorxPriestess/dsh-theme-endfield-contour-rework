@@ -6,6 +6,32 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 设置持久化（补）：镜像路由从未挂上（fix31）
+
+fix30 装完用户报「不行」。现场探测给出唯一确证：
+
+```
+GET /api/plugin-updates/status              -> 200   （别人的路由在）
+GET /api/theme-endfield-contour-rework      -> 401   （落到兜底的 SPA 鉴权）
+GET /api/definitely-not-a-route             -> 401   （同上）
+```
+
+⇒ 我这条路由**根本没注册**，所以客户端的每次镜像写都打空，`settings.json` 从未生成。
+
+根因是自己的一个低级错误：`ctx.inject(['webServer'], cb)` 的回调里，我把**外层 ctx** 传给了挂载函数，
+而 cordis 的服务只注入到**回调的子 ctx** 上，探测永远拿到 `undefined`。现在把「等 web server」这件事
+收进 `mountSettingsMirror` 自己（注入回调里用子 ctx 重入挂载，并用 `waited` 标志防重入），`apply` 只负责
+调用一次并另加 24 次、每 250ms 的幂等重探，彻底消除对插件挂载顺序的依赖。
+
+测试补上了这一段：`settings-durable-mirror.test.js` 从 23 条扩到 **33 条**，用假 ctx/假 server 驱动
+**真 handler**，断言「从注入的子 ctx 挂上路由」「GET 返回 ok 与文件路径」「POST 落盘只在声明的字段」
+「再 GET 能读回（就是重启后读的那条路径）」「跨源 POST 403」「非法方法 405」。这正是原先漏掉的接线，
+现在有回归保护。
+
+文件位置说明：用户提议放进插件目录，但那会在**每次插件更新时被整目录替换删掉**（本项目的安装就是
+`dsh plugin add` 覆盖包目录）。所以放在 `C:\Users\ControlxSaria\.dsh\theme-endfield-contour-rework\settings.json`
+—— 一个独立、好找、且与包目录生命周期无关的位置；路由的 GET 响应里会带上这个绝对路径。
+
 ### 设置持久化：视角重启后掉回平面（fix30）
 
 用户：「我每次重启都不是默认视差模式，而是平面」。
