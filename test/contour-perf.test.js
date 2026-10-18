@@ -644,6 +644,40 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
   }
 }
 
+/* ---------- A8. the load-shedding guards ----------------------------------- */
+/* A long session must not end in a frozen app. Two guards, both cheap:
+   - a hidden/minimised window animates nothing (hours of background GPU work for a
+     picture nobody can see is the worst load profile for an unstable driver);
+   - a frame-budget watchdog sheds load (3D first, then animation) if frames stay slow.
+   These are SOURCE assertions: the behaviour needs a real compositor to be slow. */
+{
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'client.js'), 'utf8')
+  const wants = src.match(/const contourWantsScroll = \(\) =>[\s\S]{0,400}?\n\n/)
+  if (wants === null) fail('contourWantsScroll not found')
+  else if (!/!docHidden\(\)/.test(wants[0])) {
+    fail('the scroll loop does not stop while the window is hidden')
+  } else ok('a hidden/minimised window animates nothing')
+
+  const watch = src.match(/const CONTOUR_WATCH_DT = ([0-9.]+)[\s\S]{0,120}?const CONTOUR_WATCH_NET = (\d+)/)
+  if (watch === null) fail('no frame-budget watchdog constants')
+  else if (Number(watch[1]) < 0.033) fail('the watchdog threshold is ' + watch[1] + 's, inside a 60fps frame')
+  else if (!/contourShedLoad\(/.test(src) || !/contourWatchFrame\(dt\)/.test(src)) {
+    fail('the watchdog is declared but never run from the frame loop')
+  } else ok('frame watchdog: >' + (Number(watch[1]) * 1000) + 'ms/frame for ' + watch[2]
+    + ' net frames sheds load')
+
+  /* 3D is the expensive path: a per-pixel march. Keeping its step count and its sheet
+     small is what makes the watchdog's first action (drop 3D) rarely needed. */
+  const steps = src.match(/const CONTOUR_3D_STEPS = (\d+)/)
+  const area = src.match(/const CONTOUR_3D_TEX_AREA = ([0-9.e]+)/)
+  if (steps === null || area === null) fail('3D cost constants not found')
+  else if (Number(steps[1]) > 12) fail('CONTOUR_3D_STEPS = ' + steps[1] + ' (expected <= 12)')
+  else if (Number(area[1]) > 8e6) fail('CONTOUR_3D_TEX_AREA = ' + area[1] + ' device px (expected <= 8M)')
+  else ok('3D cost: ' + steps[1] + ' march steps, sheet <= ' + Math.round(Number(area[1]) / 1e6) + 'M device px')
+}
+
 /* A density change reuses the terrain: new levels only. */
 api.reset()
 api.retune()

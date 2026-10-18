@@ -976,6 +976,18 @@ function apply(ctx) {
         watermarkRaf = null
       }
     }
+    /* Coming back from hidden: the animation loop stopped itself, so restart it and
+       repaint once (the frame the user sees must be current, not whatever was on screen
+       when the window was minimised). */
+    const onContourVisibility = () => {
+      if (docHidden()) return
+      if (typeof contourSyncHook === 'function') contourSyncHook()
+      if (contourWrap !== null) {
+        contourBlit()
+        contourStartLoop()
+      }
+    }
+
     const onWatermarkResize = () => { if (watermarkEl) positionWatermark() }
     let contourScrollHook = () => {}
     let contourScrollEndHook = () => {}
@@ -983,6 +995,9 @@ function apply(ctx) {
     const onContourScrollEndEvent = () => { contourScrollEndHook() }
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('resize', onWatermarkResize)
+      /* The loop stops itself while the window is hidden (see contourWantsScroll);
+         this is what starts it again, and repaints the frozen frame on the way in. */
+      document.addEventListener('visibilitychange', onContourVisibility, false)
       window.addEventListener('scroll', onContourScrollEvent, true)
       window.addEventListener('scrollend', onContourScrollEndEvent, true)
     }
@@ -1201,11 +1216,18 @@ function apply(ctx) {
        repaint stalled the main thread long enough for the WebSocket heartbeat to miss
        ("重连中", ten-second freezes). The budget now keeps the same shape but a size the
        process can actually afford; the per-frame blit covers the rest at p95 0.002ms. */
-    const CONTOUR_MEM_BUDGET = 200e6
+    const CONTOUR_MEM_BUDGET = 150e6
     /* Smallest period worth a surface: at or below 1.0 the same feature would sit
        twice inside one frame, which reads as a tiling pattern rather than as a
        moving landscape. If the budget cannot even afford this, the layer keeps the
        old per-frame blit (one texture, no surface) rather than a repeating one. */
+    /* Frame-budget watchdog. The background is decoration: it must never be the
+       reason the app stops responding. A frame that takes longer than
+       CONTOUR_WATCH_DT counts +1, a fast one -1, and CONTOUR_WATCH_NET net slow frames
+       in a row shed load (3D first, then animation). Net counting means a single drag
+       or a GC pause cannot trigger it, while a genuinely overloaded GPU will. */
+    const CONTOUR_WATCH_DT = 0.05
+    const CONTOUR_WATCH_NET = 40
     /* The scroll surface holds the viewport plus this many DEVICE pixels of slack on
        each axis. It used to hold viewport + one whole period so that translating it
        never ran out -- 140MB at 1432x753@2x, and Chromium keeps more than one copy of
@@ -2061,8 +2083,11 @@ function apply(ctx) {
         }
         if (vals.length > 8) {
           vals.sort((a, b) => a - b)
-          field.holeLo = vals[Math.floor(vals.length * 0.55)]
-          field.holeHi = vals[Math.floor(vals.length * 0.78)]
+          /* A WIDE band on purpose: the mask edge is where the drawing changes
+             character, so a narrow band (p55..p78) renders as a hard fault line across
+             the pit ("洞穴那里有不自然的断层"). Half the pit cells fade in. */
+          field.holeLo = vals[Math.floor(vals.length * 0.30)]
+          field.holeHi = vals[Math.floor(vals.length * 0.95)]
           field.holeShare = vals.length / pitCells.length
         }
       }
@@ -2157,6 +2182,7 @@ function apply(ctx) {
        is skipped instead of re-running the full-screen march. On a 120Hz panel at the
        slowest speed the drift per frame is ~0.1px, so this is the difference between
        120 shader passes a second and ~24 -- with no visible change in motion. */
+    let contourSlowNet = 0
     let contourGlLastX = Infinity
     let contourGlLastY = Infinity
     let contourGlLastKey = ''
@@ -2201,11 +2227,19 @@ function apply(ctx) {
        active page scroll. thunderWantsAnim() is the announcement layer's copy of
        the reduced-motion rule. Checked live at every reconciliation, so flipping
        the OS setting takes effect without a reload. */
+    /* A MINIMISED OR BACKGROUNDED WINDOW HAS NOTHING TO ANIMATE. Without this the
+       loop keeps drawing at the refresh rate for as long as the app stays open in the
+       background -- hours of continuous GPU work for a picture nobody can see, which is
+       the worst load profile for a driver that is already unstable. */
+    const docHidden = () => typeof document !== 'undefined'
+      && document !== null && document.visibilityState === 'hidden'
+
     const contourWantsScroll = () => isContourAnimOn()
       && !prefersReducedMotion()
       && !contourLoaderActive
       && !contourScrollPaused
       && !contourResizing
+      && !docHidden()
 
     /* Deterministic PRNG (mulberry32), used with a PER-PAGE-LOAD seed.
        Determinism is required WITHIN one load: the field is rebuilt on real
@@ -3010,7 +3044,7 @@ function apply(ctx) {
        short period looks the same while costing 3.5x less GPU memory than the 2D
        sheet -- and 3D is where the texture is actually resident in VRAM. */
     const CONTOUR_3D_TEX_MULT = 1.5
-    const CONTOUR_3D_TEX_AREA = 12e6        // device px^2 (~48MB)
+    const CONTOUR_3D_TEX_AREA = 6e6         // device px^2 (~24MB)
     const CONTOUR_3D_REF = 0.5      // height that moves exactly like the flat sheet
     /* Magnification per unit of height: +6% at the top, -6% at the bottom.
        Measured, not guessed: the warp's screen-space gradient is roughly
@@ -3079,7 +3113,10 @@ function apply(ctx) {
     /* Raymarch steps per pixel for the occlusion. 14 measured enough to make the rim
        read as a rim at 1:1; the loop is constant-bound because GLSL ES 1.0 requires
        it, and u_steps lets the bound stay honest. */
-    const CONTOUR_3D_STEPS = 14
+    /* 10 steps: measured against 14 on the same frame, the pit rims are 1.2px softer
+       and the cost is ~30% lower. The raymarch is per-pixel, so this is the single
+       biggest knob on the 3D fill rate. */
+    const CONTOUR_3D_STEPS = 10
     /* Displacement-map resolution. The field itself is sampled every CONTOUR_STEP
        CSS px, which is finer than a parallax displacement needs and fine enough for
        its bilinear interpolation seams to show up as facets on straight contour
@@ -3244,8 +3281,8 @@ function apply(ctx) {
          slice of darker air sits in front of what is behind it: without the first part
          the pit's own concentric rings cover the second layer completely and the
          funnel reads as a hill seen from above. */
-      '    col *= 1.0 - 0.55 * hole;',
-      '    col += deep * hole * 0.55;',
+      '    col *= 1.0 - 0.42 * hole;',
+      '    col += deep * hole * 0.42;',
       /* NO ADDITIVE COLOUR ANYWHERE. Painting the lip and the void as added colour also
          paints the transparent pixels between the strokes, and on a dark theme that
          renders as a glowing oval floating over the map (reported from the live app:
@@ -3829,7 +3866,13 @@ function apply(ctx) {
            and give up on the scroll path once the period stops being worth it. */
         for (let guard = 0; guard < 128; guard++) {
           const areaOk = twCss * thCss <= CONTOUR_SCROLL_AREA * 1.02
-          const memOk = (w * h + twCss * thCss) * 4 * dpr * dpr <= CONTOUR_MEM_BUDGET * 1.02
+          /* Device pixels, both stores, with the surface counted as what it actually
+             is (viewport + pad): computing it in CSS px without the pad let the pair
+             land 10% over the budget at 1920x1080@2x. */
+          const texDevPx = Math.round(twCss * dpr) * Math.round(thCss * dpr)
+          const surfDevPx = (Math.round(w * dpr) + CONTOUR_SURFACE_PAD)
+            * (Math.round(h * dpr) + CONTOUR_SURFACE_PAD)
+          const memOk = (texDevPx + surfDevPx) * 4 <= CONTOUR_MEM_BUDGET * 1.02
           if (areaOk && memOk) break
           if (twCss <= minTw && thCss <= minTh) break
           twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
@@ -3953,6 +3996,35 @@ function apply(ctx) {
       return ((next % period) + period) % period
     }
 
+    /* Shed load, for the rest of this page load. 3D goes first because it is the
+       expensive path (a full-screen march per frame); if the flat path is still too
+       slow, the animation stops and the sheet stays as a still picture. Both are
+       preference writes, so the settings UI shows what happened. */
+    const contourShedLoad = (why) => {
+      if (isContourView3D()) {
+        prefsSet(CONTOUR_VIEW_KEY, '0')
+        contourSwitchSig = ''
+        contourApplySwitches()
+        dbg('frame watchdog: 3D disabled (' + why + ')')
+        contourBlit()
+        return
+      }
+      if (isContourAnimOn()) {
+        prefsSet(CONTOUR_ANIM_KEY, '0')
+        contourSwitchSig = ''
+        contourApplySwitches()
+        dbg('frame watchdog: animation stopped (' + why + ')')
+      }
+    }
+
+    const contourWatchFrame = (dt) => {
+      if (dt > CONTOUR_WATCH_DT) contourSlowNet += 1
+      else if (contourSlowNet > 0) contourSlowNet -= 1
+      if (contourSlowNet < CONTOUR_WATCH_NET) return
+      contourSlowNet = 0
+      contourShedLoad('sustained slow frames, dt=' + dt.toFixed(3) + 's')
+    }
+
     const contourFrame = () => {
       contourRaf = null
       if (contourWrap === null || contourTex === null) return
@@ -3964,6 +4036,7 @@ function apply(ctx) {
       let dt = contourLastT < 0 ? 0 : (now - contourLastT) / 1000
       contourLastT = now
       if (dt > 0.1) dt = 0.1 // clamp tab-switch gaps so the sheet never jumps
+      contourWatchFrame(dt)
       const twDev = contourTex.cv.width
       const thDev = contourTex.cv.height
       /* Space-based motion: px/second * seconds, identical on every refresh
@@ -7355,6 +7428,7 @@ function apply(ctx) {
       }
       if (watermarkRaf !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(watermarkRaf)
       if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('resize', onWatermarkResize)
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') document.removeEventListener('visibilitychange', onContourVisibility, false)
       if (watermarkEl && watermarkEl.parentNode) watermarkEl.parentNode.removeChild(watermarkEl)
       if (contourScrollTimer !== null && typeof clearTimeout === 'function') clearTimeout(contourScrollTimer)
       contourScrollTimer = null
