@@ -48,12 +48,22 @@ const MOCK = `<!doctype html><html><head><meta charset="utf-8"><style>
     color-mix(in srgb, var(--dsw-alias-bg-base) 0%, transparent) 0px,
     var(--dsw-alias-bg-base) 36px);position:sticky;bottom:0;padding:20px 60px 28px}
   .msg{font-size:15px;line-height:1.7;max-width:640px;color:var(--dsw-alias-label-primary)}
+  /* The upstream CoT disclosure, verbatim from the 0.2.x bundle: expanding it makes
+     the header row sticky AND opaque bg-base, i.e. a black bar that travels with the
+     scroll. The theme has to wash that fill without moving the row. */
+  .Md3f7G_cotRoot[data-expanded] [data-open] [data-disclosure-header]{
+    position:sticky;top:0;z-index:1;background:var(--dsw-alias-bg-base);
+    height:20px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-primary)}
 </style></head><body><div id="root">
   <div class="BynINW_frame">
     <div class="BynINW_sidebarCol"><div style="padding:14px">sidebar</div></div>
     <div class="BynINW_centerCol"><div class="Dc7zOa_root">
       <div class="Dc7zOa_viewArea">
         <p class="msg" id="probe">Legibility probe paragraph sitting above the contour layer.</p>
+        <div class="Md3f7G_cotRoot" data-expanded><div data-open>
+          <div data-disclosure-header id="cotHead">已深度思考（用时 12 秒）</div>
+          <p class="msg">reasoning line one</p><p class="msg">reasoning line two</p>
+        </div></div>
       </div>
       <div class="Dc7zOa_composerSeat"><div style="height:52px;border:1px solid var(--dsw-alias-border-l2)"></div></div>
     </div></div>
@@ -98,6 +108,21 @@ window.__run__=async()=>{
   R('0.2.0 right column bg cleared', bg(document.querySelector('.BynINW_rightbarCol'))==='rgba(0, 0, 0, 0)', bg(document.querySelector('.BynINW_rightbarCol')))
   R('0.2.0 conversation root bg cleared', bg(conv)==='rgba(0, 0, 0, 0)', bg(conv))
   R('sidebar bg cleared', bg(document.querySelector('.BynINW_sidebarCol'))==='rgba(0, 0, 0, 0)', bg(document.querySelector('.BynINW_sidebarCol')))
+  /* The CoT sticky header: washed, not transparent (it still has to occlude the
+     reasoning text scrolling under it) and not opaque (that IS the black bar). */
+  const cotHead=document.getElementById('cotHead')
+  const cotBg=bg(cotHead)
+  /* Chrome serialises a color-mix() result as color(srgb r g b / a); the alpha is the
+     only part that matters, the rgb has to stay the base colour (0.9098 = 232/255).
+     No regex here: this block lives inside a template literal, which eats the
+     backslashes. */
+  const cotSlash=cotBg.lastIndexOf('/')
+  const cotAlpha=cotSlash>=0 ? parseFloat(cotBg.slice(cotSlash+1)) : NaN
+  R('CoT sticky header washed to bg-base + alpha',
+    cotBg!=='rgba(0, 0, 0, 0)' && cotBg!=='rgb(232, 232, 226)'
+    && cotAlpha>0.7 && cotAlpha<0.95
+    && (cotBg.indexOf('232, 232, 226')>=0 || cotBg.indexOf('0.909804')>=0), cotBg)
+  R('CoT sticky header stays sticky', getComputedStyle(cotHead).position==='sticky', getComputedStyle(cotHead).position)
   const probeEl=document.getElementById('probe')
   const r=probeEl.getBoundingClientRect()
   const hit=document.elementFromPoint(r.left+8, r.top+r.height/2)

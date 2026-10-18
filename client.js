@@ -2347,6 +2347,15 @@ function apply(ctx) {
        indefinitely when the camera happens to stand still, and a canvas that stopped
        committing is exactly the one a re-composite can present as empty. */
     let contourGlLastDrawAt = -1
+    /* What one shader pass into the layer costs, in ms, sampled by the counters
+       channel. Splitting "the frame arrived too late" (cost close to the refresh
+       interval) from "the compositor dropped the layer" (cost small, blocks anyway)
+       is the whole point: the two need opposite fixes and I have no other way to
+       tell them apart from outside the renderer. */
+    let contourGlCostMax = 0
+    let contourGlCostSum = 0
+    let contourGlCostN = 0
+    let contourGlRaster = null
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -4212,6 +4221,8 @@ function apply(ctx) {
         st.cv.style.width = contourView.w + 'px'
         st.cv.style.height = contourView.h + 'px'
       }
+      const t0 = (typeof performance !== 'undefined' && performance !== null
+        && typeof performance.now === 'function') ? performance.now() : 0
       if (!contourGlUpload()) return false
       const tw = contourTex.cv.width
       const th = contourTex.cv.height
@@ -4263,6 +4274,14 @@ function apply(ctx) {
       gl.uniform2f(st.uDeepShift, CONTOUR_3D_HOLE_SHIFT_X, CONTOUR_3D_HOLE_SHIFT_Y)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       if (typeof contourPulseDraws === 'number') contourPulseDraws++
+      if (typeof performance !== 'undefined' && performance !== null
+        && typeof performance.now === 'function') {
+        const spent = performance.now() - t0
+        if (spent > contourGlCostMax) contourGlCostMax = spent
+        contourGlCostSum += spent
+        contourGlCostN++
+        contourGlRaster = [wDev, hDev]
+      }
       return true
     }
 
@@ -4955,12 +4974,21 @@ function apply(ctx) {
            page keeps removing is a gap of up to 250ms, i.e. the same black-block shape. */
         hits: typeof contourWatchHits === 'number' ? contourWatchHits : -1,
         gaps: contourPulseGaps,
+        /* ms of main-thread time per shader pass (the GPU runs behind it, so this is a
+           lower bound) and the raster size it ran at. */
+        costMax: Math.round(contourGlCostMax * 100) / 100,
+        costAvg: contourGlCostN > 0 ? Math.round((contourGlCostSum / contourGlCostN) * 100) / 100 : -1,
+        costN: contourGlCostN,
+        raster: contourGlRaster,
       })
       contourPulseFrames = 0
       contourPulseCommits = 0
       contourPulseMuts = 0
       contourPulseDraws = 0
       contourPulseGaps = []
+      contourGlCostMax = 0
+      contourGlCostSum = 0
+      contourGlCostN = 0
       if (typeof fetch !== 'function') return
       try {
         fetch(CONTOUR_PULSE_URL, { method: 'POST', mode: 'no-cors', body: body }).catch(() => {})
@@ -6122,6 +6150,44 @@ function apply(ctx) {
         background: linear-gradient(180deg,
           rgba(0, 0, 0, 0) 0px,
           color-mix(in srgb, var(--dsw-alias-bg-base) 82%, transparent) 36px) !important;
+      }
+      /* ---------- Opaque bg-base rectangles inside the frame ----------
+         The sheet is visible only where nothing opaque paints over it, and the one
+         colour that always covers it COMPLETELY is --dsw-alias-bg-base -- the colour
+         this theme deliberately made equal to the sheet's own background. So every
+         upstream element that paints bg-base to occlude its own scrolling content
+         reads as a black rectangle lying on the terrain, with the terrain's own
+         colour inside it: indistinguishable from "the layer stopped drawing".
+
+         MEASURED in the 0.2.x bundle: 26 selectors paint bg-base inside the app.
+         The reported one is inside the conversation and scrolls with it:
+
+           ._3GBCTG_root[data-expanded] [data-open] [data-disclosure-header]
+             { position: sticky; top: 0; background: var(--dsw-alias-bg-base) }
+
+         i.e. expanding CoT makes that row sticky AND opaque, so it is a black bar
+         that travels up with the scroll at exactly the scroll speed. Its
+         data-disclosure-header attribute is NOT hashed, so this selector survives
+         app rebuilds; the rest are matched on the stable '_suffix' part only (the
+         same policy as '_sidebarCol' above), because the prefixes are build hashes.
+
+         background-color, never the background shorthand: several of these carry a
+         background-image as well, and clobbering it would delete real content.
+
+         The wash is the SAME 82% mix the composer seat uses: still occludes what
+         scrolls underneath (18% of a near-black sheet over near-black text is
+         invisible) while the contour keeps running through it. 100% is the black
+         rectangle again; 0% would let the reasoning text scroll THROUGH the header.
+         Settings-page and terminal surfaces paint bg-base too but are not slabs over
+         the conversation, so they are left alone. */
+      [class*='_frame']:has(> [data-endfield-contour]) [data-disclosure-header],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_compactionButton'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_inspectButton'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_toolCatalogDefinition'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_bottomRow'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_file'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_thumb'] {
+        background-color: color-mix(in srgb, var(--dsw-alias-bg-base) 82%, transparent) !important;
       }
       ::selection {
         color: #000;

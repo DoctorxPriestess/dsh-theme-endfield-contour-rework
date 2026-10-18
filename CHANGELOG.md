@@ -6,6 +6,42 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 不透明底色方块：CoT 粘性头部（fix27）
+
+用户观察：「cot 点开后思考那一行变黑（底色）」，并且「随着我向下滚动页面，背景里有一根和思考背后的
+黑色一样大小的矩形往上滚动，滚动距离和我往下滚动的一致」。
+
+滚动距离 1:1 相等 = 那个矩形是**跟着内容走的 DOM 元素**，不是合成器丢块。在上游 bundle 里按字符串
+核对到唯一一条匹配该行为的规则：
+
+```css
+._3GBCTG_root[data-expanded] [data-open] [data-disclosure-header]{
+  position: sticky; top: 0; background: var(--dsw-alias-bg-base);
+}
+```
+
+CoT 一展开，那行头部就被设成 sticky + `--dsw-alias-bg-base`；而本主题**故意**把这个 token 设成与地形
+本身底色相同的 #101110。于是它变成一块和地形同色、贴在视口顶、随滚动一起走的实心矩形——从外面看
+与「图层停止绘制」完全无法区分。
+
+修法：把这类元素的不透明底色改成 **82% 的底色 + 18% 透明**（与 composerSeat 渐变已经在用的同一个
+比例），地形线条能透过去，而滚动到它下面的推理文字仍被压住（近黑底上 18% 的细线本来就看不出）。
+100% 就是黑块，0% 会让文字**穿过**头部。`position: sticky` 不动。
+
+用 `background-color` 而不是 `background` 简写：其中几个元素还带 `background-image`，用简写会把真内容
+删掉。选择器靠 `[data-disclosure-header]`（不是哈希）和稳定的 `_suffix` 匹配，所以上游重建后仍然生效。
+
+顺带一起洗白的同类元素（都是「流式过程中出现/消失、位置随机」的可疑来源，但**未验证**与随机闪烁的
+因果关系）：`_compactionButton`、`_inspectButton`、`_toolCatalogDefinition`、`_bottomRow`、`_file`、
+`_thumb`。设置页与终端也画 bg-base，但不覆盖会话内容，故意不动。
+
+测试：`contour-render-020.test.js` 增加真实 CoT 结构 + 两条断言 —— 头部底色必须解析成
+`color(srgb 0.9098 0.9098 0.8863 / 0.82)`（alpha ∈ 0.7..0.95、rgb 仍是底色），且 `position` 仍是
+`sticky`。12/12 通过。
+
+**这不是随机闪烁问题的结论。** 那条仍然开放：这一版只是把「一类可证的底色方块」关掉，随机位置闪
+烁是否同因，要等它下次出现时的数据。
+
 ### 洞口：三种溶洞形状 + 洞内 100% 透过（fix26）
 
 用户要求：「参考现实里的溶洞。设高层为 a，低层为 b，那么 a 会有一个洞；洞为 100% 透明，透过这个洞可以
