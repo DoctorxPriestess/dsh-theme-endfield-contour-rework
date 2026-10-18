@@ -390,6 +390,49 @@ const wrap = (x) => ((x % 1) + 1) % 1
   else ok('cavities are gated on the field carrying a band (2D sheet: none)')
 }
 
+/* ---- the sheet texture follows its PIXELS, not just its identity ----
+   Reported: "视差模式下等高线密集度不能调整". A density change re-extracts into the
+   SAME cache canvas at the SAME size, so an upload keyed on src/w/h alone reported
+   "unchanged" and the parallax view kept the old level count for the rest of the
+   session. Driven here with a fake GL: upload once, again unchanged (no work), then
+   bump only the generation (what a density change does) and demand a re-upload. */
+{
+  let uploads = 0
+  const gl = { bindTexture() {}, pixelStorei() {}, texImage2D() { uploads++ } }
+  const src = { width: 100, height: 60 }
+  let state = null
+  let sheetGen = 1
+  const upload = new Function(
+    'contourGl', 'contourTex', 'contourField', 'contourSheetGen',
+    grabFn('contourGlUpload') + '\nreturn contourGlUpload',
+  )
+  /* upload() is the compiled OUTER function: calling it returns the sliced arrow, so
+     every capture has to invoke what it returns. */
+  const run = (cv) => upload(state, { cv }, null, sheetGen)()
+  state = { gl, sheet: {}, height: {}, sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null, sheetGen: null }
+  run(src)
+  const first = uploads
+  run(src)
+  const second = uploads
+  sheetGen = 2 // a density change: same canvas, same size, new pixels
+  run(src)
+  const third = uploads
+  run({ width: 100, height: 60 }) // and a swapped canvas (a rebuild)
+  const fourth = uploads
+  if (first !== 1) fail('the first upload did not happen (' + first + ' texImage2D calls)')
+  else if (second !== first) fail('an unchanged sheet was uploaded again (' + (second - first) + ' extra calls)')
+  else if (third !== second + 1) fail('a new sheet GENERATION did not trigger an upload (' + (third - second)
+    + ' calls): a density change cannot reach the parallax view')
+  else if (fourth !== third + 1) fail('a new sheet OBJECT did not trigger an upload (' + (fourth - third) + ' calls)')
+  else ok('the 3D sheet is re-uploaded on a content generation, not only on identity/size')
+  if (!/contourSheetGen \+= 1/.test(grabFn('contourRenderCache'))) {
+    fail('contourRenderCache does not bump the sheet generation')
+  }
+  if (!/contourGlLastDrawAt = -1/.test(grabFn('contourRenderCache'))) {
+    fail('a repaint does not force the next 3D frame (the retuned sheet would wait for the 200ms floor)')
+  }
+}
+
 if (bad) {
   console.error(bad + ' contour 3D check(s) failed')
   process.exit(1)

@@ -2431,6 +2431,11 @@ function apply(ctx) {
        indefinitely when the camera happens to stand still, and a canvas that stopped
        committing is exactly the one a re-composite can present as empty. */
     let contourGlLastDrawAt = -1
+    /* Bumped by contourRenderCache every time the sheet's PIXELS change. The 3D layer
+       must re-upload on this, not on the canvas identity: a density change re-extracts
+       into the same canvas at the same size, so identity alone reports "unchanged" and
+       the parallax view keeps the old level count forever. */
+    let contourSheetGen = 0
     /* What one shader pass into the layer costs, in ms, sampled by the counters
        channel. Splitting "the frame arrived too late" (cost close to the refresh
        interval) from "the compositor dropped the layer" (cost small, blocks anyway)
@@ -3324,6 +3329,15 @@ function apply(ctx) {
         for (let k = 0; k < list.length; k++) drawSmoothPath(smoothPath(contourPaths[list[k]]))
         ctx.stroke()
       }
+      /* The sheet's CONTENT changed while its canvas object and size did not (a density
+         change re-extracts into the same cache canvas, a palette change repaints it).
+         The 3D layer uploads the sheet texture by identity + size, so without a
+         generation counter it keeps showing the old picture for the rest of the
+         session -- reported as "视差模式下等高线密集度不能调整". Bumping this, and
+         forcing the next 3D frame to draw, is what makes those two settings apply in
+         the parallax view. */
+      contourSheetGen += 1
+      contourGlLastDrawAt = -1
     }
 
     /* Blit the cached texture onto the visible viewport canvas with wrap-around.
@@ -4184,7 +4198,7 @@ function apply(ctx) {
            is -- see contourHeightMap. */
         sheet: makeTexture(gl.CLAMP_TO_EDGE),
         height: makeTexture(gl.REPEAT),
-        sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null,
+        sheetSrc: null, sheetW: 0, sheetH: 0, heightGen: null, sheetGen: null,
       }
       contourGlWhy = hw.why
       return true
@@ -4226,7 +4240,8 @@ function apply(ctx) {
       if (st === null || contourTex === null) return false
       const gl = st.gl
       const src = contourTex.cv
-      if (st.sheetSrc !== src || st.sheetW !== src.width || st.sheetH !== src.height) {
+      if (st.sheetSrc !== src || st.sheetW !== src.width || st.sheetH !== src.height
+        || st.sheetGen !== contourSheetGen) {
         gl.bindTexture(gl.TEXTURE_2D, st.sheet)
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
@@ -4234,6 +4249,9 @@ function apply(ctx) {
         st.sheetSrc = src
         st.sheetW = src.width
         st.sheetH = src.height
+        /* Same canvas, new pixels: remember the generation that was uploaded, so a
+           density/palette change repaints the parallax view instead of being ignored. */
+        st.sheetGen = contourSheetGen
       }
       const f = contourField
       if (f !== null && st.heightGen !== f) {

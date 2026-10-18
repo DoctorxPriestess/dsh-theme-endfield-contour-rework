@@ -6,6 +6,31 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 视差模式下等高线密集度不生效（fix32）
+
+用户：「视差模式下等高线密集度不能调整」。
+
+根因是 3D 图层的纹理上传条件写错了对象：`contourGlUpload` 只在
+
+```js
+st.sheetSrc !== src || st.sheetW !== src.width || st.sheetH !== src.height
+```
+
+时才重传底图。而**改密集度是往同一块缓存 canvas 里重新提取**——对象相同、尺寸相同、只有像素变了，
+这个条件永远为假，于是着色器一直用旧的那张图，整局都不会变。平面模式没有纹理上传这一层，所以正常
+（用户观察一致）。
+
+修法：给底图加**内容代数**。
+
+- `contourRenderCache` 末尾 `contourSheetGen += 1`（每次重绘都算新内容：改密集度、换配色、重建）。
+- `contourGlUpload` 的条件加上 `st.sheetGen !== contourSheetGen`，上传后记下代数。
+- 同时把 `contourGlLastDrawAt = -1`：否则重绘后那一帧可能被 16ms 下限或"没动就不画"的门挡掉，要等到
+  200ms 后的心跳才看见变化。
+
+测试：`contour-3d.test.js` 新增一条**行为**断言（假 GL 驱动真 `contourGlUpload`）：首次上传 1 次 →
+内容不变再调用**不**重传 → 只改代数（就是改密集度）**必须**重传 → 换 canvas 对象也必须重传；并断言
+`contourRenderCache` 里确实有代数自增与强制重画。旧代码在这条测试上直接红。
+
 ### 设置持久化（补）：镜像路由从未挂上（fix31）
 
 fix30 装完用户报「不行」。现场探测给出唯一确证：
