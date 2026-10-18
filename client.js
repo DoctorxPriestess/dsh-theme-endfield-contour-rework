@@ -2570,10 +2570,9 @@ function apply(ctx) {
        stitched across the boundary instead of ending at it, and the smoother sees
        the real continuation on both sides.
        The walk then unwraps the coordinates as it goes -- a contour crossing the seam
-       keeps going past the sheet instead of jumping back a period -- and starts near
-       a corner, so the one place where the smoother still sees a free end is as far
-       from the middle of the frame as the level allows. The renderer strokes each
-       contour once per period it straddles: see contourRenderCache.
+       keeps going past the sheet instead of jumping back a period -- so the smoother
+       always has the real curve on both sides of the boundary. The renderer strokes
+       each contour once per period it straddles: see contourRenderCache.
        A sheet that does not close on the grid (only reachable by calling the
        generator directly: contourTargetTexture always sizes to it) is NOT a torus, so
        for that case the extraction stays exactly as it was. */
