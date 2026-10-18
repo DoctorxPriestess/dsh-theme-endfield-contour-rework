@@ -73,8 +73,7 @@ const NAME = 'dsh-theme-endfield-contour-rework';
  *     terrain, and it does so from the SAME seed (the landscape is re-tuned,
  *     never re-rolled).
  */
-const NAMESPACE = 'dsh-theme-endfield-contour-rework';
-const FIELD_DEFAULTS = {
+const NAMESPACE = 'dsh-theme-endfield-contour-rework';const FIELD_DEFAULTS = {
   enabled: '1',             // 终末地主题 —— default on
   palette: 'valley',        // 主题配色 —— 谷地黄 (walley default)
   radius: 'square',         // 主题圆角 —— 直角
@@ -93,10 +92,170 @@ const FIELD_DEFAULTS = {
   thunderAnim: '0',         // 大字入场动画 —— default off
 };
 
-/* Schemastery resolution — see loadSchemastery() below for the strategy order
-   and the DSH 0.2.0-rc.2 host behaviour that makes the fallbacks necessary.
-   Kept guarded throughout: a profile with no schemastery anywhere degrades to
-   a no-op rather than crashing the host half. */
+/* ---------- Theme-owned durable mirror (file + route) ----------
+ * WHY THIS EXISTS NEXT TO THE SETTINGS NAMESPACE.
+ * The namespace above is the intended authority, but a browser write is only
+ * committed while its scope reports {mode:'host', status:'ready', writable:true}
+ * for our entry; when that never happens the client keeps the edit page-local and
+ * the setting reverts on the next launch. That is exactly what was reported:
+ * "我每次重启都不是默认视差模式，而是平面" -- the contour VIEW never survived a
+ * restart while the settings that had been written by an earlier DSH build did.
+ *
+ * This is the floor, not a replacement: the theme's own host half owns a small
+ * JSON file under DSH_HOME and serves it on its own same-origin route, so the
+ * client can always write and always read back one value, independent of the
+ * origin/port and of whether the settings transport ever became ready. The client
+ * prefers a NON-DEFAULT value from the namespace (a host that really persisted it)
+ * and falls back to this file for the fields the host dropped, so the two stores
+ * cannot fight over the same field.
+ *
+ * The file holds only fields declared in FIELD_DEFAULTS, as strings -- the same
+ * value model as the namespace (see the note above FIELD_DEFAULTS).
+ */
+const SETTINGS_ROUTE = '/api/theme-endfield-contour-rework';
+const SETTINGS_MIRROR_DIR = 'theme-endfield-contour-rework';
+const SETTINGS_MIRROR_FILE = 'settings.json';
+
+/** Absolute path of the mirror file. DSH_HOME wins over the home default. */
+function mirrorPath() {
+  let path = null;
+  let os = null;
+  try { path = require('node:path'); os = require('node:os'); } catch (e) { return null; }
+  if (!path || !os) return null;
+  const env = typeof process !== 'undefined' && process.env ? process.env.DSH_HOME : undefined;
+  const home = typeof env === 'string' && env.trim() !== '' ? env.trim() : path.join(os.homedir(), '.dsh');
+  return path.join(home, SETTINGS_MIRROR_DIR, SETTINGS_MIRROR_FILE);
+}
+
+/** Keep only declared fields, as strings. Anything else is ignored, never stored. */
+function mirrorFilter(patch) {
+  const out = {};
+  if (patch === null || typeof patch !== 'object') return out;
+  for (const field of Object.keys(FIELD_DEFAULTS)) {
+    if (!Object.prototype.hasOwnProperty.call(patch, field)) continue;
+    const v = patch[field];
+    if (typeof v === 'string' || typeof v === 'number') out[field] = String(v);
+  }
+  return out;
+}
+
+/** Read the mirror. A missing/corrupt file is an EMPTY object, never a throw. */
+function mirrorRead(explicitPath) {
+  let fs = null;
+  try { fs = require('node:fs'); } catch (e) { return {}; }
+  const file = explicitPath || mirrorPath();
+  if (!file) return {};
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw);
+    return mirrorFilter(parsed);
+  } catch (e) {
+    return {};
+  }
+}
+
+/** Merge a patch into the mirror atomically (tmp + rename). Returns the result. */
+function mirrorWrite(patch, explicitPath) {
+  let fs = null;
+  let path = null;
+  try { fs = require('node:fs'); path = require('node:path'); } catch (e) { return mirrorRead(explicitPath); }
+  const file = explicitPath || mirrorPath();
+  if (!file) return {};
+  const merged = Object.assign(mirrorRead(file), mirrorFilter(patch));
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    return merged;
+  }
+  return merged;
+}
+
+/**
+ * Mount the mirror route on the DSH web server.
+ * Registering twice is impossible (the flag below), and every failure mode here
+ * degrades to "no mirror" instead of breaking the theme's host half: a profile
+ * with no web server simply keeps using the settings namespace alone.
+ */
+function mountSettingsMirror(ctx) {
+  if (mountSettingsMirror.done === true) return;
+  const server = (() => {
+    try {
+      if (ctx && ctx.webServer) return ctx.webServer;
+      if (ctx && typeof ctx.get === 'function') return ctx.get('webServer');
+    } catch (e) { /* absent */ }
+    return undefined;
+  })();
+  if (!server || typeof server.register !== 'function') return;
+  mountSettingsMirror.done = true;
+  const register = () => server.register({
+    kind: 'prefix',
+    path: SETTINGS_ROUTE,
+    handler: async (req, res) => {
+      const send = (status, body) => {
+        try {
+          res.writeHead(status, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify(body));
+        } catch (e) { /* client vanished */ }
+      };
+      const readJson = () => new Promise((resolve) => {
+        const chunks = [];
+        let size = 0;
+        try {
+          req.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > 16384) { req.destroy(); return; }
+            chunks.push(chunk);
+          });
+          req.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8').trim();
+            if (raw === '') return resolve({});
+            try { resolve(JSON.parse(raw)); } catch (e) { resolve({}); }
+          });
+          req.on('error', () => resolve({}));
+        } catch (e) { resolve({}); }
+      });
+      try {
+        const method = String(req.method || 'GET').toUpperCase();
+        /* State-changing calls must come from this page: same-origin only, the
+           same guard dsh-undo-savepoint and plugin-update-checker use. */
+        if (method !== 'GET' && method !== 'HEAD') {
+          const origin = req.headers ? req.headers.origin : undefined;
+          if (typeof origin === 'string' && origin !== '') {
+            let same = false;
+            try { same = new URL(origin).host === String((req.headers && req.headers.host) || ''); } catch (e) { same = false; }
+            if (!same) return send(403, { ok: false, error: { code: 'forbidden', message: 'cross-origin request rejected' } });
+          }
+        }
+        if (method === 'GET' || method === 'HEAD') {
+          return send(200, { ok: true, value: mirrorRead(), path: mirrorPath() });
+        }
+        if (method === 'POST') {
+          const body = await readJson();
+          const patch = mirrorFilter(body);
+          const value = mirrorWrite(patch);
+          return send(200, { ok: true, value: value, wrote: patch });
+        }
+        return send(405, { ok: false, error: { code: 'method-not-allowed', message: method } });
+      } catch (e) {
+        return send(500, { ok: false, error: { code: 'mirror-failed', message: String(e && e.message || e) } });
+      }
+    },
+  });
+  try {
+    if (typeof ctx.effect === 'function') ctx.effect(register);
+    else register();
+  } catch (e) {
+    mountSettingsMirror.done = false;
+  }
+}
+
+
 /* Resolution diagnostics: every strategy this module tried and how it ended.
    Read by tests / support only — DSH itself never looks at it. */
 const SCHEMA_RESOLUTION = { attempts: [], host: {} };
@@ -298,6 +457,17 @@ function loadSchemastery() {
 }
 
 function apply(ctx) {
+  /* Own durable mirror first: it needs no schema builder and must work even on a
+     profile where the settings service never becomes writable (see the note on
+     SETTINGS_ROUTE). Idempotent and failure-tolerant. */
+  try { mountSettingsMirror(ctx); } catch (e) { /* no web server: namespace only */ }
+  try {
+    /* A server that mounts after this apply() still gets the route: inject waits
+       for the service instead of probing once. */
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], () => { try { mountSettingsMirror(ctx); } catch (e) { /* ignore */ } });
+    }
+  } catch (e) { /* inject unsupported: the synchronous mount above is the only chance */ }
   // Register the durable namespace the moment the Host settings service stands.
   //
   // Deliberately NO early `ctx.get('settings')` bail here: mounting plugins run
@@ -382,6 +552,10 @@ module.exports = {
   // Exposed for tests/documentation.
   NAMESPACE,
   FIELD_DEFAULTS,
+  // The theme-owned durable mirror (see SETTINGS_ROUTE): exposed so the tests can
+  // drive the file/route helpers directly instead of mounting a web server.
+  SETTINGS_ROUTE,
+  __settingsMirror: { mirrorPath, mirrorRead, mirrorWrite, mirrorFilter, mountSettingsMirror },
   // Resolution trace of the schema builder (empty attempts = resolved on the
   // very first try). Diagnostics only.
   __schemaResolution: SCHEMA_RESOLUTION,

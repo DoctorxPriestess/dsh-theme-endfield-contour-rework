@@ -1,0 +1,127 @@
+/**
+ * settings-durable-mirror.test.js — the theme-owned mirror that keeps a setting
+ * alive when the DSH settings transport never becomes writable.
+ *
+ * Reported bug: "我每次重启都不是默认视差模式，而是平面". The contour view was
+ * written through the settings namespace and reverted on every launch, while older
+ * settings (written when the transport did work) stayed. Two independent defects
+ * could produce that, and both are pinned here:
+ *
+ *   1. the frame watchdog PERSISTED its page-local "3D is too slow" downgrade, so
+ *      one slow frame rewrote the user's view for every later launch;
+ *   2. a namespace field whose host value is the shipped default is
+ *      indistinguishable from "this write was dropped", so the client needs a
+ *      durable store of its own to fall back to.
+ *
+ * The precedence is a pure function (prefsResolveField) exactly so it can be
+ * pinned here; the "shed must not persist" rule is asserted on the source of
+ * contourShedLoad, because it is the ABSENCE of a prefsSet call that matters.
+ */
+const fs = require('fs')
+const path = require('path')
+
+let pass = 0
+let fail = 0
+const ok = (m) => { pass++; console.log('ok    ' + m) }
+const bad = (m) => { fail++; console.error('FAIL  ' + m) }
+const check = (m, cond, detail) => (cond ? ok(m + (detail ? '  (' + detail + ')' : '')) : bad(m + '  -> ' + detail))
+
+const ROOT = path.resolve(__dirname, '..')
+const SRC = fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8')
+
+/* Slice a balanced-brace block starting at a `const NAME = ...` / `function NAME`
+   header: the tests must run the SHIPPED expression, not a copy of it. */
+function grab(name) {
+  const at = SRC.indexOf('const ' + name + ' = ')
+  if (at < 0) throw new Error('could not find const ' + name)
+  const open = SRC.indexOf('(', at)
+  const start = SRC.indexOf('{', at)
+  const arrow = SRC.indexOf('=>', at)
+  const from = arrow >= 0 && (start < 0 || arrow < start) ? arrow : (open >= 0 ? open : start)
+  let i = from
+  let depth = 0
+  let seen = false
+  for (; i < SRC.length; i++) {
+    const c = SRC[i]
+    if (c === '(' || c === '{') { depth++; seen = true } else if (c === ')' || c === '}') {
+      depth--
+      if (seen && depth === 0) { i++; break }
+    }
+  }
+  return SRC.slice(at, i)
+}
+
+/* ---------- 1. the precedence, as shipped ---------- */
+{
+  const body = grab('prefsResolveField')
+  // eslint-disable-next-line no-new-func
+  const prefsResolveField = new Function(body + '\nreturn prefsResolveField')()
+  check('a non-default host value wins over the mirror',
+    prefsResolveField('1', '0', '0') === '1', prefsResolveField('1', '0', '0'))
+  check('the mirror fills in when the host only has the shipped default',
+    prefsResolveField('0', '0', '1') === '1', prefsResolveField('0', '0', '1'))
+  check('the mirror fills in when the host has no such field at all',
+    prefsResolveField(undefined, '0', '1') === '1', prefsResolveField(undefined, '0', '1'))
+  check('with neither store the shipped default stands',
+    prefsResolveField(undefined, '0', undefined) === '0', prefsResolveField(undefined, '0', undefined))
+  check('host default and no mirror keeps the default',
+    prefsResolveField('0', '0', undefined) === '0', prefsResolveField('0', '0', undefined))
+  check('mirror values are read back as stored strings',
+    prefsResolveField(undefined, '0', 1) === '1', prefsResolveField(undefined, '0', 1))
+}
+
+/* ---------- 2. the shed is page-local and never persisted ---------- */
+{
+  const at = SRC.indexOf('const contourShedLoad = ')
+  const seg = SRC.slice(at, SRC.indexOf('\n    }', at) + 6)
+  check('contourShedLoad exists', at > 0)
+  check('the shed no longer writes the view preference', seg.indexOf('prefsSet(CONTOUR_VIEW_KEY') < 0,
+    seg.indexOf('prefsSet(CONTOUR_VIEW_KEY') < 0 ? 'no prefsSet(CONTOUR_VIEW_KEY...)' : 'STILL PERSISTS THE VIEW')
+  check('the shed sets the page-local flag instead', /contourViewShed = true/.test(seg))
+  check('the shed still reconciles the layer', /contourApplySwitches\(\)/.test(seg))
+  check('isContourView3D honours the page-local shed',
+    /const isContourView3D = \(\) => !contourViewShed && prefsGet\(CONTOUR_VIEW_KEY\) === '1'/.test(SRC))
+  check('a manual pick clears the shed',
+    /contourViewShed = false\n\s*prefsSet\(CONTOUR_VIEW_KEY/.test(SRC))
+}
+
+/* ---------- 3. every write is mirrored, and the mirror is loaded at boot ---------- */
+{
+  const setAt = SRC.indexOf('const prefsSet = (rawKey, encoded) => {')
+  const setBody = SRC.slice(setAt, SRC.indexOf('\n    }', setAt) + 6)
+  check('prefsSet mirrors the value to the theme file store', /prefsMirrorSave\(field/.test(setBody))
+  check('boot loads the mirror next to the transport bind', /rebindPrefs\(0\)[\s\S]{0,400}?prefsMirrorLoad\(\)/.test(SRC))
+  check('the mirror route is the host half\'s', SRC.indexOf("'/api/theme-endfield-contour-rework'") > 0)
+}
+
+/* ---------- 4. the host half really persists (file round-trip) ---------- */
+{
+  const mod = require(path.join(ROOT, 'index.js'))
+  const S = mod.__settingsMirror
+  const os = require('node:os')
+  const tmp = path.join(os.tmpdir(), 'endfield-mirror-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.json')
+  check('the host exposes the mirror helpers', !!S && typeof S.mirrorWrite === 'function')
+  check('the route is declared', mod.SETTINGS_ROUTE === '/api/theme-endfield-contour-rework', mod.SETTINGS_ROUTE)
+  check('a missing file reads as an empty object', JSON.stringify(S.mirrorRead(tmp)) === '{}', JSON.stringify(S.mirrorRead(tmp)))
+  S.mirrorWrite({ contourView: '1' }, tmp)
+  check('the value survives a round-trip', S.mirrorRead(tmp).contourView === '1', JSON.stringify(S.mirrorRead(tmp)))
+  S.mirrorWrite({ contourSpeed: '3' }, tmp)
+  const after = S.mirrorRead(tmp)
+  check('a second write merges instead of replacing', after.contourView === '1' && after.contourSpeed === '3',
+    JSON.stringify(after))
+  check('undeclared and non-string fields are refused',
+    JSON.stringify(S.mirrorFilter({ bogus: '1', nope: 2, contour: '2' })) === '{"contour":"2"}',
+    JSON.stringify(S.mirrorFilter({ bogus: '1', nope: 2, contour: '2' })))
+  check('the file is written atomically (no .tmp left behind)', fs.existsSync(tmp) && !fs.existsSync(tmp + '.tmp'))
+  const declared = new Set(Object.keys(mod.FIELD_DEFAULTS))
+  check('every mirrorable field is a declared schema field',
+    Object.keys(S.mirrorFilter(Object.fromEntries(Array.from(declared).map((k) => [k, 'x'])))).every((k) => declared.has(k)))
+  try { fs.unlinkSync(tmp) } catch (e) { /* already gone */ }
+}
+
+console.log('')
+if (fail > 0) {
+  console.error(fail + ' durable-mirror check(s) failed')
+  process.exit(1)
+}
+console.log('all ' + pass + ' durable-mirror checks passed')

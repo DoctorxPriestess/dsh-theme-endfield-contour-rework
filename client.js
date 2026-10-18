@@ -174,6 +174,60 @@ function apply(ctx) {
     }
     const prefsListeners = []
     const prefsLocal = Object.assign({}, PREFS_FIELD_DEFAULTS) // schema defaults, for boot / no transport
+    /* ---------- Theme-owned durable mirror (see index.js SETTINGS_ROUTE) ----------
+       The settings NAMESPACE above is the intended authority, but a write only
+       commits while its scope reports {mode:'host', status:'ready', writable:true}
+       for our entry. When that never becomes true the edit stays page-local and the
+       setting reverts on the next launch -- reported as "我每次重启都不是默认视差模式，
+       而是平面". The theme therefore also mirrors every write into a small JSON file
+       its OWN host half owns, served on a same-origin route; that path cannot be
+       caught in a transport handshake and does not depend on the loopback port.
+
+       Precedence in prefsGet, and why: a host value that is NOT the shipped default
+       proves the namespace really persisted something, so it wins. A host value equal
+       to the default is indistinguishable from "the host dropped this write" (which is
+       the failure being fixed), so the mirror fills in instead. The mirror only ever
+       holds values the user actually chose through this panel, and every choice writes
+       BOTH stores, so they cannot drift apart in normal use. */
+    const PREFS_MIRROR_URL = '/api/theme-endfield-contour-rework'
+    let prefsMirror = null // fields the theme's own file store holds, once loaded
+    let prefsMirrorAsked = false
+    let prefsMirrorBusy = 0
+    const prefsMirrorLoad = () => {
+      if (prefsMirrorAsked) return
+      if (typeof fetch !== 'function') return
+      prefsMirrorAsked = true
+      let p = null
+      try { p = fetch(PREFS_MIRROR_URL, { method: 'GET', cache: 'no-store' }) } catch (e) { return }
+      if (!p || typeof p.then !== 'function') return
+      p.then((res) => (res && typeof res.json === 'function' ? res.json() : null)).then((body) => {
+        if (body && body.ok === true && body.value && typeof body.value === 'object') {
+          prefsMirror = body.value
+          /* A mirrored value can be the only durable copy of a setting (that is the
+             whole point), so a load that lands after the first render has to be
+             applied, not just stored. */
+          if (typeof reconcileFromPrefs === 'function') {
+            try { reconcileFromPrefs() } catch (e) { /* keep going */ }
+          }
+          prefsEmit()
+        }
+      }).catch(() => { /* no host half, or a route that is not mounted: namespace only */ })
+    }
+    const prefsMirrorSave = (field, value) => {
+      if (prefsMirror === null) prefsMirror = {}
+      prefsMirror[field] = String(value)
+      if (typeof fetch !== 'function') return
+      prefsMirrorBusy++
+      try {
+        const p = fetch(PREFS_MIRROR_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ [field]: String(value) }),
+        })
+        if (p && typeof p.then === 'function') p.catch(() => {}).then(() => { prefsMirrorBusy-- })
+        else prefsMirrorBusy--
+      } catch (e) { prefsMirrorBusy-- }
+    }
     // Fields a panel toggle changed so far but that have not yet been durably
     // committed to the host scope. If the scope was not ready at apply() time and
     // only appears later, these are replayed so a pre-bind edit still persists
@@ -279,6 +333,18 @@ function apply(ctx) {
       // overlaid with any session-local override written while un-writable.
       return prefsFieldValue || prefsLocal
     }
+    /* Which value a field resolves to, given the three stores. Pure on purpose: the
+       precedence is the whole bug (see PREFS_MIRROR_URL), so it is a function the
+       tests can pin instead of a branch buried in prefsGet. */
+    const prefsResolveField = (fromHost, def, fromMirror) => {
+      /* A host value that differs from the shipped default proves the namespace
+         really did persist something: that is the authority. */
+      if (fromHost !== undefined && fromHost !== null && String(fromHost) !== def) return String(fromHost)
+      /* A host value equal to the default cannot be told apart from "the host
+         dropped this write", so the theme's own file store fills in. */
+      if (fromMirror !== undefined && fromMirror !== null) return String(fromMirror)
+      return fromHost !== undefined && fromHost !== null ? String(fromHost) : def
+    }
     /** read one field as its raw stored string: <stored-or-default>, never null. */
     const prefsGet = (rawKey) => {
       const field = prefsFieldOf(rawKey)
@@ -287,8 +353,11 @@ function apply(ctx) {
       // write-then-read handler is one click behind.
       if (prefsWritten.has(field)) return prefsWritten.get(field)
       const sec = prefsGetValue()
-      if (sec && Object.prototype.hasOwnProperty.call(sec, field)) return String(sec[field])
-      return PREFS_FIELD_DEFAULTS[field]
+      const fromHost = sec && Object.prototype.hasOwnProperty.call(sec, field)
+        ? String(sec[field]) : undefined
+      const fromMirror = prefsMirror !== null && Object.prototype.hasOwnProperty.call(prefsMirror, field)
+        ? prefsMirror[field] : undefined
+      return prefsResolveField(fromHost, PREFS_FIELD_DEFAULTS[field], fromMirror)
     }
     /* Drop overlay entries the served section has caught up with. Called whenever
        a new section arrives; a value the host never confirms (namespace unserved,
@@ -466,6 +535,9 @@ function apply(ctx) {
       // the transport echo is asynchronous, the UI and the engine are not.
       prefsWritten.set(field, prefsLocal[field])
       prefsCommit(field, prefsLocal[field])
+      /* …and to the theme's own file store, so the setting survives a restart even
+         when the settings transport never becomes writable (see PREFS_MIRROR_URL). */
+      prefsMirrorSave(field, prefsLocal[field])
     }
     /* One-line transport diagnosis, surfaced as a muted row at the top of the
        theme's settings panel: which service face bound, how many scopes, each
@@ -688,6 +760,9 @@ function apply(ctx) {
     } catch (e) { dbg('inject(configForms) setup threw', e && e.message) }
     // Kick off the (re)trying binder acquisition.
     rebindPrefs(0)
+    /* …and the theme's own durable mirror, in parallel: it is the floor under a
+       settings transport that never reports ready (see PREFS_MIRROR_URL). */
+    prefsMirrorLoad()
     // Dispose on run teardown (mirrors ctx.effect owned resources).
     ctx.effect(() => () => {
       prefsListeners.length = 0
@@ -1162,12 +1237,18 @@ function apply(ctx) {
        (see contourHardwareGL), and the flat view is the one that has always
        shipped. */
     const CONTOUR_VIEW_KEY = PREFS_NS + '-contour-view'
+    /* 3D dropped BY THE FRAME WATCHDOG for this page load only. It used to be
+       written to CONTOUR_VIEW_KEY, i.e. a machine that hit one slow frame got its
+       view choice overwritten for good -- "每次重启都不是默认视差模式，而是平面".
+       Shedding is a page-local remedy, so the flag is page-local too and the
+       preference keeps whatever the user chose. */
+    let contourViewShed = false
     // Default OFF (=== '1'): a background pattern must be opt-in.
     const isContourOn = () => prefsGet(CONTOUR_KEY) === '1'
     // Scroll defaults ON, so enabling the layer shows the full effect at once.
     const isContourAnimOn = () => prefsGet(CONTOUR_ANIM_KEY) !== '0'
     const isContourScrollPauseOn = () => prefsGet(CONTOUR_SCROLL_PAUSE_KEY) !== '0'
-    const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
+    const isContourView3D = () => !contourViewShed && prefsGet(CONTOUR_VIEW_KEY) === '1'
 
     /* Scroll directions, clockwise from up. Diagonals are normalised so "fast"
        is the same SPEED on every direction rather than 1.41x faster there. */
@@ -4628,10 +4709,13 @@ function apply(ctx) {
        preference writes, so the settings UI shows what happened. */
     const contourShedLoad = (why) => {
       if (isContourView3D()) {
-        prefsSet(CONTOUR_VIEW_KEY, '0')
+        /* Page-local ONLY (see contourViewShed): shedding is a remedy for this
+           page load, never a rewrite of the user's view preference -- a single slow
+           frame used to flip the stored setting to flat for every later launch. */
+        contourViewShed = true
         contourSwitchSig = ''
         contourApplySwitches()
-        dbg('frame watchdog: 3D disabled (' + why + ')')
+        dbg('frame watchdog: 3D disabled for this page load (' + why + ')')
         contourBlit()
         return
       }
@@ -7876,6 +7960,9 @@ function apply(ctx) {
           const setContourViewValue = (value) => {
             const next = Number(value) === 1 ? 1 : 0
             if (next === contourView) return
+            /* A manual pick overrides the watchdog's page-local shed: the user just
+               asked for 3D, so let this page load try it again. */
+            contourViewShed = false
             prefsSet(CONTOUR_VIEW_KEY, String(next))
             setContourView(next)
             contourSwitchSig = ''

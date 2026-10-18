@@ -6,6 +6,39 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 设置持久化：视角重启后掉回平面（fix30）
+
+用户：「我每次重启都不是默认视差模式，而是平面」。
+
+两个独立缺陷，都修了。
+
+**一、帧看门狗把「本页降级」写成了永久偏好。** `contourShedLoad` 在帧超时时把
+`CONTOUR_VIEW_KEY` 写成 `'0'` —— 注释自己都写着「for the rest of this page load」，但它写的是持久偏好。
+所以这台机器上只要出现一次慢帧（实测有 80ms~2s 的主线程空档），用户选过的视差就被永久改成平面。
+现在降级只置页内标志 `contourViewShed`，偏好保持用户的选择；手动点「视差」会清掉该标志，本次页面
+重新尝试 3D。
+
+**二、设置传输不可用时，写入只留在本页内存里。** 客户端的写入门要求作用域同时满足
+`mode==='host' && status==='ready' && writable===true`；不满足就一直 hold。此时**任何**设置都只在本页
+生效、重启即丢——而配置文件里只有 10 个键、缺 `contourView`（以及 `enabled`/`contourAnim`/`watermark`
+等），说明这些键的写入从未真正落地过。
+
+修法是给主题自己加一条**不依赖设置传输**的持久化底线：
+
+- **宿主半**（`index.js`）在 `$DSH_HOME/theme-endfield-contour-rework/settings.json` 维护一个 JSON
+  文件，并在 DSH 的 web server 上挂同源路由 `GET/POST /api/theme-endfield-contour-rework`。
+  写入用 tmp + rename 原子落盘，只接受 `FIELD_DEFAULTS` 里声明过的字段（字符串化），非声明的键一律
+  丢弃；POST 有同源守卫（`Origin` 的 host 必须等于 `Host`），与 `dsh-undo-savepoint`/插件更新检查器
+  同一个约定。web server 不存在时**静默退化**为只用设置命名空间，不会让宿主半崩。
+- **客户端**每次 `prefsSet` 同时写设置命名空间与这条路由；启动时并行拉一次文件。
+  优先级（`prefsResolveField`，纯函数、单独测试）：**宿主里「非默认值」优先**（能证明命名空间真的
+  持久化过）；宿主值等于出厂默认时无法与「写入被丢」区分，此时用主题自己的文件兜底；两者都没有才是
+  出厂默认。两处每次写入都同步，正常使用下不会分叉。
+
+测试：新增 `test/settings-durable-mirror.test.js`（**23 条**）——优先级六种组合、看门狗不再写偏好、
+`shed` 置页内标志且仍会 reconcile、手动选择会清标志、`prefsSet` 会镜像、启动会加载、路由常量一致、
+宿主端文件往返/合并/字段过滤/原子写；已加入 `test:node`。两套测试全绿。
+
 ### 洞口改成喀斯特溶蚀洼地，推翻漏斗/甜甜圈/楔子（fix29）
 
 用户判定：「漏斗状的太完美了。不允许这种完美出现」；「甜甜圈中间只需要是个洞透出下面的地形，别加什么
