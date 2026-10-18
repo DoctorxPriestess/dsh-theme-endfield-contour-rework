@@ -991,13 +991,32 @@ function apply(ctx) {
     const onWatermarkResize = () => { if (watermarkEl) positionWatermark() }
     let contourScrollHook = () => {}
     let contourScrollEndHook = () => {}
-    const onContourScrollEvent = () => { contourScrollHook() }
-    const onContourScrollEndEvent = () => { contourScrollEndHook() }
+    /* ONLY THE PAGE'S OWN SCROLL FREEZES THE SHEET. This listener is capture-phase on
+       window, so it sees the scroll of EVERY scroller in the app -- and the message list
+       is one of them, auto-scrolled by the app on every token while a reply streams.
+       Freezing the background for that stopped and restarted the sheet dozens of times a
+       second for the whole length of a reply; a nested scroller does not fight the page,
+       so it must not freeze anything. */
+    const contourPageScrolled = (e) => {
+      if (e == null || typeof document === 'undefined') return true
+      const t = e.target
+      if (t == null) return true
+      const root = document.scrollingElement || document.documentElement
+      return t === document || t === root || t === document.documentElement || t === document.body
+    }
+    const onContourScrollEvent = (e) => { if (contourPageScrolled(e)) contourScrollHook() }
+    const onContourScrollEndEvent = (e) => { if (contourPageScrolled(e)) contourScrollEndHook() }
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('resize', onWatermarkResize)
       /* The loop stops itself while the window is hidden (see contourWantsScroll);
          this is what starts it again, and repaints the frozen frame on the way in. */
       document.addEventListener('visibilitychange', onContourVisibility, false)
+      /* A window that comes back from occlusion or from the background gets ONE fresh
+         frame immediately. `visibilitychange` alone misses the occluded-but-focused case
+         (another window covering this one), which is exactly when the compositor may have
+         recycled the layer's surface. */
+      window.addEventListener('focus', onContourVisibility)
+      window.addEventListener('pageshow', onContourVisibility)
       window.addEventListener('scroll', onContourScrollEvent, true)
       window.addEventListener('scrollend', onContourScrollEndEvent, true)
     }
@@ -2196,6 +2215,11 @@ function apply(ctx) {
     let contourGlLastX = Infinity
     let contourGlLastY = Infinity
     let contourGlLastKey = ''
+    /* When the last 3D frame was COMMITTED. The sub-pixel gate above can skip frames
+       indefinitely when the camera happens to stand still, and a canvas that stopped
+       committing is exactly the one a re-composite can present as empty. */
+    let contourGlLastDrawAt = -1
+    let contourFrozenTimer = null
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -3186,14 +3210,16 @@ function apply(ctx) {
           ? 'none'
           : (contourTex.cv.width + 'x' + contourTex.cv.height + ':' + contourView.w + 'x'
             + contourView.h + '@' + contourView.dpr)
+        const sinceMs = contourGlLastDrawAt < 0 ? Infinity : contourGlNow() - contourGlLastDrawAt
         const movedEnough = contourGl === null || viewKey !== contourGlLastKey
-          || Math.abs(contourOffsetX - contourGlLastX) >= 0.5
-          || Math.abs(contourOffsetY - contourGlLastY) >= 0.5
+          || contourGlWantsFrame(contourOffsetX - contourGlLastX,
+            contourOffsetY - contourGlLastY, sinceMs)
         if (movedEnough) {
           if (contourGlDraw()) {
             contourGlLastX = contourOffsetX
             contourGlLastY = contourOffsetY
             contourGlLastKey = viewKey
+            contourGlLastDrawAt = contourGlNow()
           }
         }
         if (contourGl !== null) {
@@ -3916,6 +3942,9 @@ function apply(ctx) {
       /* Disposing ends the 3D request, so the next entry re-probes (a fresh context
          is a fresh attempt, not a replay of the old verdict). */
       contourGlAsked = false
+      /* A re-created context holds a brand new, empty drawing buffer: the next frame
+         must draw even if the camera has not moved a pixel since the last one. */
+      contourGlLastDrawAt = -1
       if (st === null) return
       try {
         if (st.cv && st.cv.parentNode) st.cv.parentNode.removeChild(st.cv)
@@ -3978,6 +4007,18 @@ function apply(ctx) {
        boot plate is up, and a failed check is retried after this cooldown (and
        immediately whenever the user changes the view). */
     const CONTOUR_GL_RETRY_MS = 8000
+    /* A 3D frame is also re-committed when nothing moved. A canvas whose last commit
+       is its ONLY commit is the one a re-composite can present from a surface the
+       compositor has since dropped -- expanding a thinking panel, opening the sidebar --
+       which reads as a black block until something draws again. 200ms is five frames of
+       a 1/60s page: invisible in motion, and a few full-screen marches a second when the
+       page is otherwise idle. */
+    const CONTOUR_GL_REFRESH_MS = 200
+    const CONTOUR_GL_HALF_PX = 0.5
+    /* Pure: does this frame need a new shader pass? `sinceMs` is how long ago the last
+       one was committed. Separated from contourBlit so the rule can be tested without a
+       canvas. */
+    const contourGlWantsFrame = (dx, dy, sinceMs) => Math.abs(dx) >= CONTOUR_GL_HALF_PX || Math.abs(dy) >= CONTOUR_GL_HALF_PX || !(sinceMs < CONTOUR_GL_REFRESH_MS)
     let contourGlNextTry = 0
     const contourGlNow = () => (typeof Date.now === 'function' ? Date.now() : 0)
 
@@ -4557,6 +4598,10 @@ function apply(ctx) {
         clearTimeout(contourScrollTimer)
         contourScrollTimer = null
       }
+      if (contourFrozenTimer !== null) {
+        clearInterval(contourFrozenTimer)
+        contourFrozenTimer = null
+      }
       if (contourRo !== null) {
         contourRo.disconnect()
         contourRo = null
@@ -4576,6 +4621,7 @@ function apply(ctx) {
       contourResizePending = false
       contourScrollPaused = false
       contourResizing = false
+      contourGlLastDrawAt = -1
       contourOffsetX = 0
       contourOffsetY = 0
       // Nothing is drawn any more, so the next mount must re-apply the switch rather
@@ -4788,16 +4834,35 @@ function apply(ctx) {
        as jank; the freeze makes the page scroll feel native. contourScrollHook /
        contourScrollEndHook are declared (and wired to window listeners) just
        above this block, and are assigned to these handlers below it. */
+    /* The freeze stops the LOOP, not the picture. Stopping everything leaves the last
+       frame as the only frame the compositor has ever seen for this layer, and a
+       re-composite (a thinking panel expanding) may present a surface that has since
+       been recycled: a black block until something draws again. So a frozen sheet is
+       re-committed a few times a second. Same picture, one blit, no motion. */
+    const CONTOUR_FROZEN_REFRESH_MS = 250
+    const contourArmFrozenRefresh = () => {
+      if (typeof setInterval !== 'function' || contourFrozenTimer !== null) return
+      contourFrozenTimer = setInterval(() => {
+        if (!contourScrollPaused) return
+        if (contourWrap === null || contourTex === null) return
+        contourBlit()
+      }, CONTOUR_FROZEN_REFRESH_MS)
+    }
     const contourPauseOnScroll = () => {
       if (!isEnabled() || contourWrap === null || !isContourScrollPauseOn() || !isContourAnimOn()) return
       if (contourScrollPaused) return
       contourScrollPaused = true
       contourSwitchSig = ''
       if (contourRaf !== null) contourStopLoop()
+      contourArmFrozenRefresh()
     }
     const contourResumeAfterScroll = () => {
       if (!contourScrollPaused) return
       if (contourScrollTimer !== null && typeof clearTimeout === 'function') clearTimeout(contourScrollTimer)
+      if (contourFrozenTimer !== null && typeof clearInterval === 'function') {
+        clearInterval(contourFrozenTimer)
+        contourFrozenTimer = null
+      }
       const resume = () => {
         contourScrollTimer = null
         contourScrollPaused = false

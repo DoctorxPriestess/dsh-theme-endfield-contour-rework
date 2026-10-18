@@ -201,6 +201,15 @@ const window = { matchMedia: () => ({ matches: reducedMotionMatches }) }
 let contourGl = null
 const contourGlDraw = () => false
 const contourGlDispose = () => {}
+/* The 3D refresh rule touches these: the frame is also re-committed when nothing
+   moved, and this harness must still see "no GPU, no draw" behaviour. */
+let contourGlLastDrawAt = -1
+const contourGlNow = () => 0
+const CONTOUR_GL_REFRESH_MS = 200
+const CONTOUR_GL_HALF_PX = 0.5
+const contourGlWantsFrame = (dx, dy, sinceMs) => Math.abs(dx) >= CONTOUR_GL_HALF_PX
+  || Math.abs(dy) >= CONTOUR_GL_HALF_PX
+  || !(sinceMs < CONTOUR_GL_REFRESH_MS)
 /* Read straight from the pref store, exactly as the real one does. */
 const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
 /* Hollow terrain is 3D only and this harness measures the flat sheet, so the answer is
