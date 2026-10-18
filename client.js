@@ -3975,6 +3975,16 @@ function apply(ctx) {
              the sidebar -- can present an EMPTY buffer, which reads as a black flash.
              One full-screen buffer is a small price for a frame that survives. */
           preserveDrawingBuffer: true,
+          /* LOW-LATENCY PRESENTATION. With a synchronised canvas every 3D commit takes
+             the renderer's blocking commit path: on a 240Hz panel that measured ~5ms
+             of main-thread time per 60Hz frame -- 1.2s per 3s of 3D playback -- while
+             the shader itself is only a submission. The desynchronised hint lets the
+             browser hand the buffer to the compositor without that wait; the same 3s
+             window then costs 0.1s and rAF returns to its idle cadence. It is a HINT:
+             a platform that ignores it reports desynchronized:false and keeps the old
+             behaviour, so no capability test is needed. Only the presentation path
+             changes; the last frame is still preserved. */
+          desynchronized: true,
         })
           || cv.getContext('experimental-webgl')
       } catch (e) { gl = null }
@@ -4147,6 +4157,11 @@ function apply(ctx) {
              the sidebar -- can present an EMPTY buffer, which reads as a black flash.
              One full-screen buffer is a small price for a frame that survives. */
           preserveDrawingBuffer: true,
+          /* See contourHardwareGL: the desynchronised path skips the renderer's blocking
+             commit, which is what made 3D playback cost ~5ms of main thread per 60Hz
+             frame. Ignored (attribute false) where unsupported, so it degrades to the
+             previously shipped behaviour instead of failing. */
+          desynchronized: true,
         })
           || cv.getContext('experimental-webgl')
       } catch (e) { gl = null }
@@ -4324,13 +4339,14 @@ function apply(ctx) {
     const CONTOUR_GL_HALF_PX = 0.5
     /* ...and never faster than this, whatever the panel's refresh rate. Measured on the
        machine this was reported on: rAF runs at 160-240Hz there, so the half-pixel gate
-       alone still produced 60-140 full-screen marches per 2s window -- and, because the
-       context keeps its drawing buffer (preserveDrawingBuffer), the same number of
-       full-frame copies for the compositor -- for a sheet that advances 0.8 CSS px per
-       60Hz frame. A saturated GPU queue is one of the ways a canvas frame goes missing,
-       which is the black block. 16ms is the rate the picture actually needs. The frozen
-       case ignores the ceiling on purpose: a still sheet is only committed at all
-       because the scroll fix depends on it. */
+       alone still produced 60-140 full-screen marches per 2s window for a sheet that
+       advances 0.8 CSS px per 60Hz frame. Two reasons keep the ceiling: the marcher is
+       the most expensive thing the theme runs, and a saturated GPU queue is one of the
+       ways a canvas frame goes missing (the black block). The commit itself no longer
+       blocks the main thread -- desynchronized (see contourGlMount) removed that -- so
+       16ms is now purely the GPU budget for the picture's own rate. The frozen case
+       ignores the ceiling on purpose: a still sheet is only committed at all because
+       the scroll fix depends on it. */
     const CONTOUR_GL_MIN_MS = 16
     /* Pure: does this frame need a new shader pass? `sinceMs` is how long ago the last
        one was committed, `frozen` is the scroll freeze. Separated from contourBlit so the

@@ -375,12 +375,18 @@ const wrap = (x) => ((x % 1) + 1) % 1
   /* The drawing buffer has to survive a re-composite: the layer is only redrawn when
      the camera moved enough to change a pixel, and without preserveDrawingBuffer a
      page that re-composites in between (expanding a thinking panel) can present an
-     EMPTY buffer -- which the user sees as a black flash. */
+     EMPTY buffer -- which the user sees as a black flash. The same contexts must also
+     take the low-latency presentation path: a synchronised canvas pays the renderer's
+     blocking commit on every 3D frame (measured 1.2s of main-thread time per 3s of
+     playback at 60Hz draws on a 240Hz panel), which is what made 3D feel slower than
+     the flat view. */
   const ctxCalls = SRC.match(/getContext\('webgl', \{[^}]*\}/g) || []
   if (ctxCalls.length < 2) fail('expected the probe and the layer contexts, found ' + ctxCalls.length)
   else if (ctxCalls.some((c) => !/preserveDrawingBuffer: true/.test(c))) {
     fail('a WebGL context is created without preserveDrawingBuffer: the last frame can be lost on a re-composite')
-  } else ok('both WebGL contexts keep the last frame (preserveDrawingBuffer)')
+  } else if (ctxCalls.some((c) => !/desynchronized: true/.test(c))) {
+    fail('a WebGL context is missing desynchronized: 3D playback pays the blocking commit path again')
+  } else ok('both WebGL contexts keep the last frame and use the low-latency path (preserveDrawingBuffer + desynchronized)')
 
   /* ...and off in the flat view: the uniform gate is what keeps 2D byte-identical. */
   const gate = SRC.match(/const hasHoles = ([^\n]*)/)
