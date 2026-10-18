@@ -3629,12 +3629,28 @@ function apply(ctx) {
       const w = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.cols / CONTOUR_3D_HEIGHT_DIV)))
       const h = Math.max(8, Math.min(CONTOUR_3D_HEIGHT_MAX, Math.round(f.rows / CONTOUR_3D_HEIGHT_DIV)))
       const span = (f.mx - f.mn) || 1
+      /* ONE PERIOD, NOT THE WHOLE BUFFER. The shader samples this map with
+         fract(uv), so texel w-1 and texel 0 are neighbours on screen -- and the map is
+         used for more than the height it encodes: the marched hit height sets the
+         magnification and the lift of every pixel, so a step here is a step in the
+         PICTURE, along the whole wrap line (measured on the shipped code: every contour
+         jogged 1-3 device px at the wrap). The field is periodic, so its downsample
+         must be too: bins over (cols-1) x (rows-1), the duplicate far row/column skipped
+         (it is the same terrain as row 0 / column 0 and would double-weight that bin),
+         and the blur wrapped instead of clamped. A sheet that does not close (only
+         reachable by calling the generator directly) keeps the flat behaviour. */
+      const pw = f.cols - 1
+      const ph = f.rows - 1
+      const closed = pw > 8 && ph > 8
+        && Math.abs(pw * f.step - f.tw) < 1e-6 && Math.abs(ph * f.step - f.th) < 1e-6
       const acc = new Float32Array(w * h)
       const cnt = new Float32Array(w * h)
-      for (let y = 0; y < f.rows; y++) {
-        const ty = Math.min(h - 1, Math.floor((y * h) / f.rows))
-        for (let x = 0; x < f.cols; x++) {
-          const tx = Math.min(w - 1, Math.floor((x * w) / f.cols))
+      const nx = closed ? pw : f.cols
+      const ny = closed ? ph : f.rows
+      for (let y = 0; y < ny; y++) {
+        const ty = Math.min(h - 1, Math.floor((y * h) / ny))
+        for (let x = 0; x < nx; x++) {
+          const tx = Math.min(w - 1, Math.floor((x * w) / nx))
           const i = ty * w + tx
           acc[i] += (f.F[y * f.cols + x] - f.mn) / span
           cnt[i] += 1
@@ -3649,9 +3665,12 @@ function apply(ctx) {
             let sum = 0
             let n = 0
             for (let k = -1; k <= 1; k++) {
-              const sx = horizontal ? x + k : x
-              const sy = horizontal ? y : y + k
-              if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue
+              let sx = horizontal ? x + k : x
+              let sy = horizontal ? y : y + k
+              if (closed) {
+                sx = (sx + w) % w
+                sy = (sy + h) % h
+              } else if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue
               sum += src[sy * w + sx]
               n++
             }

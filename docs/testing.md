@@ -170,6 +170,7 @@ node test/contour-roughness.test.js   # 地形阶梯：12 张地貌表 / 出厂�
 node test/contour-seam.test.js        # 接缝：子图是整数格 / 周期×DPR 为整数 / 场逐位闭合 / 0 端点 / 每点只描一次（Node）
 node test/prefs-write-latency.test.js # 设置写入的时序：写后立刻回读 / 回相退役 / 未确认写不回滚（Node）
 node test/contour-hollow.test.js      # 镂空：挖洞形状 / 等高距不变 / 遮挡只拉近 / 只开在 3D（Node）
+node test/contour-heightmap.test.js   # 3D 视差高度图：旋转整数个 bin 必须逐 texel 跟随 / 接缝无 cliff（Node）
 node test/contour-perf.test.js        # 成本形状 + 实测量 + 滚动门控（Node）
 node test/contour-render.test.js      # 22 项行为断言（浏览器，0.1.x 形状 DOM）
 node test/contour-render-020.test.js  # 0.2.0-rc.2 形状 DOM 的可见性回归（浏览器）
