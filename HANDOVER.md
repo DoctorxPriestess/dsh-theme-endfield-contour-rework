@@ -19,9 +19,9 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `325f742`（`client.js` sha256 `eb86c020…`） |
-| 已安装版本 | **已同步**：sha256 同样是 `eb86c020…`（装的是 fix17，**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix17.tgz` |
+| 分支 / HEAD | `main` / `176487c`（`client.js` sha256 `948eee89…`） |
+| 已安装版本 | **已同步**：sha256 同样是 `948eee89…`（fix20 = 发布版，`CONTOUR_DIAG = false`，**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix20.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
 | 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
 | 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
@@ -36,7 +36,7 @@
 
 ### 回滚方式
 - 代码：`git revert d30fbf5`（或 `git reset --hard fa05b97`）。
-- 安装回滚：`undo_restore mode=id snapshot_id=20261019-034118-5785`（装 fix17 前）/ `20261019-033147-a421`（fix16 前）/ `20261019-022505-4f4f`（fix15 前），然后重启 DSH。
+- 安装回滚：重装上一版 `…-1.5.3-fix19.tgz`（带诊断 HUD 的那版，仍在 local-build），或 `undo_restore mode=id snapshot_id=20261019-035046-6979`（fix18 之前），然后重启 DSH。
 
 ---
 
