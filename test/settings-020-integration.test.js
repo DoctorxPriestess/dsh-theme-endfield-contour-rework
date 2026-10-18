@@ -275,7 +275,7 @@ async function makeApp(cordis, opts = {}) {
         if (raw !== state.lastRaw) { state.revision += 1; state.lastRaw = raw }
         const nsView = (ns) => ({
           autoGenerate: true, ns, schema: form.toJSON(), revision: state.revision,
-          applies: 'live', value, base: value, user: Object.assign({}, state.userLayer),
+          applies: 'live', mode: 'host', value, base: value, user: Object.assign({}, state.userLayer),
         })
         const list = hide ? [nsView('ui-settings')] : [nsView(ENTRY_NS), nsView('ui-settings')]
         return { ok: true, value: { writable: true, hasDocument: true, namespaces: list } }

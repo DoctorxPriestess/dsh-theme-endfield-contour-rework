@@ -420,7 +420,14 @@ function apply(ctx) {
       if (!scope) return null
       try { return scope.getSnapshot() } catch (e) { return null }
     }
-    const prefsDurablyServed = (snap) => !!snap && snap.mode === 'host' && snap.status === 'ready' && !!snap.writable
+    /* 0.2.0's ConfigFormController snapshot has NO `mode` field: the installed
+       ui-settings bundle never emits one (checked in the asar bundle), so requiring
+       `mode === 'host'` held every edit forever and nothing ever reached
+       remote.settings.mutate. A ready, writable scope without a mode IS the host;
+       only an explicitly non-host mode is refused. */
+    const prefsDurablyServed = (snap) => !!snap
+      && (snap.mode === undefined || snap.mode === 'host')
+      && snap.status === 'ready' && !!snap.writable
     /* Push edits recorded while the scope was not durably served as soon as it
        is (bind catch-up + an unavailable/loading -> ready subscription both call
        this). A dirty field is cleared only once it is written to a served host
