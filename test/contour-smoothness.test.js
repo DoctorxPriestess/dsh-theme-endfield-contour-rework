@@ -67,7 +67,7 @@ function grabOne(name) {
 
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourTerrainRow',
+  'contourStroke', 'contourRenderCache', 'contourSeamShifts', 'contourTerrainProfile', 'contourTerrainRow',
   'contourOctaveLadder', 'contourStair', 'contourTerrace', 'contourCliff',
   'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp', 'contourReliefWarp',
   'contourRidgeAt', 'contourValleyAt', 'contourFeaturePeriod', 'contourHash3',

@@ -2481,11 +2481,10 @@ function apply(ctx) {
          Marching-squares scratch buffers, allocation-free across levels (the
          stitched walk reuses them for every level of one extraction).
 
-         hCount MUST be returned: the extractor destructures it to build the
-         vertical-edge ids (hCount + ...). Without it those ids evaluate to NaN,
-         which a typed array silently stores as 0 and which never stamps es[],
-         so walks start from bogus ids and reuse the previous level's stale
-         vertices -- the exact defect the cusps test caught as duplicated rings. */
+         hCount is the number of HORIZONTAL edge slots and eCount the total; the
+         allocator stays as it was when the extractor indexed vertical edges as
+         hCount + j*cols + i, and the current extractor's edge ids (2 slots per cell)
+         fit inside it with room to spare. */
       const hCount = (cols - 1) * rows
       const eCount = hCount + cols * (rows - 1)
       /* The field object is built first because the landform layer needs it (it
@@ -2555,21 +2554,92 @@ function apply(ctx) {
        Adjacency uses EDGE IDS in two Int32Arrays rather than float-position
        matching or a Map: a contour edge has at most two neighbours, adjacent cells
        address the identical edge id, so joins are exact and allocation-free.
-       (Kept from the previous implementation, which verified it at scale.) */
+       (Kept from the previous implementation, which verified it at scale.)
+
+       ---- THE SHEET IS A TORUS, SO THE EXTRACTION RUNS ON ONE ----------------
+       The terrain is periodic by construction (every noise period equals the sheet
+       size, see contourGenerateField), which means a contour that leaves the right
+       edge is the SAME contour that enters the left one. Cutting it there is what
+       the drawing used to show as a seam: the stroke was clipped to a half-width
+       butt end, its smoother saw a free end instead of its continuation, and a piece
+       too short to pass keep() simply disappeared -- so the ink on the two sides of
+       the boundary did not join.
+       So every cell edge and every vertex is addressed by its position on the
+       PERIOD (node (i,j) means node (i mod pw, j mod ph)), which makes the two cells
+       facing each other across the seam stamp the identical edge id: the contour is
+       stitched across the boundary instead of ending at it, and the smoother sees
+       the real continuation on both sides.
+       The walk then unwraps the coordinates as it goes -- a contour crossing the seam
+       keeps going past the sheet instead of jumping back a period -- and starts near
+       a corner, so the one place where the smoother still sees a free end is as far
+       from the middle of the frame as the level allows. The renderer strokes each
+       contour once per period it straddles: see contourRenderCache.
+       A sheet that does not close on the grid (only reachable by calling the
+       generator directly: contourTargetTexture always sizes to it) is NOT a torus, so
+       for that case the extraction stays exactly as it was. */
     const contourExtractLevel = (L, out) => {
       const f = contourField
       const { cols, rows, step, F, ex, ey, es, n1, n2, seen, touched, hCount } = f
       const st = ++f.seq
       let tn = 0
+      /* One period, in samples and in CSS px. The generator writes a duplicate row
+         and column at the far edge, so the closed period is (cols-1) x (rows-1). */
+      const pw = cols - 1
+      const ph = rows - 1
+      const periodX = pw * step
+      const periodY = ph * step
+      const torus = pw > 4 && ph > 4
+        && Math.abs(periodX - f.tw) < 1e-6 && Math.abs(periodY - f.th) < 1e-6
+      /* No margin of extra cells is needed: the ids are canonical, so the two cells
+         facing each other across the seam already stitch the contour, and the walk
+         carries it past the edge in unwrapped coordinates (see place()). Running extra
+         cells instead would visit the same canonical cell twice, and a second visit
+         re-links edges that already have their two neighbours -- measured as contours
+         that stop dead in the middle of the sheet.
+         A sheet that does not close on the grid is not a torus, so nothing here may
+         wrap: those callers keep the bounded behaviour exactly as it was. */
+      const PAD = 0
+      const wrapI = (i) => {
+        if (!torus) return i
+        const m = i % pw
+        return m < 0 ? m + pw : m
+      }
+      const wrapJ = (j) => {
+        if (!torus) return j
+        const m = j % ph
+        return m < 0 ? m + ph : m
+      }
+      const at = (i, j) => F[wrapJ(j) * cols + wrapI(i)]
+      /* Edge ids live on ONE period of cells: 2 * pw * ph slots, horizontal first.
+         Two cells that face each other across the seam therefore stamp the identical
+         id, which is what stitches the contour there.
+         A sheet that does not close is NOT a torus, so there the ids keep the original
+         row stride of cols for the vertical edges: the period-based formula would alias
+         the last column's right edge with the next row's first left edge (i = pw wraps
+         to 0), which showed up as contours jumping a whole period. */
+      const hEdge = torus
+        ? (i, j) => wrapJ(j) * pw + wrapI(i)
+        : (i, j) => j * pw + i
+      const vEdge = torus
+        ? (i, j) => pw * ph + wrapJ(j) * pw + wrapI(i)
+        : (i, j) => hCount + j * cols + i
       const pt = (id, i0, j0, i1, j1) => {
         if (es[id] === st) return id
-        const a = F[j0 * cols + i0]
-        const b = F[j1 * cols + i1]
+        const a = at(i0, j0)
+        const b = at(i1, j1)
         let t = (L - a) / (b - a)
         if (!(t >= 0)) t = 0
         else if (t > 1) t = 1
-        ex[id] = (i0 + (i1 - i0) * t) * step
-        ey[id] = (j0 + (j1 - j0) * t) * step
+        let px = (i0 + (i1 - i0) * t) * step
+        let py = (j0 + (j1 - j0) * t) * step
+        if (torus) {
+          /* Canonical, so the vertex position does not depend on which of the
+             equivalent cells happened to stamp it first. */
+          px -= Math.floor(px / periodX) * periodX
+          py -= Math.floor(py / periodY) * periodY
+        }
+        ex[id] = px
+        ey[id] = py
         es[id] = st
         n1[id] = -1
         n2[id] = -1
@@ -2582,14 +2652,12 @@ function apply(ctx) {
         if (n1[b] < 0) n1[b] = a
         else if (n2[b] < 0) n2[b] = a
       }
-      for (let j = 0; j < rows - 1; j++) {
-        const row = j * cols
-        for (let i = 0; i < cols - 1; i++) {
-          const p0 = row + i
-          const p1 = p0 + 1
-          const p3 = p0 + cols
-          const p2 = p3 + 1
-          const v0 = F[p0], v1 = F[p1], v2 = F[p2], v3 = F[p3]
+      for (let j = -PAD; j < rows - 1 + PAD; j++) {
+        for (let i = -PAD; i < cols - 1 + PAD; i++) {
+          const v0 = at(i, j)
+          const v1 = at(i + 1, j)
+          const v3 = at(i, j + 1)
+          const v2 = at(i + 1, j + 1)
           let mn = v0, mx = v0
           if (v1 < mn) mn = v1; else if (v1 > mx) mx = v1
           if (v2 < mn) mn = v2; else if (v2 > mx) mx = v2
@@ -2597,10 +2665,10 @@ function apply(ctx) {
           // Whole cell on one side of the level: nothing crosses it.
           if (L <= mn || L > mx) continue
           const idx = (v0 > L ? 1 : 0) | (v1 > L ? 2 : 0) | (v2 > L ? 4 : 0) | (v3 > L ? 8 : 0)
-          const T = () => pt(j * (cols - 1) + i, i, j, i + 1, j)
-          const B = () => pt((j + 1) * (cols - 1) + i, i, j + 1, i + 1, j + 1)
-          const Le = () => pt(hCount + j * cols + i, i, j, i, j + 1)
-          const Ri = () => pt(hCount + j * cols + i + 1, i + 1, j, i + 1, j + 1)
+          const T = () => pt(hEdge(i, j), i, j, i + 1, j)
+          const B = () => pt(hEdge(i, j + 1), i, j + 1, i + 1, j + 1)
+          const Le = () => pt(vEdge(i, j), i, j, i, j + 1)
+          const Ri = () => pt(vEdge(i + 1, j), i + 1, j, i + 1, j + 1)
           switch (idx) {
             case 1: case 14: link(T(), Le()); break
             case 2: case 13: link(T(), Ri()); break
@@ -2618,8 +2686,28 @@ function apply(ctx) {
         const path = []
         let cur = start
         let prev = -1
+        let lastX = 0
+        let lastY = 0
+        let first = true
+        /* Place a vertex at the periodic image next to the previous one: that is the
+           unwrapped continuation, which is what the smoother needs in order to treat a
+           contour that leaves the sheet as one curve rather than two. */
+        const place = (x, y) => {
+          if (!first && torus) {
+            const hx = periodX * 0.5
+            const hy = periodY * 0.5
+            while (x - lastX > hx) x -= periodX
+            while (lastX - x > hx) x += periodX
+            while (y - lastY > hy) y -= periodY
+            while (lastY - y > hy) y += periodY
+          }
+          lastX = x
+          lastY = y
+          first = false
+          path.push(x, y)
+        }
         for (;;) {
-          path.push(ex[cur], ey[cur])
+          place(ex[cur], ey[cur])
           seen[cur] = st
           const a = n1[cur]
           const b = n2[cur]
@@ -2628,7 +2716,7 @@ function apply(ctx) {
           else if (b >= 0 && b !== prev && seen[b] !== st) nx = b
           if (nx < 0) {
             // Closed loop: step back onto the first point so the ring has no gap.
-            if ((a === start || b === start) && path.length > 4) path.push(ex[start], ey[start])
+            if ((a === start || b === start) && path.length > 4) place(ex[start], ey[start])
             break
           }
           prev = cur
@@ -2636,12 +2724,23 @@ function apply(ctx) {
         }
         return path
       }
+      /* How close a vertex is to a corner of the period: the walk starts at the
+         closest one, so a contour that winds around the sheet ends (and therefore
+         loses its cyclic smoothing) out in the pad band instead of mid-frame. */
+      const cornerGap = (id) => {
+        const x = ex[id]
+        const y = ey[id]
+        return Math.min(x, periodX - x) + Math.min(y, periodY - y)
+      }
       /* Reject debris before it reaches the draw list. The field covers the
          texture exactly (that is what makes the scroll seamless), so there is no
          "off-canvas" case any more: every vertex is on the texture. What remains
          is raw length and the apex-ring rule -- and open chains are ALWAYS kept:
          an open contour is the legal signature of a ridge running out of the
-         frame, not an error. */
+         frame, not an error.
+         On the torus a contour has no free end at all, so nothing that crosses the
+         seam can be dropped for being short: what used to be two clipped stubs of a
+         stroke is now one contour that comfortably passes both rules. */
       const keep = (p) => {
         if (p.length < 8) return false
         let vis = 0
@@ -2673,8 +2772,18 @@ function apply(ctx) {
           if (keep(p)) out.push(p)
         }
       }
+      /* Rings are entered nearest a corner first (see cornerGap). Sorted once per
+         level: re-scanning the whole touch list per ring is the one way this could
+         turn quadratic on a dense level. */
+      let ringOrder = touched
+      if (torus) {
+        const idx = new Array(tn)
+        for (let k = 0; k < tn; k++) idx[k] = touched[k]
+        idx.sort((a, b) => cornerGap(a) - cornerGap(b))
+        ringOrder = idx
+      }
       for (let k = 0; k < tn; k++) {
-        const id = touched[k]
+        const id = ringOrder[k]
         if (seen[id] !== st) {
           const p = walk(id)
           if (keep(p)) out.push(p)
@@ -2715,6 +2824,46 @@ function apply(ctx) {
       // EDGE_STROKE_LIGHT_CYAN: #14d0d07a
       // EDGE_STROKE_LIGHT_YELLOW: #beaf006b
       return cyan ? '#14d0d07a' : '#beaf006b'
+    }
+
+    /** Which whole-period translations of a contour's bounding box put ink on the
+     *  sheet, as [kx, ky] pairs to translate it by (kx * periodX, ky * periodY).
+     *
+     *  The sheet tiles at the period, so a point at x belongs on the canvas exactly
+     *  once: at x - floor(x / periodX) * periodX. The same is true of any bbox, and
+     *  the pairs returned here are exactly the translations that place part of it
+     *  inside [0, wCss] x [0, hCss]. Because the translation is a whole period, two of
+     *  them can never put the SAME point inside: the copies cover disjoint bands and
+     *  an edge-crossing contour is painted in full without any pixel being stroked
+     *  twice.
+     *  The untranslated pair [0, 0] is never dropped, even for a contour whose ink is
+     *  entirely clipped: the renderer relies on always seeing every contour once.
+     *
+     *  Pure, and therefore testable: contour-seam.test.js checks that a point inside
+     *  the sheet has exactly one pair that covers it (a sign error here would offset
+     *  every wrapping contour by a whole period, which is the kind of mistake that
+     *  reads as "the ink is missing at the left edge" and is invisible in a unit test
+     *  of the extractor alone). */
+    const contourSeamShifts = (perX, perY, wCss, hCss, minX, maxX, minY, maxY, eps) => {
+      const out = []
+      const lo = eps > 0 ? eps : 0
+      const kx0 = perX > 0 ? -Math.floor(maxX / perX) : 0
+      const kx1 = perX > 0 ? -Math.floor(minX / perX) : 0
+      const ky0 = perY > 0 ? -Math.floor(maxY / perY) : 0
+      const ky1 = perY > 0 ? -Math.floor(minY / perY) : 0
+      for (let kx = kx0; kx <= kx1; kx++) {
+        const dx = kx * perX
+        /* Off the canvas on either side: that copy would rasterise nothing. */
+        if (kx !== 0 && (maxX + dx <= lo || minX + dx >= wCss - lo)) continue
+        for (let ky = ky0; ky <= ky1; ky++) {
+          const dy = ky * perY
+          if (!(kx === 0 && ky === 0)
+            && (maxY + dy <= lo || minY + dy >= hCss - lo)) continue
+          out.push([kx, ky])
+        }
+      }
+      if (out.length === 0) out.push([0, 0])
+      return out
     }
 
     /* Render the extracted polylines into the CACHE canvas, once per build /
@@ -2876,9 +3025,68 @@ function apply(ctx) {
         }
         if (closed) ctx.closePath()
       }
-      ctx.beginPath()
-      for (let i = 0; i < contourPaths.length; i++) drawSmoothPath(smoothPath(contourPaths[i]))
-      ctx.stroke()
+      /* ---- ONE PERIOD PER PIXEL ------------------------------------------------
+         The extraction runs on a torus (see contourExtractLevel), so a contour that
+         crosses the seam carries on past the sheet edge in ITS OWN coordinates: the
+         piece beyond x = tw is the ink that belongs just inside x = 0. Stroke the
+         contour where it lies and that piece is clipped away, leaving the wrap to be
+         painted by the contour that enters x = 0 -- except that those are two values
+         of the same curve, and the second one is only smoothed with its neighbours on
+         its own side. That is the seam.
+         So a contour is stroked at every whole-period translation that lands part of it
+         on the sheet (contourSeamShifts). ANY GIVEN POINT has exactly one translation
+         that puts it inside the canvas -- the one that reduces it modulo the period --
+         so no pixel is stroked twice: the copies are disjoint, not an overdraw.
+         Interior contours need one translation and are unaffected; only the ones
+         reaching past an edge get a second (or, for a contour that winds around the
+         sheet, a third).
+         The contour's own position is always among them, even when every pixel of it
+         ends up clipped: that keeps one subpath per contour, in the order the extractor
+         produced them, which is the contract the geometry tests read the cache through. */
+      const perX = (contourField !== null && contourField.cols > 2)
+        ? (contourField.cols - 1) * contourField.step : 0
+      const perY = (contourField !== null && contourField.rows > 2)
+        ? (contourField.rows - 1) * contourField.step : 0
+      const wCss = contourTex.wCss
+      const hCss = contourTex.hCss
+      /* A vertex is a Float32 computed as a product of integers, so a contour ending
+         exactly on the far edge can read back as period + 2e-7. Half a stroke of slack
+         keeps that from inventing a translation whose ink is entirely clipped away. */
+      const SEAM_EPS = 0.5
+      const groups = new Map()
+      for (let i = 0; i < contourPaths.length; i++) {
+        const path = contourPaths[i]
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+        for (let k = 0; k < path.length; k += 2) {
+          const x = path[k]
+          const y = path[k + 1]
+          if (x < minX) minX = x
+          if (x > maxX) maxX = x
+          if (y < minY) minY = y
+          if (y > maxY) maxY = y
+        }
+        const shifts = contourSeamShifts(perX, perY, wCss, hCss, minX, maxX, minY, maxY, SEAM_EPS)
+        for (let s = 0; s < shifts.length; s++) {
+          const key = shifts[s][0] + ',' + shifts[s][1]
+          let list = groups.get(key)
+          if (list === undefined) {
+            list = []
+            groups.set(key, list)
+          }
+          list.push(i)
+        }
+      }
+      for (const [key, list] of groups) {
+        const comma = key.indexOf(',')
+        const dx = Number(key.slice(0, comma)) * perX
+        const dy = Number(key.slice(comma + 1)) * perY
+        if (typeof ctx.setTransform === 'function') {
+          ctx.setTransform(sx, 0, 0, sy, sx * dx, sy * dy)
+        }
+        ctx.beginPath()
+        for (let k = 0; k < list.length; k++) drawSmoothPath(smoothPath(contourPaths[list[k]]))
+        ctx.stroke()
+      }
     }
 
     /* Blit the cached texture onto the visible viewport canvas with wrap-around.
@@ -3829,8 +4037,25 @@ function apply(ctx) {
     /** Pure texture-size target for a viewport (quantised, capped), in CSS px
      *  and the device-px backing-store size it maps to at the current DPR. */
     const contourTargetTexture = (w, h, dpr, three) => {
-      const quant = (v, maxDim) => Math.max(CONTOUR_TEX_QUANT * 2,
-        Math.min(maxDim / dpr, Math.round(v / CONTOUR_TEX_QUANT) * CONTOUR_TEX_QUANT))
+      /* THE SHEET IS SIZED TO CLOSE ON ITS OWN GRID.
+         The terrain is sampled on a lattice with a node every CONTOUR_STEP px, and the
+         extraction reads that lattice as a torus (see contourExtractLevel), so the sheet
+         only closes when its size is a whole number of steps: with a residual cell at the
+         edge, the last cell's sample pair is not the pair the wrapped side sees, and a
+         contour crossing the seam lands up to a step away from its continuation -- a jog
+         in every line that crosses, whose size depends on the window (the old sizes were
+         rounded to a 128px grid, which is never a multiple of 10 except by luck: 3712 and
+         1792 both leave two pixels of residual cell).
+         CONTOUR_STEP * 2 rather than CONTOUR_STEP, because the backing store is period *
+         dpr device px and the ratios the panel reports are quarter steps (1.25, 1.5, 2):
+         an odd multiple of the step would make the device period 2.5px out and the wrap
+         would land half a pixel off the texel grid in the 3D shader.
+         The cap is floored to the same grid so quantising UP can never cross it. */
+      const SNAP = CONTOUR_STEP * 2
+      const quant = (v, maxDim) => {
+        const cap = Math.max(SNAP, Math.floor((maxDim / dpr) / SNAP) * SNAP)
+        return Math.max(SNAP, Math.min(cap, Math.ceil(v / SNAP) * SNAP))
+      }
       /* 3D: one sheet, sampled through a camera and wrapped by the shader, so the
          period only has to be long enough that a repeat is not obvious. A resized 2D
          surface is not involved, so scroll is false -- the surface path is off. */
@@ -3869,7 +4094,9 @@ function apply(ctx) {
         let thCss = Math.max(minTh, quant(m * h, CONTOUR_SCROLL_DIM))
         /* Quantising up can push the pair back over a ceiling, so step the period
            down one notch at a time (bounded: a pathological viewport must not loop)
-           and give up on the scroll path once the period stops being worth it. */
+           and give up on the scroll path once the period stops being worth it. The
+           notch is a whole number of SNAP units, or the size would leave the grid. */
+        const notch = Math.ceil(CONTOUR_TEX_QUANT / SNAP) * SNAP
         for (let guard = 0; guard < 128; guard++) {
           const areaOk = twCss * thCss <= CONTOUR_SCROLL_AREA * 1.02
           /* Device pixels, both stores, with the surface counted as what it actually
@@ -3882,8 +4109,8 @@ function apply(ctx) {
             && texDevPx <= CONTOUR_SHEET_MAX_DEVICE_PX
           if (areaOk && memOk) break
           if (twCss <= minTw && thCss <= minTh) break
-          twCss = Math.max(minTw, twCss - CONTOUR_TEX_QUANT)
-          thCss = Math.max(minTh, thCss - CONTOUR_TEX_QUANT)
+          twCss = Math.max(minTw, twCss - notch)
+          thCss = Math.max(minTh, thCss - notch)
         }
         /* A period at or below the viewport would show the same feature twice in
            one frame -- that is a tiling pattern, not a moving landscape. */

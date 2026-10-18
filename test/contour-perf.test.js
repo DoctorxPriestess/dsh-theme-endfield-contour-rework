@@ -96,7 +96,7 @@ function grabArray(name) {
    mysteriously at runtime. */
 const FN = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTargetTexture',
+  'contourStroke', 'contourRenderCache', 'contourSeamShifts', 'contourTargetTexture',
   'contourBuildTexture', 'contourSheetFits', 'contourStepOffset', 'contourBlit',
   'contourPaintSurface', 'contourRetune', 'contourFrame',
   'contourTerrainProfile', 'contourTerrainRow', 'contourOctaveLadder',

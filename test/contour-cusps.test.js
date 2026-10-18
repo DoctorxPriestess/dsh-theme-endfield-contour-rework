@@ -91,7 +91,7 @@ function grabOne(name) {
    track client.js; a missing one throws here instead of failing mysteriously. */
 const fns = ['contourRng', 'contourRollSeed', 'contourReseed', 'contourNoise',
   'contourGenerateField', 'contourLevels', 'contourExtractLevel', 'contourExtractAll',
-  'contourStroke', 'contourRenderCache', 'contourTerrainProfile', 'contourTerrainRow',
+  'contourStroke', 'contourRenderCache', 'contourSeamShifts', 'contourTerrainProfile', 'contourTerrainRow',
   'contourOctaveLadder', 'contourStair', 'contourTerrace', 'contourCliff',
   'contourTerraceField', 'contourApplyLandforms', 'contourShapeWarp', 'contourReliefWarp',
   'contourRidgeAt', 'contourValleyAt', 'contourFeaturePeriod', 'contourHash3',
@@ -204,6 +204,18 @@ return {
      so "same seed => same landscape" and "new seed => new landscape" are both
      provable here. */
   reseed(seed) { contourSeed = contourReseed(seed) },
+  /* Is this sheet a torus? Exactly the predicate contourExtractLevel uses: the size
+     has to be a whole number of contour cells for the period to be the sheet. */
+  torusAt(w, h) {
+    const cols = Math.ceil(w / CONTOUR_STEP) + 1
+    const rows = Math.ceil(h / CONTOUR_STEP) + 1
+    return cols > 5 && rows > 5
+      && (cols - 1) * CONTOUR_STEP === w && (rows - 1) * CONTOUR_STEP === h
+  },
+  /* The period the extraction wraps on, in CSS px. */
+  periodOf(w, h) {
+    return [Math.ceil(w / CONTOUR_STEP) * CONTOUR_STEP, Math.ceil(h / CONTOUR_STEP) * CONTOUR_STEP]
+  },
   fieldRange() { return contourField === null ? 'none' : contourField.mn.toFixed(6) + '..' + contourField.mx.toFixed(6) },
   signature() {
     const parts = []
@@ -326,6 +338,10 @@ let geometryBad = 0
 let duplicated = 0
 let teleports = 0
 let worstStep = 0
+/* Contour ends found on a sheet that closes on its own grid: on the torus there must
+   be none (see the check inside the sweep). */
+let freeEnds = 0
+let torusSheets = 0
 /* Debris guard. The browser test contour-specks.test.js measures this on pixels;
    this is the same property measured on the drawn geometry, so it still holds in
    an environment with no browser. The extractor's keep() threshold is
@@ -363,6 +379,25 @@ for (const sweep of SWEEPS) {
         if (seenPaths.has(key)) duplicated++
         seenPaths.add(key)
       }
+      /* 4b. A CLOSING sheet has no contour ends. The extraction wraps on the period,
+          so every contour comes back to its own start (one or more periods away, which
+          is why the gap is measured modulo the period). A free end is a stroke drawn
+          with a butt cap and smoothed against nothing -- which is precisely what the
+          seam was: a line that stopped at the boundary and was continued by an
+          unrelated stroke on the other side. */
+      if (api.torusAt(w, h)) {
+        torusSheets++
+        const per = api.periodOf(w, h)
+        for (const p of REC.raw) {
+          const np = p.length
+          if (np < 4) continue
+          let gx = p[0] - p[np - 2]
+          let gy = p[1] - p[np - 1]
+          gx -= Math.round(gx / per[0]) * per[0]
+          gy -= Math.round(gy / per[1]) * per[1]
+          if (Math.hypot(gx, gy) > 2) freeEnds++
+        }
+      }
       const allTurns = []
       for (const sub of subs) {
         const { turns, maxStep } = sampleTurns(sub, 6)
@@ -381,14 +416,25 @@ for (const sweep of SWEEPS) {
         // at most ~1.5 grid steps apart. Anything larger means the walk emitted a
         // vertex it did not compute (the stale-vertex class of defect).
         if (maxStep > 25) teleports++
-        // 4. Every recorded point must be finite and inside the tile + grid cell.
-        const bx = w + 11 /* CONTOUR_STEP - 1 + margin */
-        const by = h + 11
+        /* 4. Every recorded point must be finite and inside the sheet's coordinate
+              window. On a CLOSED sheet the extraction walks the torus, so a contour
+              that crosses the seam carries on past the edge in unwrapped coordinates
+              instead of being cut there (see contourExtractLevel); the window is the
+              tile expanded by the periods a contour can wind around it. A sheet that
+              does not close is not a torus and keeps the old bound: the tile plus one
+              grid cell, because marching-squares vertices sit on grid edges up to
+              CONTOUR_STEP - 1 px past the right/bottom edge. */
+        const torus = api.torusAt(w, h)
+        const per = api.periodOf(w, h)
+        const bx = torus ? w + 2 * per[0] : w + 11
+        const by = torus ? h + 2 * per[1] : h + 11
+        const lx = torus ? -2 * per[0] : -1
+        const ly = torus ? -2 * per[1] : -1
         for (const p of sub.pts) {
           const xs = [p.x, p.c1x, p.c2x].filter((v) => v !== undefined)
           const ys = [p.y, p.c1y, p.c2y].filter((v) => v !== undefined)
-          for (const v of xs) if (!Number.isFinite(v) || v < -1 || v > bx) geometryBad++
-          for (const v of ys) if (!Number.isFinite(v) || v < -1 || v > by) geometryBad++
+          for (const v of xs) if (!Number.isFinite(v) || v < lx || v > bx) geometryBad++
+          for (const v of ys) if (!Number.isFinite(v) || v < ly || v > by) geometryBad++
         }
       }
       allTurns.sort((a, b) => a - b)
@@ -404,8 +450,17 @@ for (const sweep of SWEEPS) {
   worstByStop.push({ stop: sweep.stop, worst: stopWorst })
 }
 
-if (geometryBad === 0) ok('all recorded coordinates finite and inside the tile')
-else fail(geometryBad + ' recorded coordinate(s) are non-finite or outside the tile')
+if (geometryBad === 0) ok('all recorded coordinates finite and inside the sheet\'s window')
+else fail(geometryBad + ' recorded coordinate(s) are non-finite or outside the sheet window')
+
+/* The seam, stated as a geometry invariant: on a closing sheet nothing may end. */
+if (torusSheets === 0) {
+  fail('no closed sheet was measured — the torus invariant is untested')
+} else if (freeEnds === 0) {
+  ok('every contour closes on the torus: 0 ends on ' + torusSheets + ' closed sheet(s)')
+} else {
+  fail(freeEnds + ' contour end(s) on a closed sheet — those are cut strokes, i.e. the seam')
+}
 
 if (duplicated === 0) ok('no contour extracted twice')
 else fail(duplicated + ' contour(s) are byte-identical duplicates of another — the stitched walk is reusing state between levels')
