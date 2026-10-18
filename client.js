@@ -6171,23 +6171,35 @@ function apply(ctx) {
          app rebuilds; the rest are matched on the stable '_suffix' part only (the
          same policy as '_sidebarCol' above), because the prefixes are build hashes.
 
+         100% TRANSPARENT, not a wash. A 0.82 wash was tried and rejected on sight: any
+         non-zero alpha still draws a rectangle whose edges are a visible step in the
+         sheet -- which is the artifact being fixed -- and over the composer's bottom
+         row the wash read as one continuous dark band behind the text. The sheet has
+         to run through these elements unbroken. The cost is that a sticky row no
+         longer hides what scrolls under it; that is the theme's standing rule:
+         nothing opaque is allowed between the sheet and the reader.
+
          background-color, never the background shorthand: several of these carry a
          background-image as well, and clobbering it would delete real content.
 
-         The wash is the SAME 82% mix the composer seat uses: still occludes what
-         scrolls underneath (18% of a near-black sheet over near-black text is
-         invisible) while the contour keeps running through it. 100% is the black
-         rectangle again; 0% would let the reasoning text scroll THROUGH the header.
-         Settings-page and terminal surfaces paint bg-base too but are not slabs over
-         the conversation, so they are left alone. */
+         Terminal, code editor, image lightbox and skeleton fills keep their own
+         fills: their content is 8pt monospace or a photograph and unreadable over a
+         line drawing. Everything else -- conversation and settings view -- goes
+         transparent. */
       [class*='_frame']:has(> [data-endfield-contour]) [data-disclosure-header],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='_compactionButton'],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='_inspectButton'],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='_toolCatalogDefinition'],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='_bottomRow'],
       [class*='_frame']:has(> [data-endfield-contour]) [class*='_file'],
-      [class*='_frame']:has(> [data-endfield-contour]) [class*='_thumb'] {
-        background-color: color-mix(in srgb, var(--dsw-alias-bg-base) 82%, transparent) !important;
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_thumb'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_detail'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_detailNotice'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_instruction'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_zoneSearch'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_saveFooter'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class*='_saveFailure'] {
+        background-color: transparent !important;
       }
       ::selection {
         color: #000;
