@@ -6,7 +6,35 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
-### 黑块：冻结不再等于"停止绘制"（fix22）
+### 黑块：冻结的是时间，不是绘制（fix23）
+
+用户把现象定死了：**"不是 cot 蹦 token，是页面滚动导致的黑块闪烁"**。这条把前两轮的方向都推翻了
+（fix21 打的是"层被移除/上下文丢失"，fix22 打的是"日志噪声"），并且指向一条很具体的代码路径：
+
+`contourPauseOnScroll()` 以前会 `contourStopLoop()` —— **滚动期间整个 rAF 循环停掉，画布一次也不提交**。
+一块只在滚动开始时提交过一次的画布，正是合成器在滚动中重新合成时可能拿不到内容的那种；`preserveDrawingBuffer`
+挡得住"最后一帧丢失"，挡不住"整段滚动都没有新帧"。于是黑块在滚动时闪，滚完就好。
+
+改法：冻结只冻结**时间**。
+
+- `contourPauseOnScroll` 不再停循环，反而在循环空闲时把它启动起来（`contourStartLoop`），
+  只把 `contourScrollPaused` 置上。
+- `contourFrame` 读到这个状态后 **dt = 0**：偏移不动（画面静止，原本冻结的视觉目的不变），
+  但每帧照常 `contourBlit()`，也就是每帧提交。
+- 冻结帧还要**绕过 3D 的亚像素门**：相机不动时"是否移动"永远是 no，门会把这一帧吞掉，
+  所以冻结时 `contourGlLastDrawAt = -1` 强制绘制；同时给 watchdog 喂 dt=0，
+  免得"滚动导致帧变慢"被误判成该降级 3D。
+- fix22 里那个每 250ms 重提交一次的定时器随之删掉：循环不停，就不需要它了。
+  嵌套滚动（消息列表自动跟流）依然不触发冻结（`contourPageScrolled`），这条 fix22 是对的，保留。
+
+新增 [contour-scroll-freeze.test.js](test/contour-scroll-freeze.test.js) 30 条：哪些滚动算页面滚动、
+嵌套滚动不冻结、**冻结帧仍然提交且 dt=0**、冻结帧强制 3D 绘制、冻结帧不喂 watchdog 慢帧、
+以及 200ms 刷新下限与各条接线。`npm run test:node` **483 ok / 0 fail**，浏览器组 4 组全绿。
+
+代价：滚动期间按正常帧率绘制（原本滚动时是零绘制）。这与不滚动时的开销相同——本项目基线本来就是
+60fps 持续渲染，所以不是新增的常态成本；GPU 太弱时既有的 `contourShedLoad` 会按原策略降级。
+
+### 黑块：冻结不再等于"停止绘制"（fix22，已被 fix23 取代上述第 2 条）
 
 用户第二次反馈（fix21 已装）："而且黑块还是有"。先把能查的事实摆出来，再说改了什么：
 

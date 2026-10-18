@@ -2219,7 +2219,6 @@ function apply(ctx) {
        indefinitely when the camera happens to stand still, and a canvas that stopped
        committing is exactly the one a re-composite can present as empty. */
     let contourGlLastDrawAt = -1
-    let contourFrozenTimer = null
     let contourScrollTimer = null
     let contourRoughTimer = null
     let contourLoaderActive = false
@@ -4463,7 +4462,15 @@ function apply(ctx) {
       let dt = contourLastT < 0 ? 0 : (now - contourLastT) / 1000
       contourLastT = now
       if (dt > 0.1) dt = 0.1 // clamp tab-switch gaps so the sheet never jumps
-      contourWatchFrame(dt)
+      /* A frozen sheet is frozen in TIME, not in drawing. The freeze exists so the
+         background does not slide under a scrolling page; stopping the loop for its
+         duration (what this used to do) also stopped COMMITTING the canvas, and a
+         canvas with no recent commit is what a re-composite during the scroll presents
+         as black -- which is exactly the report: "页面滚动导致的黑块闪烁". So the
+         offsets stay put and the frame is still drawn. */
+      const frozen = contourScrollPaused
+      if (frozen) dt = 0
+      contourWatchFrame(frozen ? 0 : dt)
       const twDev = contourTex.cv.width
       const thDev = contourTex.cv.height
       /* Space-based motion: px/second * seconds, identical on every refresh
@@ -4473,6 +4480,9 @@ function apply(ctx) {
       const vy = contourVelY * contourSpeedPx * contourDpr
       contourOffsetX = contourStepOffset(contourOffsetX, vx, dt, twDev)
       contourOffsetY = contourStepOffset(contourOffsetY, vy, dt, thDev)
+      /* ...and while frozen the 3D gate must not coalesce those commits back into
+         nothing: with the camera still, "did it move" is always no. */
+      if (frozen) contourGlLastDrawAt = -1
       /* contourBlit is also where a refused 3D layer's cooldown gets re-probed, and
          where entering/leaving 3D is noticed -- so this call is the loop's whole
          reconciliation as well as its motion. It runs EVERY frame: the panel's refresh
@@ -4597,10 +4607,6 @@ function apply(ctx) {
       if (contourScrollTimer !== null) {
         clearTimeout(contourScrollTimer)
         contourScrollTimer = null
-      }
-      if (contourFrozenTimer !== null) {
-        clearInterval(contourFrozenTimer)
-        contourFrozenTimer = null
       }
       if (contourRo !== null) {
         contourRo.disconnect()
@@ -4947,35 +4953,22 @@ function apply(ctx) {
        as jank; the freeze makes the page scroll feel native. contourScrollHook /
        contourScrollEndHook are declared (and wired to window listeners) just
        above this block, and are assigned to these handlers below it. */
-    /* The freeze stops the LOOP, not the picture. Stopping everything leaves the last
-       frame as the only frame the compositor has ever seen for this layer, and a
-       re-composite (a thinking panel expanding) may present a surface that has since
-       been recycled: a black block until something draws again. So a frozen sheet is
-       re-committed a few times a second. Same picture, one blit, no motion. */
-    const CONTOUR_FROZEN_REFRESH_MS = 250
-    const contourArmFrozenRefresh = () => {
-      if (typeof setInterval !== 'function' || contourFrozenTimer !== null) return
-      contourFrozenTimer = setInterval(() => {
-        if (!contourScrollPaused) return
-        if (contourWrap === null || contourTex === null) return
-        contourBlit()
-      }, CONTOUR_FROZEN_REFRESH_MS)
-    }
+    /* Freezing is a STATE ON THE LOOP, not a stop of it (see contourFrame): the offsets
+       advance zero time while the frame is still drawn and committed. Stop-and-restart
+       was measured to be the wrong shape for exactly the reported symptom -- "页面滚动
+       导致的黑块闪烁" -- because the loop stopping is the canvas not being committed. */
     const contourPauseOnScroll = () => {
       if (!isEnabled() || contourWrap === null || !isContourScrollPauseOn() || !isContourAnimOn()) return
       if (contourScrollPaused) return
       contourScrollPaused = true
       contourSwitchSig = ''
-      if (contourRaf !== null) contourStopLoop()
-      contourArmFrozenRefresh()
+      /* The loop can be idle for another reason; start it so even a frozen picture is
+         committed every frame of the scroll. */
+      if (contourRaf === null) contourStartLoop()
     }
     const contourResumeAfterScroll = () => {
       if (!contourScrollPaused) return
       if (contourScrollTimer !== null && typeof clearTimeout === 'function') clearTimeout(contourScrollTimer)
-      if (contourFrozenTimer !== null && typeof clearInterval === 'function') {
-        clearInterval(contourFrozenTimer)
-        contourFrozenTimer = null
-      }
       const resume = () => {
         contourScrollTimer = null
         contourScrollPaused = false

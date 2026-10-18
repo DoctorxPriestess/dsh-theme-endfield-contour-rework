@@ -1,24 +1,27 @@
 /**
- * contour-scroll-freeze.test.js — the two rules that keep a frozen sheet from
- * flashing black, and stop the freeze from firing at all for the wrong scroller.
+ * contour-scroll-freeze.test.js — the rules that keep a scrolling page from turning the
+ * sheet black, and stop the freeze from firing for the wrong scroller.
  *
- * Why this file exists. "展开 cot 后还是有黑块，会高速闪烁" (a black block flickers at
- * high speed after expanding a thinking panel) is a compositor symptom, and the
- * canvas can only be blamed for one half of it: a canvas that stops committing
- * frames can be re-composited from a surface the compositor has since recycled.
- * Two things in client.js could leave the layer in exactly that state:
+ * Why this file exists. The user's final, decisive description was:
+ *   "我发现了，不是 cot 蹦 token，是页面滚动导致的黑块闪烁"
+ * — a black block that FLASHES WHILE THE PAGE SCROLLS. Three code-level causes are
+ * possible, and all three are pinned here:
  *
- *   1. THE FREEZE FELL FOR THE WRONG SCROLL. window's capture-phase `scroll`
- *      listener sees EVERY scroller, and the message list is one of them — the app
- *      auto-scrolls it on every token while a reply streams. So the sheet stopped
- *      and restarted dozens of times a second for the whole length of a reply.
- *      Only the page's own scroll may freeze it (contourPageScrolled).
+ *   1. THE FREEZE FELL FOR THE WRONG SCROLL. window's capture-phase `scroll` listener
+ *      sees EVERY scroller, and the message list is one of them — the app auto-scrolls
+ *      it on every streaming token. Only the page's own scroll may freeze the sheet
+ *      (contourPageScrolled).
  *
- *   2. A FROZEN OR STILL LAYER STOPPED DRAWING ALTOGETHER. contourStopLoop() left
- *      one commit on screen for as long as the scroll lasted (contourArmFrozenRefresh
- *      now re-commits it 4x/s), and the 3D sub-pixel gate could skip frames
- *      indefinitely while the camera stood still (contourGlWantsFrame now admits a
- *      frame every CONTOUR_GL_REFRESH_MS regardless).
+ *   2. THE FREEZE STOPPED THE DRAWING, NOT JUST THE MOTION. contourStopLoop() left one
+ *      commit on screen for the length of the scroll, and a canvas with no recent
+ *      commit is exactly what a re-composite during a scroll can present as black.
+ *      contourPauseOnScroll now keeps the loop alive and contourFrame advances ZERO
+ *      time instead (asserted by driving one frame here, not by reading the source).
+ *
+ *   3. THE 3D GATE COULD COALESCE THE FROZEN COMMITS AWAY. With the camera still, "did
+ *      it move" is always no, so the sub-pixel gate plus the time floor would drop the
+ *      frame; contourFrame forces the draw while frozen. The floor itself is still
+ *      there for the moving case (contourGlWantsFrame).
  *
  * Usage: node test/contour-scroll-freeze.test.js
  */
@@ -69,48 +72,82 @@ try {
   const body = [
     grabNum('CONTOUR_GL_REFRESH_MS'),
     grabNum('CONTOUR_GL_HALF_PX'),
-    grabNum('CONTOUR_FROZEN_REFRESH_MS'),
     grabOne('contourGlWantsFrame'),
     grab('contourPageScrolled'),
     grab('onContourScrollEvent'),
     grab('onContourScrollEndEvent'),
+    grab('contourPauseOnScroll'),
+    grab('contourFrame'),
+    grab('contourStepOffset'),
   ].join('\n')
   api = new Function(`
 let contourScrollHook = () => { scrollHookCalls += 1 }
 let contourScrollEndHook = () => { scrollEndHookCalls += 1 }
 let scrollHookCalls = 0
 let scrollEndHookCalls = 0
-let contourFrozenTimer = null
 let contourScrollPaused = false
 let contourWrap = null
 let contourTex = null
-let blitCalls = 0
-let intervals = []
-const contourBlit = () => { blitCalls += 1 }
-const setInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length }
-const clearInterval = (h) => { intervals[h - 1] = null }
+let contourScrollTimer = null
+let contourResizePending = false
+let contourHost = null
+let contourSwitchSig = ''
+let contourRaf = null
+let contourLastT = -1
+let contourOffsetX = 0
+let contourOffsetY = 0
+let contourGlLastDrawAt = 12345
+let contourVelX = 1
+let contourVelY = 1
+let contourSpeedPx = 48
+let contourDpr = 1
+let contourDisableAnim = false
+let loopStops = 0
+let loopStarts = 0
+let watchCalls = []
+let blits = []
+const isEnabled = () => true
+const isContourOn = () => true
+const isContourScrollPauseOn = () => true
+const isContourAnimOn = () => contourDisableAnim !== true
+const contourWantsScroll = () => isContourAnimOn()
+const contourWatchFrame = (dt) => { watchCalls.push(dt) }
+const contourStopLoop = () => { loopStops += 1; contourRaf = null }
+const contourStartLoop = () => { if (contourRaf === null && contourWantsScroll()) { loopStarts += 1; contourRaf = 99 } }
+const contourBlit = () => { blits.push({ x: contourOffsetX, y: contourOffsetY, at: contourGlLastDrawAt }) }
+const contourApplySwitches = () => {}
+const contourSizeTo = () => false
+const contourScheduleRebuildCheck = () => {}
+const requestAnimationFrame = () => 7
+let clockMs = 0
+const performance = { now: () => clockMs }
 const doc = { scrollingElement: null, documentElement: null, body: null }
 doc.scrollingElement = { tag: 'html' }
 doc.documentElement = doc.scrollingElement
 doc.body = { tag: 'body' }
 const document = doc
 ${body}
-${grab('contourArmFrozenRefresh')}
 return {
   pageScrolled: contourPageScrolled,
   scrollEvent: onContourScrollEvent,
   scrollEndEvent: onContourScrollEndEvent,
-  armFrozen: contourArmFrozenRefresh,
+  pause: contourPauseOnScroll,
+  frame: contourFrame,
   glFrame: contourGlWantsFrame,
-  consts: { REFRESH: CONTOUR_GL_REFRESH_MS, HALF: CONTOUR_GL_HALF_PX, FROZEN: CONTOUR_FROZEN_REFRESH_MS },
+  consts: { REFRESH: CONTOUR_GL_REFRESH_MS, HALF: CONTOUR_GL_HALF_PX },
   hooks: () => ({ scroll: scrollHookCalls, scrollEnd: scrollEndHookCalls }),
-  fire: (i) => { const it = intervals[i - 1]; if (it) it.fn() },
-  intervalMs: (i) => (intervals[i - 1] ? intervals[i - 1].ms : null),
-  timers: () => intervals.filter(Boolean).length,
-  setPaused: (v) => { contourScrollPaused = v },
-  setLayer: (wrap, tex) => { contourWrap = wrap; contourTex = tex },
-  blits: () => blitCalls,
   doc,
+  setLayer: (wrap, tex) => { contourWrap = wrap; contourTex = tex },
+  setRaf: (v) => { contourRaf = v },
+  raf: () => contourRaf,
+  setOffsets: (x, y) => { contourOffsetX = x; contourOffsetY = y },
+  offsets: () => [contourOffsetX, contourOffsetY],
+  setPaused: (v) => { contourScrollPaused = v },
+  paused: () => contourScrollPaused,
+  setAnim: (v) => { contourDisableAnim = v === false },
+  counters: () => ({ loopStops, loopStarts, watch: watchCalls.slice(), blits: blits.slice() }),
+  resetCounters: () => { loopStops = 0; loopStarts = 0; watchCalls = []; blits = [] },
+  setTime: (v) => { clockMs = v },
 }
 `)()
 } catch (e) {
@@ -138,9 +175,6 @@ if (api.pageScrolled(null) === true && api.pageScrolled(undefined) === true) {
 } else {
   fail('an unknown event did not fall back to freezing')
 }
-
-/* The listener must actually consult the rule -- a pure function nobody calls is
-   the classic way this regresses. */
 api.scrollEvent({ target: nested })
 if (api.hooks().scroll === 0) ok('a nested scroll event does not reach the freeze hook')
 else fail('a nested scroll event still reached the freeze hook')
@@ -154,34 +188,57 @@ api.scrollEndEvent({ target: root })
 if (api.hooks().scrollEnd === 1) ok('a page scrollend resumes the sheet')
 else fail('a page scrollend did not resume the sheet')
 
-/* ------------------------------------------- 2. the frozen frame is re-committed */
-api.setPaused(true)
-api.setLayer({}, {})
-api.armFrozen()
-api.armFrozen()
-if (api.timers() === 1) ok('arming the frozen refresh twice keeps one timer')
-else fail('arming the frozen refresh twice created ' + api.timers() + ' timers')
-if (api.intervalMs(1) === api.consts.FROZEN) {
-  ok('the frozen refresh runs at ' + api.consts.FROZEN + 'ms (4/s: invisible for a still picture)')
-} else {
-  fail('frozen refresh interval is ' + api.intervalMs(1) + 'ms')
-}
-api.fire(1)
-if (api.blits() === 1) ok('a frozen sheet is re-committed on the timer')
-else fail('the frozen refresh did not blit (blits=' + api.blits() + ')')
+/* ------------------------------ 2. the freeze stops TIME, not the drawing ----- */
+api.setLayer({}, { cv: { width: 1000, height: 600 } })
+api.setOffsets(100, 50)
+api.resetCounters()
+api.pause()
+const afterPause = api.counters()
+if (afterPause.loopStops === 0) ok('freezing does not stop the frame loop (that is what left the canvas uncommitted)')
+else fail('the freeze still calls contourStopLoop()')
+if (api.raf() !== 99) fail('the freeze left the loop idle (raf=' + api.raf() + ', starts=' + api.counters().loopStarts + ')')
+else ok('freezing starts the loop when it was idle, so the frozen picture keeps being drawn')
+if (api.paused() === true) ok('the freeze is recorded as state')
+else fail('the freeze did not set contourScrollPaused')
+
+api.resetCounters()
 api.setPaused(false)
-api.fire(1)
-if (api.blits() === 1) ok('the refresh stops once the scroll ended (no work while it is running again)')
-else fail('the refresh kept blitting after the scroll ended')
+api.setOffsets(100, 50)
+api.setTime(1000)
+api.frame() // primes contourLastT: the FIRST frame has no elapsed time by design
+api.resetCounters()
+api.setOffsets(100, 50)
+api.setTime(1016)
+api.frame()
+const running = api.counters()
+if (running.blits.length === 1) ok('a running frame commits once')
+else fail('a running frame committed ' + running.blits.length + ' times')
+const movedX = running.blits[0].x - 100
+if (movedX > 0.5) ok('a running frame advances the camera (' + movedX.toFixed(3) + ' device px in one frame)')
+else fail('a running frame did not advance the camera (dx=' + movedX + ')')
+if (running.blits[0].at === 12345) ok('a running frame keeps the recorded draw time (the 3D gate decides)')
+else fail('a running frame rewrote contourGlLastDrawAt')
+
+api.resetCounters()
 api.setPaused(true)
-api.setLayer(null, {})
-api.fire(1)
-if (api.blits() === 1) ok('no blit when there is no layer on screen')
-else fail('the refresh blitted with the layer torn down')
-api.setLayer({}, null)
-api.fire(1)
-if (api.blits() === 1) ok('no blit when there is no sheet')
-else fail('the refresh blitted without a texture')
+api.setOffsets(100, 50)
+api.setTime(3000)
+api.frame()
+const frozen = api.counters()
+if (frozen.blits.length === 1) ok('a frozen frame STILL commits (the scroll must not stop the canvas)')
+else fail('a frozen frame committed ' + frozen.blits.length + ' times')
+if (frozen.blits[0].x === 100 && frozen.blits[0].y === 50) {
+  ok('a frozen frame advances ZERO time: same offsets, same picture')
+} else {
+  fail('a frozen frame moved the camera to ' + frozen.blits[0].x + ',' + frozen.blits[0].y)
+}
+if (frozen.blits[0].at === -1) ok('a frozen frame forces the 3D draw past the sub-pixel gate')
+else fail('a frozen frame left contourGlLastDrawAt at ' + frozen.blits[0].at + ' -- the gate can drop it')
+if (frozen.watch.length === 1 && frozen.watch[0] === 0) {
+  ok('a frozen frame is not counted by the slow-frame watchdog (a scroll must not disable 3D)')
+} else {
+  fail('a frozen frame fed dt=' + JSON.stringify(frozen.watch) + ' to the watchdog')
+}
 
 /* ------------------------------------------- 3. the 3D frame refresh floor ---- */
 const F = api.glFrame
@@ -205,21 +262,15 @@ if (/contourGlWantsFrame\(/.test(blitSrc)) ok('contourBlit uses the refresh rule
 else fail('contourBlit does not use contourGlWantsFrame')
 if (/contourGlLastDrawAt = contourGlNow\(\)/.test(blitSrc)) ok('a successful 3D draw records when it was committed')
 else fail('contourBlit does not record contourGlLastDrawAt')
-if (/webglcontextlost/.test(src) && /contourGlLastDrawAt = -1/.test(src)) {
+if (/contourGlLastDrawAt = -1/.test(src) && /webglcontextlost/.test(src)) {
   ok('a lost/disposed context forces the next frame to draw')
 } else {
   fail('a fresh context could skip its first frame (contourGlLastDrawAt is not reset)')
 }
-const pauseSrc = grab('contourPauseOnScroll')
-if (/contourArmFrozenRefresh\(\)/.test(pauseSrc)) ok('the freeze arms the refresh timer')
-else fail('the freeze does not arm the refresh timer')
-const resumeSrc = grab('contourResumeAfterScroll')
-if (/clearInterval\(contourFrozenTimer\)/.test(resumeSrc)) ok('the resume clears the frozen refresh')
-else fail('the resume leaves the frozen refresh running')
-if (/clearInterval\(contourFrozenTimer\)/.test(grab('contourTeardown'))) {
-  ok('teardown clears the frozen refresh (no timer outlives the layer)')
+if (/contourStopLoop\(\)/.test(grab('contourPauseOnScroll')) === false) {
+  ok('contourPauseOnScroll contains no contourStopLoop()')
 } else {
-  fail('teardown leaks the frozen refresh timer')
+  fail('contourPauseOnScroll still stops the loop')
 }
 if (/addEventListener\('focus', onContourVisibility\)/.test(src)
   && /addEventListener\('pageshow', onContourVisibility\)/.test(src)) {

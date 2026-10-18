@@ -673,7 +673,7 @@ for (const [w, h, dpr] of [[1432, 753, 2], [1920, 1080, 2], [1152, 648, 1]]) {
   const watch = src.match(/const CONTOUR_WATCH_DT = ([0-9.]+)[\s\S]{0,120}?const CONTOUR_WATCH_NET = (\d+)/)
   if (watch === null) fail('no frame-budget watchdog constants')
   else if (Number(watch[1]) < 0.033) fail('the watchdog threshold is ' + watch[1] + 's, inside a 60fps frame')
-  else if (!/contourShedLoad\(/.test(src) || !/contourWatchFrame\(dt\)/.test(src)) {
+  else if (!/contourShedLoad\(/.test(src) || !/contourWatchFrame\(/.test(src)) {
     fail('the watchdog is declared but never run from the frame loop')
   } else ok('frame watchdog: >' + (Number(watch[1]) * 1000) + 'ms/frame for ' + watch[2]
     + ' net frames sheds load')
