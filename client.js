@@ -5241,6 +5241,17 @@ function apply(ctx) {
       [class*='_frame']:has(> [data-endfield-contour]) [class$='_rightbarCol'] {
         background: transparent !important;
       }
+      /* A 1px COLUMN RULE cuts the sheet in half at the sidebar edge (reported from the
+         live app as "工作区那边的切分线"). On a design where one continuous field runs
+         behind every column, the structural columns must not draw a line across it.
+         Only the column elements are matched -- inputs, cards and the composer keep
+         their borders, because those are what make the controls readable. */
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_sidebarCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_centerCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_rightbarCol'],
+      [class*='_frame']:has(> [data-endfield-contour]) [class$='_root']:has([class$='_composerSeat']) {
+        border-color: transparent !important;
+      }
       /* The sidebar reads --dsw-specific-sidebar-fill, which this theme sets to the
          SAME value as --dsw-alias-bg-base, so clearing it shifts no colour and
          simply lets the sheet run behind the sidebar as one continuous field. */
