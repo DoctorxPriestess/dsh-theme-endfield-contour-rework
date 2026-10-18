@@ -19,11 +19,11 @@
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `d30fbf5`（`client.js` sha256 `98c87a0f…`） |
-| 已安装版本 | **仍是上一版**（sha256 前缀 `7d833e6d…`，对应 `fa05b97`），与本轮源码不一致 |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix14.tgz`（旧） |
+| 分支 / HEAD | `main` / `2f30843`（`client.js` sha256 `0ec1071c…`） |
+| 已安装版本 | **已同步**：`profiles\desktop\node_modules\…\client.js` 的 sha256 同样是 `0ec1071c…`（装的是 fix15，**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.3-fix15.tgz` |
 | 版本号 | `package.json` 仍是 **1.5.3**，未升版 |
-| 远端 | `origin`（GitHub, HTTPS）落后 13 个本地提交，**未推送** |
+| 远端 | `origin`（GitHub, HTTPS）落后 **21** 个本地提交，**未推送** |
 | 未跟踪文件 | `WORKLOG.md`（代理工作日志，可忽略/删除） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
@@ -36,7 +36,7 @@
 
 ### 回滚方式
 - 代码：`git revert d30fbf5`（或 `git reset --hard fa05b97`）。
-- 已安装版本未变，因此不需要动 profile；若已装新包：见 §12。
+- 安装回滚：`undo_restore mode=id snapshot_id=20261019-022505-4f4f`（或 `mode=undo`），然后重启 DSH。该快照在装 fix15 **之前**取，profile 里记录的依赖因此会回到 fix14。
 
 ---
 
@@ -194,7 +194,7 @@ JS/DOM 层无泄漏（98 秒浸泡、21335 帧、强制 GC 后堆 3–9MB 振荡
 
 ---
 
-## 12. 安装 / 发布流程（旧流程，未执行）
+## 12. 安装 / 发布流程（fix15 已按此装过，2026-10-19）
 
 ```
 cd "D:\AI Misc\dsh-theme-endfield-contour-rework"
