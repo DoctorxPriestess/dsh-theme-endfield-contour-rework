@@ -203,8 +203,8 @@ const contourGlDraw = () => false
 const contourGlDispose = () => {}
 /* Read straight from the pref store, exactly as the real one does. */
 const isContourView3D = () => prefsGet(CONTOUR_VIEW_KEY) === '1'
-/* Hollow terrain is shipped off, so the harness says no without pulling in the rest
-   of the feature. */
+/* Hollow terrain is 3D only and this harness measures the flat sheet, so the answer is
+   a constant here; contour-hollow.test.js owns the real wiring. */
 const contourHollowWanted = () => false
 ${body}
 ${gateDecls}

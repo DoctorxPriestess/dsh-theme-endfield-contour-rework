@@ -152,7 +152,7 @@ JS/DOM 层无泄漏（98 秒浸泡、21335 帧、强制 GC 后堆 3–9MB 振荡
 | `CONTOUR_MEM_BUDGET` | 150e6 | 贴图+画布总预算 |
 | `CONTOUR_WATCH_DT` / `_NET` | 0.05s / 40 | 看门狗阈值 |
 | `CONTOUR_3D_STEPS` | 10 | 3D raymarch 步数 |
-| `CONTOUR_HOLLOW_ENABLED` | false | 镂空开关（仍未开启） |
+| `CONTOUR_HOLLOW_ENABLED` | true | 镂空开关；`contourHollowWanted()` 还要求 3D 视图，所以只开在 3D，已由 `contour-hollow.test.js` C 组钉住 |
 
 ---
 
@@ -177,7 +177,8 @@ JS/DOM 层无泄漏（98 秒浸泡、21335 帧、强制 GC 后堆 3–9MB 振荡
 2. 若要装新版本：见 §12（打包 → `dsh plugin add` → 重启 DSH）。
 3. 若真机仍能看到缝：先用 `seam_metric.js` 在当前图尺寸上量 `CUT=1` vs 默认，确认是"我们以为
    修好的那条缝"还是别的（例如深色配色下的 AA 观感、3D 的亚像素门）。
-4. 再谈镂空（`CONTOUR_HOLLOW_ENABLED`）是否开启。
+4. 镂空已经定案为「只在 3D 视图开」（`CONTOUR_HOLLOW_ENABLED = true` + `contourHollowWanted()` 要求
+   `isContourView3D()`），2D 逐字节不变；要复核的是**真机上的开销与观感**（第二张 sheet + 一层绘制）。
 
 ---
 

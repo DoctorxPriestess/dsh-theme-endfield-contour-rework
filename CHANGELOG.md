@@ -6,6 +6,12 @@ Upstream's own history is not reproduced here.
 
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
+### 镂空：决定钉成「只开在 3D」
+
+`CONTOUR_HOLLOW_ENABLED` 保持 `true`，但生效条件仍是 `contourHollowWanted()` = 开关 且 `isContourView3D()`，
+所以平面视图永远不挖洞（它是一张静止的图，第二层视差只会多花显存与构建时间）。新增
+`contour-hollow.test.js` C 组把这条钉住：去掉 3D 判定、或把开关关掉，测试都会红（两种变异都实测过）。
+
 ### 接缝：子图按自身网格闭合，轮廓在环面上生成（线不再被边界切断）
 
 用户要求「画面内不许出现拼接」。上一轮把原因判成「地形本身不闭合」，但那是**指标错了**：

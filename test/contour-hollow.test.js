@@ -110,12 +110,17 @@ try {
     LINE_NAMES.map(grabLine).join('\n'),
     EXPR_NAMES.map(grabOne).join('\n'),
     ['contourSmooth', 'contourHash01'].map(grabOne).join('\n'),
+    ['CONTOUR_HOLLOW_ENABLED', 'PREFS_NS', 'CONTOUR_VIEW_KEY'].map(grabOne).join('\n'),
+    grabOne('isContourView3D'),
+    grabOne('contourHollowWanted'),
     FIELD_FNS.map(grab).join('\n'),
     grab('contourParallaxUV'),
     grab('contourOcclude'),
   ].join('\n')
   api = new Function(`
 let contourField = null, contourPaths = [], contourTex = null
+let viewPref = '0'
+const prefsGet = (k) => (k === CONTOUR_VIEW_KEY ? viewPref : '')
 ${body}
 const contourPerm = new Uint16Array(512)
 let contourSeed = contourReseed(0x51ee7)
@@ -127,6 +132,9 @@ const isDarkScheme = () => false
 const isWulingPalette = () => false
 return {
   contourGenerateField, contourReseed, contourLevels, contourParallaxUV, contourOcclude,
+  contourHollowWanted,
+  setView: (v) => { viewPref = v },
+  hollowEnabled: () => CONTOUR_HOLLOW_ENABLED === true,
   setField: (v) => { contourField = v },
   consts: { REF: CONTOUR_3D_REF, DEPTH: CONTOUR_3D_DEPTH, RISE: CONTOUR_3D_RISE,
             STEPS: CONTOUR_3D_STEPS, SHARE: CONTOUR_HOLLOW_SHARE,
@@ -330,6 +338,25 @@ const CAM = 412.5
   }
   if (worst < 1e-9) ok('1 step and 32 steps agree on a flat field (' + worst.toExponential(1) + ')')
   else fail('step count changes the answer on a flat field by ' + worst.toExponential(2))
+}
+
+/* ------------------------------------------------- C. who gets the holes ------- */
+/* The decision is "3D only, and on", which is a product choice, not a detail of the
+   carve: the flat sheet is what most people see and it is a still image, so a second
+   parallax layer there would cost memory and buy nothing. Pinned here so a future edit
+   to the switch cannot silently start carving the flat view -- the A-tests above would
+   still pass, because they call the generator with hollow = 0 directly. */
+{
+  api.setView('1')
+  const in3d = api.contourHollowWanted()
+  api.setView('0')
+  const flat2d = api.contourHollowWanted()
+  if (in3d === true) ok('the 3D view gets the hollow terrain')
+  else fail('hollow terrain is not applied in the 3D view')
+  if (flat2d === false) ok('the flat view never does, whatever the switch says')
+  else fail('the flat view is carving cavities (it must stay byte-identical)')
+  if (api.hollowEnabled()) ok('CONTOUR_HOLLOW_ENABLED is on, so the 3D path is live')
+  else fail('CONTOUR_HOLLOW_ENABLED is off: the 3D path above is dead code')
 }
 
 if (bad) {
