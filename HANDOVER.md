@@ -7,14 +7,16 @@
 
 ## 1. 一句话状态
 
-**性能轮已完成、已打包并已装入 desktop profile**：2D 纹理构建从单个 **2112 ms** 长任务
-改为按 40k 地形点分片让出，最长任务 **383 ms**；2D 线画布与旧版**逐字节相同**
-（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。同时修掉一个既有功能
-缺陷：0.2.x 的设置作用域快照没有 `mode` 字段，旧门槛把所有面板写入永久扣留（fix35）。
-源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` HEAD = `bb34745`（`client.js`
-sha256 前缀 `962a8339`），版本 **1.5.17**，tgz 已放进 `local-build`，profile 已指向它，
-**重启 DSH 后生效**。`npm run test:ci` **826 项 ok / 0 失败**（含此前失败的
-`settings-020-integration` 三个场景）。
+**1.6.0 已发布并装入 desktop profile**：分帧纹理构建、3D desynchronized 播放、
+0.2.x 设置写入修复全部纳入；运行时代码与 1.5.17 相同，本版只升版本与文档。2D 纹理构建从
+单个 **2112 ms** 长任务改为按 40k 地形点分片让出，最长任务 **383 ms**；2D 线画布与旧版
+**逐字节相同**（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。真机
+（Electron 44 + RTX 4090）前台空闲 45 秒 **0 个 >80ms rAF 间隔**；交互期 91–227ms 尖峰
+属于应用/Electron 帧调度，不是主题代码。低速档“速度波动”已定位为整设备像素量化
+（12 px/s ≈ 18 步/秒），96 px/s 平滑，亚像素方案未纳入。源码在
+`D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 代码 HEAD = `bb34745`（`client.js`
+sha256 前缀 `962a8339`），版本 **1.6.0**，tgz 已放进 `local-build`，profile 已指向它，
+**重启 DSH 后生效**。`npm run test:ci` **826 项 ok / 0 失败**。
 
 ---
 
@@ -23,10 +25,10 @@ sha256 前缀 `962a8339`），版本 **1.5.17**，tgz 已放进 `local-build`，
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `bb34745`（`client.js` sha256 `962a8339…`；后续 docs 提交只动文档） |
-| 已安装版本 | **1.5.17**：sha256 `962a8339…`（分帧渲染 + 3D desynchronized + 0.2.x 设置写入修复；**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.17.tgz` |
-| 版本号 | `package.json` **1.5.17**（已升版） |
+| 分支 / HEAD | `main` / `bb34745`（运行时代码；1.6.0 发布提交只改版本/文档，`client.js` sha256 `962a8339…`） |
+| 已安装版本 | **1.6.0**：sha256 `962a8339…`（分帧渲染 + 3D desynchronized + 0.2.x 设置写入修复；**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.0.tgz` |
+| 版本号 | `package.json` **1.6.0**（已升版） |
 | 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
 | 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
@@ -43,10 +45,10 @@ sha256 前缀 `962a8339`），版本 **1.5.17**，tgz 已放进 `local-build`，
 
 ### 回滚方式
 - 代码：`git revert bb34745 249ec28 4bd7754`（测试修正 / 设置写入修复 / 分帧渲染）。
-- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.16.tgz`
-  或 `…-1.5.15-fix33.tgz`
-  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.16.tgz`），或
-  `undo_restore mode="id" snapshot_id="20261019-071525-b850"`（1.5.17 安装前），然后重启 DSH。
+- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.17.tgz`
+  或 `…-1.5.16.tgz` / `…-1.5.15-fix33.tgz`
+  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.17.tgz`），或
+  `undo_restore mode="id" snapshot_id="20261020-001608-de24"`（1.6.0 安装前），然后重启 DSH。
 
 ---
 

@@ -4,6 +4,28 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.6.0 — 分帧渲染稳定版（2026-10-20）
+
+1.6.0 是 1.5.16 / 1.5.17 的稳定版本：分帧纹理构建、3D desynchronized 播放、
+0.2.x 设置写入修复全部纳入；运行时代码与 1.5.17 相同，本版只升版本号与文档。
+
+**真机验证（DSH desktop，Electron 44，RTX 4090 Laptop + Intel UHD，1280×820 @1.5）：**
+
+- 前台空闲 45 秒：**0 个 >80ms 的 rAF 间隔**，每 2 秒 232–708 帧（约 115–175fps）；
+  GL 绘制的主线程成本 0.1–0.2ms，`builds` 恒定，分帧构建没有在后台反复触发。
+- 交互/流式输出期间仍可能出现 91–227ms 的 rAF 尖峰：这是 Electron/应用主线程的帧调度，
+  与主题的绘制代码无关（同一页面在 Edge 中更平滑）。主题没有能力消除应用自身的长任务。
+- “滚动速度波动”的根因是**整设备像素量化**：滚动位置为避免 1px 线条重采样被取整到设备像素，
+  12 px/s × 1.5 DPR ≈ 18 步/秒，肉眼会读成一快一慢；96 px/s 实测平滑，24 px/s 以上通常可接受。
+  亚像素平滑会牺牲 1px 线条的锐度，未纳入本版本。
+- 设置面板写入在 0.2.x 已恢复（fix35），速度/视角等选择重启后可保留。
+
+**包含的主要变更**：分帧构建（最长 2D 任务 2112 → 383ms，画布逐字节相同）、3D 播放
+主线程 1204 → 98.2ms/3s、`data-endfield-contour-ready` 可观测就绪标记、
+0.2.x 设置写入门槛修复、异步构建测试与测试夹具修正。
+
+**测试**：`npm run test:ci` **826 项 ok / 0 失败**。
+
 ## 未发布 — 地形重写 + 播放改走合成器滚动
 
 ### 设置写入被永久扣留：0.2.x 快照没有 mode 字段（fix35，1.5.17）
