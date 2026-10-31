@@ -4,6 +4,36 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.6.1 — 0.2.1-rc.5 背景冻结修复（2026-10-31）
+
+**症状**：升级到 DSH 0.2.1-rc.5 后，应用本身可用，但等高线背景停止滚动；
+主题镜像里 `contourAnim` 已经是 `"0"`。
+
+**根因**：帧看门狗在“持续慢帧”时不仅把 3D 降级（页内），还会执行
+`prefsSet(CONTOUR_ANIM_KEY, '0')`，把“停止动画”写进用户偏好。rc.5 的应用侧长任务
+（rAF 80–130ms）会被当成背景过载，于是背景被永久关闭，重启后仍然是静态。
+1.6.0 的 `settings-durable-mirror` 回归只截取了 `contourShedLoad` 的 3D 分支
+（遇到第一个 `\n    }` 就结束），动画分支的 `prefsSet` 从未被覆盖，所以测试一直绿。
+
+**修复**：
+
+- 看门狗只对 3D 做页内降级；平面路径是合成器 transform，慢帧属于应用而不是背景，
+  停止动画不会挽回什么，且**永不写偏好**。3D 降级仍是页内，重载/手动选 3D 会重试。
+- 修复帧循环的重复调度：3D 降级在帧中途调用 `contourApplySwitches()` 重新启动循环，
+  帧尾又无条件 `requestAnimationFrame`，于是同一帧有两个回调；实验室内实测 `dt`
+  交替 72ms/0ms，看门狗的净慢帧计数永远到不了阈值，同时每帧双份 blit。
+  帧尾现在只在 `contourRaf === null && contourWantsScroll()` 时续帧。
+
+**测试**：`settings-durable-mirror` 用 `grab()` 覆盖整个 `contourShedLoad`，明确断言
+不再出现 `prefsSet(CONTOUR_ANIM_KEY`；`contour-scroll-freeze` 新增“帧中途启动的循环
+不会被二次调度”回归。`npm run test:ci` 全绿（830 项 ok / 0 失败）。
+
+**真机**：0.2.1-rc.5 + 1.6.0 的主题镜像在 2026-10-30 06:15 被写成
+`contourAnim:"0"`，与看门狗的持久化路径一致；实验室在 rc.5 上用 70ms/帧的忙循环
+复现了 3D 页内降级；旧代码的动画分支在降级后确实有写 0 的代码路径（双重调度
+缺陷在实验室里掩盖了它的触发，已一并修复）。安装 1.6.1 后需要把“等高线滚动”重新
+打开一次（旧值已经是 0），之后不会再被看门狗改写。
+
 ## 1.6.0 — 分帧渲染稳定版（2026-10-20）
 
 1.6.0 是 1.5.16 / 1.5.17 的稳定版本：分帧纹理构建、3D desynchronized 播放、

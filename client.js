@@ -1338,8 +1338,12 @@ function apply(ctx) {
     /* Frame-budget watchdog. The background is decoration: it must never be the
        reason the app stops responding. A frame that takes longer than
        CONTOUR_WATCH_DT counts +1, a fast one -1, and CONTOUR_WATCH_NET net slow frames
-       in a row shed load (3D first, then animation). Net counting means a single drag
-       or a GC pause cannot trigger it, while a genuinely overloaded GPU will. */
+       in a row shed the 3D view for this page load. Only 3D is shed: the flat sheet
+       moves by a compositor transform, so a slow frame there belongs to the app, not
+       to the background -- and stopping the animation must never rewrite the user's
+       stored preference (the 0.2.1-rc.5 "frozen sheet" bug). Net counting means a
+       single drag or a GC pause cannot trigger it, while a genuinely overloaded GPU
+       will. */
     const CONTOUR_WATCH_DT = 0.05
     const CONTOUR_WATCH_NET = 40
     /* The scroll surface holds the viewport plus this many DEVICE pixels of slack on
@@ -4879,31 +4883,29 @@ function apply(ctx) {
       return ((next % period) + period) % period
     }
 
-    /* Shed load, for the rest of this page load. 3D goes first because it is the
-       expensive path (a full-screen march per frame); if the flat path is still too
-       slow, the animation stops and the sheet stays as a still picture. Both are
-       preference writes, so the settings UI shows what happened. */
+    /* Shed load, for the rest of this page load. 3D is the only path shed: it is a
+       full-screen march per frame, while the flat path moves by a compositor
+       transform. The shed is page-local, so reloading (or picking 3D again) retries;
+       the stored preference is never written. */
     const contourShedLoad = (why) => {
-      if (isContourView3D()) {
-        /* Page-local ONLY (see contourViewShed): shedding is a remedy for this
-           page load, never a rewrite of the user's view preference -- a single slow
-           frame used to flip the stored setting to flat for every later launch. */
-        contourViewShed = true
-        contourSwitchSig = ''
-        contourApplySwitches()
-        dbg('frame watchdog: 3D disabled for this page load (' + why + ')')
-        contourBlit()
-        return
-      }
-      if (isContourAnimOn()) {
-        prefsSet(CONTOUR_ANIM_KEY, '0')
-        contourSwitchSig = ''
-        contourApplySwitches()
-        dbg('frame watchdog: animation stopped (' + why + ')')
-      }
+      if (!isContourView3D()) return
+      /* Page-local ONLY (see contourViewShed): shedding is a remedy for this
+         page load, never a rewrite of the user's view preference -- a single slow
+         frame used to flip the stored setting to flat for every later launch. */
+      contourViewShed = true
+      contourSwitchSig = ''
+      contourApplySwitches()
+      dbg('frame watchdog: 3D disabled for this page load (' + why + ')')
+      contourBlit()
     }
 
     const contourWatchFrame = (dt) => {
+      /* The flat path moves the sheet with a compositor transform, so a slow frame
+         there is the app's, not the background's: stopping the animation buys
+         nothing back, and rewriting the stored preference for it was the bug that
+         left the desktop sheet frozen after a busy 0.2.1-rc.5 session. 3D is the
+         only path with meaningful per-frame GPU work, so it is the only one shed. */
+      if (!isContourView3D()) { contourSlowNet = 0; return }
       if (dt > CONTOUR_WATCH_DT) contourSlowNet += 1
       else if (contourSlowNet > 0) contourSlowNet -= 1
       if (contourSlowNet < CONTOUR_WATCH_NET) return
@@ -4950,7 +4952,14 @@ function apply(ctx) {
          rate is the frame rate (60, 120, whatever), because the work per frame on the
          flat path is one transform write. */
       contourBlit()
-      if (typeof requestAnimationFrame === 'function') contourRaf = requestAnimationFrame(contourFrame)
+      /* A frame that started the loop again mid-flight (the shed reconciles the
+         layer through contourApplySwitches) already owns the next slot. Assigning
+         unconditionally here scheduled a SECOND loop on top of it: two callbacks
+         per frame, two blits, and a watchdog that saw dt alternate 72ms/0ms so its
+         net slow-frame count could never reach the threshold. */
+      if (typeof requestAnimationFrame === 'function' && contourRaf === null && contourWantsScroll()) {
+        contourRaf = requestAnimationFrame(contourFrame)
+      }
     }
 
     const contourStartLoop = () => {

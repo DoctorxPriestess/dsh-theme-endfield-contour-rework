@@ -7,8 +7,9 @@
  * settings (written when the transport did work) stayed. Two independent defects
  * could produce that, and both are pinned here:
  *
- *   1. the frame watchdog PERSISTED its page-local "3D is too slow" downgrade, so
- *      one slow frame rewrote the user's view for every later launch;
+ *   1. the frame watchdog PERSISTED its page-local downgrades (the 3D view, and
+ *      later the animation switch), so one busy stretch rewrote the user's
+ *      preferences for every later launch;
  *   2. a namespace field whose host value is the shipped default is
  *      indistinguishable from "this write was dropped", so the client needs a
  *      durable store of its own to fall back to.
@@ -75,17 +76,23 @@ function grab(name) {
 
 /* ---------- 2. the shed is page-local and never persisted ---------- */
 {
-  const at = SRC.indexOf('const contourShedLoad = ')
-  const seg = SRC.slice(at, SRC.indexOf('\n    }', at) + 6)
-  check('contourShedLoad exists', at > 0)
+  /* grab() balances braces, so this covers the WHOLE function.  The old slice
+     stopped at the first "\n    }" (the end of the 3D branch), which is exactly
+     how the animation branch kept its prefsSet while this test stayed green. */
+  const seg = grab('contourShedLoad')
+  check('contourShedLoad exists', seg.length > 0)
   check('the shed no longer writes the view preference', seg.indexOf('prefsSet(CONTOUR_VIEW_KEY') < 0,
     seg.indexOf('prefsSet(CONTOUR_VIEW_KEY') < 0 ? 'no prefsSet(CONTOUR_VIEW_KEY...)' : 'STILL PERSISTS THE VIEW')
+  check('the shed no longer writes the animation preference', seg.indexOf('prefsSet(CONTOUR_ANIM_KEY') < 0,
+    seg.indexOf('prefsSet(CONTOUR_ANIM_KEY') < 0 ? 'no prefsSet(CONTOUR_ANIM_KEY...)' : 'STILL PERSISTS THE ANIMATION')
   check('the shed sets the page-local flag instead', /contourViewShed = true/.test(seg))
   check('the shed still reconciles the layer', /contourApplySwitches\(\)/.test(seg))
   check('isContourView3D honours the page-local shed',
     /const isContourView3D = \(\) => !contourViewShed && prefsGet\(CONTOUR_VIEW_KEY\) === '1'/.test(SRC))
   check('a manual pick clears the shed',
     /contourViewShed = false\n\s*prefsSet\(CONTOUR_VIEW_KEY/.test(SRC))
+  const watch = grab('contourWatchFrame')
+  check('the watchdog only tracks the 3D path', /!isContourView3D\(\)/.test(watch) && watch.indexOf('prefsSet') < 0)
 }
 
 /* ---------- 3. every write is mirrored, and the mirror is loaded at boot ---------- */

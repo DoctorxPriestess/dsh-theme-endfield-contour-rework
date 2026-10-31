@@ -7,16 +7,16 @@
 
 ## 1. 一句话状态
 
-**1.6.0 已发布并装入 desktop profile**：分帧纹理构建、3D desynchronized 播放、
-0.2.x 设置写入修复全部纳入；运行时代码与 1.5.17 相同，本版只升版本与文档。2D 纹理构建从
-单个 **2112 ms** 长任务改为按 40k 地形点分片让出，最长任务 **383 ms**；2D 线画布与旧版
-**逐字节相同**（0 / 5,401,004 像素差）；3D 播放主线程 1204 → **98.2 ms / 3 s**。真机
-（Electron 44 + RTX 4090）前台空闲 45 秒 **0 个 >80ms rAF 间隔**；交互期 91–227ms 尖峰
-属于应用/Electron 帧调度，不是主题代码。低速档“速度波动”已定位为整设备像素量化
-（12 px/s ≈ 18 步/秒），96 px/s 平滑，亚像素方案未纳入。源码在
-`D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 代码 HEAD = `bb34745`（`client.js`
-sha256 前缀 `962a8339`），版本 **1.6.0**，tgz 已放进 `local-build`，profile 已指向它，
-**重启 DSH 后生效**。`npm run test:ci` **826 项 ok / 0 失败**。
+**1.6.1 已发布并装入 desktop profile（待重启生效）**：修复 DSH 0.2.1-rc.5 上
+“应用可用、等高线背景停止滚动”的回归。根因是帧看门狗在持续慢帧时不仅页内降级 3D，还执行
+`prefsSet(CONTOUR_ANIM_KEY, '0')`，把动画偏好永久写死；rc.5 的应用侧长任务触发后，背景
+每次启动都是静态。1.6.1 只对 3D 做页内降级，**永不写动画偏好**；同时修复 3D 降级在帧中途
+重启循环造成的**双 rAF 回调**（每帧双份 blit，且看门狗净慢帧计数被交替的 dt=0/72ms 抵消）。
+真机镜像与宿主补丁的 `contourAnim` 已从 0 恢复为 1（安装前有快照与备份）。1.6.0 的分帧
+渲染/3D 播放性能结论不变：2D 构建最长任务 383ms、线画布逐字节相同、3D 播放主线程
+98.2ms/3s。源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 代码提交见
+`git log -1`（`client.js` sha256 前缀 `e7c9af43`），版本 **1.6.1**，tgz 在 `local-build`，
+profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok / 0 失败**。
 
 ---
 
@@ -25,16 +25,18 @@ sha256 前缀 `962a8339`），版本 **1.6.0**，tgz 已放进 `local-build`，p
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / `bb34745`（运行时代码；1.6.0 发布提交只改版本/文档，`client.js` sha256 `962a8339…`） |
-| 已安装版本 | **1.6.0**：sha256 `962a8339…`（分帧渲染 + 3D desynchronized + 0.2.x 设置写入修复；**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.0.tgz` |
-| 版本号 | `package.json` **1.6.0**（已升版） |
+| 分支 / HEAD | `main` / 见 `git log -1`（1.6.1 修复提交；`client.js` sha256 `e7c9af43…`） |
+| 已安装版本 | **1.6.1**：sha256 `e7c9af43…`（看门狗只降级 3D + 永不写动画偏好 + 双循环修复；**需重启 DSH 才生效**） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.1.tgz` |
+| 版本号 | `package.json` **1.6.1**（已升版） |
+| 1.6.1 安装前快照 | `20261031-145910-3162`；文件备份 `…\.dsh\backups\theme-1.6.1-20261031-145910\` |
+| 当前动画设置 | `contourAnim: "1"`（镜像与 `cordis.patch.yml` 均已恢复；重启后生效） |
 | 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
 | 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |
 | 备用实验 | 分支 `wip/seam-torus`（ping-pong 相机方案，**已否决**，见 §6.4） |
 
 ### 测试状态（FACT，本轮实测）
-- `npm run test:ci`：**826 项 ok / 0 失败**（完整套件，含浏览器与设置集成）。
+- `npm run test:ci`：**830 项 ok / 0 失败**（完整套件，含浏览器与设置集成；1.6.1 新增 2 项回归）。
 - `npm run test:node`：**525 ok / 0 失败**。
 - `npm run test:browser`：通过（含新增 `contour-async-build.test.js`：不设同步钩子，
   等 `data-endfield-contour-ready="1"`，并断言就绪前线画布 0 像素）。
@@ -43,12 +45,23 @@ sha256 前缀 `962a8339`），版本 **1.6.0**，tgz 已放进 `local-build`，p
 - 像素 A/B（同一源码、同步 vs 分片、固定种子）：线画布 PNG **0 / 5,401,004 像素差**，
   hash 1617012213 / ink 407211 两边相同。
 
+### 1.6.1 修复（FACT）
+- **根因**：`contourShedLoad` 的动画分支执行 `prefsSet(CONTOUR_ANIM_KEY, '0')`。rc.5 的
+  应用侧慢帧让看门狗净慢帧计数达标，于是动画被永久关闭；旧的 `settings-durable-mirror`
+  只截取 3D 分支，未覆盖动画分支，测试一直是绿的。
+- **修复**：看门狗只降级 3D（页内），平面路径不写偏好；帧尾仅在 `contourRaf === null &&
+  contourWantsScroll()` 时续帧，避免 3D 降级在帧中途启动循环后又被帧尾二次调度。
+- **证据**：1.6.0 的镜像在 2026-10-30 06:15 被写成 `contourAnim:"0"`；实验室内
+  70ms/帧忙循环在 rc.5 上复现 3D 页内降级；旧代码的动画分支代码路径明确。
+- **回归**：`settings-durable-mirror` 用 `grab()` 覆盖完整 `contourShedLoad`；
+  `contour-scroll-freeze` 新增“帧中途启动循环不被二次调度”。
+
 ### 回滚方式
-- 代码：`git revert bb34745 249ec28 4bd7754`（测试修正 / 设置写入修复 / 分帧渲染）。
-- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.5.17.tgz`
-  或 `…-1.5.16.tgz` / `…-1.5.15-fix33.tgz`
-  （`cd ~/.dsh/profiles/desktop && pnpm add file:…-1.5.17.tgz`），或
-  `undo_restore mode="id" snapshot_id="20261020-001608-de24"`（1.6.0 安装前），然后重启 DSH。
+- 代码：`git revert <1.6.1 修复提交>`（看门狗动画持久化 + 双循环）。
+- 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.0.tgz`，
+  或 `undo_restore mode="id" snapshot_id="20261031-145910-3162"`（1.6.1 安装前），然后重启 DSH。
+- 设置回滚：把 `…\.dsh\backups\theme-1.6.1-20261031-145910\settings.json` 与
+  `cordis.patch.yml` 复制回原位（`contourAnim` 会回到 0），然后重启。
 
 ---
 

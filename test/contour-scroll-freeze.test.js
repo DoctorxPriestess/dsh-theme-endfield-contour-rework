@@ -105,6 +105,7 @@ let contourDpr = 1
 let contourDisableAnim = false
 let loopStops = 0
 let loopStarts = 0
+let startOnBlit = false
 let watchCalls = []
 let blits = []
 const isEnabled = () => true
@@ -115,7 +116,10 @@ const contourWantsScroll = () => isContourAnimOn()
 const contourWatchFrame = (dt) => { watchCalls.push(dt) }
 const contourStopLoop = () => { loopStops += 1; contourRaf = null }
 const contourStartLoop = () => { if (contourRaf === null && contourWantsScroll()) { loopStarts += 1; contourRaf = 99 } }
-const contourBlit = () => { blits.push({ x: contourOffsetX, y: contourOffsetY, at: contourGlLastDrawAt }) }
+const contourBlit = () => {
+  blits.push({ x: contourOffsetX, y: contourOffsetY, at: contourGlLastDrawAt })
+  if (startOnBlit) contourStartLoop()
+}
 const contourApplySwitches = () => {}
 const contourSizeTo = () => false
 const contourScheduleRebuildCheck = () => {}
@@ -148,6 +152,7 @@ return {
   setAnim: (v) => { contourDisableAnim = v === false },
   counters: () => ({ loopStops, loopStarts, watch: watchCalls.slice(), blits: blits.slice() }),
   resetCounters: () => { loopStops = 0; loopStarts = 0; watchCalls = []; blits = [] },
+  setStartOnBlit: (v) => { startOnBlit = v === true },
   setTime: (v) => { clockMs = v },
 }
 `)()
@@ -237,6 +242,25 @@ if (frozen.watch.length === 1 && frozen.watch[0] === 0) {
   ok('a frozen frame is not counted by the slow-frame watchdog (a scroll must not disable 3D)')
 } else {
   fail('a frozen frame fed dt=' + JSON.stringify(frozen.watch) + ' to the watchdog')
+}
+
+/* A shed reconciles the layer mid-frame and may start the loop there. The frame
+   tail must keep that slot instead of scheduling a second callback on top of it:
+   two loops double the blits and feed the watchdog alternating dt=72/0 samples,
+   so its net slow-frame count never reaches the threshold. */
+api.resetCounters()
+api.setPaused(false)
+api.setTime(5000)
+api.frame()
+api.resetCounters()
+api.setStartOnBlit(true)
+api.frame()
+api.setStartOnBlit(false)
+const midLoop = api.counters()
+if (midLoop.loopStarts === 1 && api.raf() === 99) {
+  ok('a loop started mid-frame is not scheduled a second time')
+} else {
+  fail('a mid-frame loop start scheduled a second loop (starts=' + midLoop.loopStarts + ', raf=' + api.raf() + ')')
 }
 
 /* ------------------------------- 3. the 3D gate: 60Hz ceiling, then the floor ---- */
