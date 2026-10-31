@@ -14,8 +14,8 @@
 重启循环造成的**双 rAF 回调**（每帧双份 blit，且看门狗净慢帧计数被交替的 dt=0/72ms 抵消）。
 真机镜像与宿主补丁的 `contourAnim` 已从 0 恢复为 1（安装前有快照与备份）。1.6.0 的分帧
 渲染/3D 播放性能结论不变：2D 构建最长任务 383ms、线画布逐字节相同、3D 播放主线程
-98.2ms/3s。源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 代码提交见
-`git log -1`（`client.js` sha256 前缀 `e7c9af43`），版本 **1.6.1**，tgz 在 `local-build`，
+98.2ms/3s。源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 修复提交
+`bb4d4c0`（`client.js` sha256 前缀 `e7c9af43`），版本 **1.6.1**，tgz 在 `local-build`，
 profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok / 0 失败**。
 
 ---
@@ -25,7 +25,7 @@ profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / HEAD | `main` / 见 `git log -1`（1.6.1 修复提交；`client.js` sha256 `e7c9af43…`） |
+| 分支 / 修复提交 | `main` / `bb4d4c0`（1.6.1；`client.js` sha256 `e7c9af43…`） |
 | 已安装版本 | **1.6.1**：sha256 `e7c9af43…`（看门狗只降级 3D + 永不写动画偏好 + 双循环修复；**需重启 DSH 才生效**） |
 | 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.1.tgz` |
 | 版本号 | `package.json` **1.6.1**（已升版） |
@@ -57,7 +57,7 @@ profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok
   `contour-scroll-freeze` 新增“帧中途启动循环不被二次调度”。
 
 ### 回滚方式
-- 代码：`git revert <1.6.1 修复提交>`（看门狗动画持久化 + 双循环）。
+- 代码：`git revert bb4d4c0`（看门狗动画持久化 + 双循环）。
 - 安装回滚：重装 `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.0.tgz`，
   或 `undo_restore mode="id" snapshot_id="20261031-145910-3162"`（1.6.1 安装前），然后重启 DSH。
 - 设置回滚：把 `…\.dsh\backups\theme-1.6.1-20261031-145910\settings.json` 与
