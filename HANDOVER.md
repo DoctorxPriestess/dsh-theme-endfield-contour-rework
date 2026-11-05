@@ -7,16 +7,14 @@
 
 ## 1. 一句话状态
 
-**1.6.1 已发布并装入 desktop profile（待重启生效）**：修复 DSH 0.2.1-rc.5 上
-“应用可用、等高线背景停止滚动”的回归。根因是帧看门狗在持续慢帧时不仅页内降级 3D，还执行
-`prefsSet(CONTOUR_ANIM_KEY, '0')`，把动画偏好永久写死；rc.5 的应用侧长任务触发后，背景
-每次启动都是静态。1.6.1 只对 3D 做页内降级，**永不写动画偏好**；同时修复 3D 降级在帧中途
-重启循环造成的**双 rAF 回调**（每帧双份 blit，且看门狗净慢帧计数被交替的 dt=0/72ms 抵消）。
-真机镜像与宿主补丁的 `contourAnim` 已从 0 恢复为 1（安装前有快照与备份）。1.6.0 的分帧
-渲染/3D 播放性能结论不变：2D 构建最长任务 383ms、线画布逐字节相同、3D 播放主线程
-98.2ms/3s。源码在 `D:\AI Misc\dsh-theme-endfield-contour-rework`，`main` 修复提交
-`bb4d4c0`（`client.js` sha256 前缀 `e7c9af43`），版本 **1.6.1**，tgz 在 `local-build`，
-profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok / 0 失败**。
+**1.7.0 已打包，待装入 desktop profile 并重启生效**：2D 与 3D 等高线都改为
+Worker + OffscreenCanvas 离主线程渲染，主线程忙时背景仍然连续；2D/3D 各自保留主线程回退。
+固定种子、动画关闭的像素 A/B 中，2D 和 3D 的 Worker 截图与主线程截图 **SHA-256 完全相同**
+（1920×1233）。主线程忙循环 1.5s 时 3D Worker 帧数 6 → 114（+108），无异常。关键修复是
+动画关闭时 `run:false` 在首帧前停表导致的 3D Worker 空白：停表补一帧；Worker 的 WebGL
+上下文不启用 `desynchronized`（Chromium 不呈现该 OffscreenCanvas 路径）。源码在
+`D:\AI Misc\dsh-theme-endfield-contour-rework`，版本 **1.7.0**，`npm run test:ci`
+**850 项 ok / 0 失败**。1.6.1 的冻结修复仍保留（看门狗永不写 `contourAnim`）。
 
 ---
 
@@ -25,11 +23,11 @@ profile 已指向它，**重启 DSH 后生效**。`npm run test:ci` **830 项 ok
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / 修复提交 | `main` / `bb4d4c0`（1.6.1；`client.js` sha256 `e7c9af43…`） |
-| 已安装版本 | **1.6.1**：sha256 `e7c9af43…`（看门狗只降级 3D + 永不写动画偏好 + 双循环修复；**需重启 DSH 才生效**） |
-| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.6.1.tgz` |
-| 版本号 | `package.json` **1.6.1**（已升版） |
-| 1.6.1 安装前快照 | `20261031-145910-3162`；文件备份 `…\.dsh\backups\theme-1.6.1-20261031-145910\` |
+| 分支 / 修复提交 | `feat/offscreen-render` / 1.7.0 离主线程渲染（`main` 待合并） |
+| 已安装版本 | **1.7.0**（打包/安装后需重启 DSH 才生效；2D/3D Worker + 主线程回退） |
+| 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.7.0.tgz` |
+| 版本号 | `package.json` **1.7.0**（已升版） |
+| 1.7.0 安装前快照 | 安装前用 `undo_snapshot` 生成（见 §12） |
 | 当前动画设置 | `contourAnim: "1"`（镜像与 `cordis.patch.yml` 均已恢复；重启后生效） |
 | 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
 | 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |

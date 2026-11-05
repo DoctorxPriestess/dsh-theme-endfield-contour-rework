@@ -384,9 +384,9 @@ const wrap = (x) => ((x % 1) + 1) % 1
   if (ctxCalls.length < 2) fail('expected the probe and the layer contexts, found ' + ctxCalls.length)
   else if (ctxCalls.some((c) => !/preserveDrawingBuffer: true/.test(c))) {
     fail('a WebGL context is created without preserveDrawingBuffer: the last frame can be lost on a re-composite')
-  } else if (ctxCalls.some((c) => !/desynchronized: true/.test(c))) {
-    fail('a WebGL context is missing desynchronized: 3D playback pays the blocking commit path again')
-  } else ok('both WebGL contexts keep the last frame and use the low-latency path (preserveDrawingBuffer + desynchronized)')
+  } else if (ctxCalls.filter((c) => /desynchronized: true/.test(c)).length < 2) {
+    fail('the main-thread 3D contexts lost desynchronized: 3D playback pays the blocking commit path again')
+  } else ok('all WebGL contexts keep the last frame; the two main-thread contexts use the low-latency path (desynchronized). The worker context omits it deliberately: Chromium never presents a desynchronized OffscreenCanvas, so the 3D worker would render into an invisible buffer.')
 
   /* ...and off in the flat view: the uniform gate is what keeps 2D byte-identical. */
   const gate = SRC.match(/const hasHoles = ([^\n]*)/)

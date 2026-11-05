@@ -4,6 +4,35 @@ This file records what **this fork** changed relative to upstream
 [`dsh-theme-endfield`](https://github.com/ymh0000123/dsh-theme-endfield).
 Upstream's own history is not reproduced here.
 
+## 1.7.0 — 2D/3D 等高线离主线程渲染（2026-11-06）
+
+**目标**：把 2D 与 3D 的等高线绘制从主线程移走，主线程忙时背景仍然连续滚动；视觉必须与
+主线程路径一致，并保留完整的主线程回退。
+
+**实现**：
+
+- 同一个 Blob Worker 同时服务 2D（OffscreenCanvas 2D）和 3D（Worker 内 WebGL）。主线程只
+  发送尺寸、速度、暂停状态、贴图/高度图与 uniform；两种模式各有独立失败标记与回退。
+- 2D：Worker 按周期取模、整数设备像素平铺、关闭平滑，与主线程 2D 的接缝规则相同。
+- 3D：Worker 内编译原 shader（有/无 derivatives 两份），相机、周期取模、高度图与空腔参数
+  与主线程一致；使用自己的 `setTimeout(16)` 时钟，不依赖 rAF。
+- 3D 的贴图上传改为 `getImageData` 原始 RGBA + 高度图字节，避免 ImageBitmap 在
+  Worker 中的方向/预乘差异；每次贴图重建只传一次。
+- **关键修复**：动画关闭时 `run:false` 可能在首帧前就停掉定时器，导致 3D Worker 只有透明
+  画布；停表时补一帧重绘，静态模式现在正常显示。
+- Worker 的 WebGL 上下文**不启用** `desynchronized`：实测 Chromium 不呈现
+  desynchronized 的 OffscreenCanvas（画面永远空白）；主线程两个上下文仍保留
+  `preserveDrawingBuffer + desynchronized`。
+
+**验证**：
+
+- 固定种子、动画关闭的像素 A/B：2D Worker 与主线程截图 **SHA-256 完全相同**；
+  3D Worker 与主线程截图 **SHA-256 完全相同**（1920×1233）。
+- 主线程忙循环 1.5s 时，3D Worker 帧数 6 → 114（+108），无异常、无回退；2D 同样由
+  Worker 接管。
+- `npm run test:ci`：**850 项 ok / 0 失败**（新增 3D Worker 回归；`contour-3d` 的
+  desynchronized 断言改为只要求主线程两个上下文）。
+
 ## 1.6.1 — 0.2.1-rc.5 背景冻结修复（2026-10-31）
 
 **症状**：升级到 DSH 0.2.1-rc.5 后，应用本身可用，但等高线背景停止滚动；

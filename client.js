@@ -3534,7 +3534,7 @@ function apply(ctx) {
       if (contourTex.ready === false) return
       /* The worker owns the flat layer: the main thread must not paint a second
          copy (or hide the worker's canvas with a stale surface). */
-      if (typeof contourWorker !== 'undefined' && contourWorker !== null && !isContourView3D()) return
+      if (typeof contourWorker !== 'undefined' && contourWorker !== null) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
          sheet. When the GPU says no, this returns false and the flat path below
          draws instead -- the sheet is always on screen, one way or the other. */
@@ -5009,6 +5009,30 @@ function apply(ctx) {
       let last = 0
       let timer = null
       let frames = 0
+      let mode = '2d'
+      let gl = null
+      let prog = null
+      let quad = null
+      let sheet = null
+      let height = null
+      let u = null
+      let uniforms = {}
+      let sheetW = 1
+      let sheetH = 1
+      let viewW = 1
+      let viewH = 1
+      let lastCamX = null
+      let lastCamY = null
+      let lastDrawAt = 0
+      /* Never draw a half-uploaded frame: a transparent canvas over the page reads
+         as a flash, which is exactly what the seamless requirement forbids. */
+      let sheetReady = false
+      let heightReady = false
+      let uniformsReady = false
+
+      const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? performance.now() : Date.now()
+      const fail = (why) => self.postMessage({ type: 'failed', why: why })
 
       const paint = () => {
         if (ctx === null || bmp === null) return
@@ -5033,10 +5057,145 @@ function apply(ctx) {
         }
       }
 
+      const compile = (type, src) => {
+        const sh = gl.createShader(type)
+        if (!sh) return null
+        gl.shaderSource(sh, src)
+        gl.compileShader(sh)
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return null
+        return sh
+      }
+
+      const init3d = (m) => {
+        canvas.width = w
+        canvas.height = h
+        try {
+          gl = canvas.getContext('webgl', {
+            antialias: false, depth: false, alpha: true, premultipliedAlpha: true,
+            preserveDrawingBuffer: true,
+          })
+        } catch (err) { gl = null }
+        if (gl === null) { fail('webgl context refused'); return false }
+        let renderer = ''
+        try {
+          const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+          renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '') : ''
+        } catch (err) { renderer = '' }
+        if (renderer !== '' && new RegExp(m.soft, 'i').test(renderer)) {
+          fail('software renderer: ' + renderer)
+          return false
+        }
+        const vs = compile(gl.VERTEX_SHADER, m.vert)
+        let deriv = false
+        try { deriv = !!gl.getExtension('OES_standard_derivatives') } catch (err) { deriv = false }
+        let fs = deriv ? compile(gl.FRAGMENT_SHADER, m.fragAA) : null
+        if (fs === null) fs = compile(gl.FRAGMENT_SHADER, m.frag)
+        if (!vs || !fs) { fail('shader compile failed'); return false }
+        prog = gl.createProgram()
+        if (!prog) { fail('program'); return false }
+        gl.attachShader(prog, vs)
+        gl.attachShader(prog, fs)
+        gl.linkProgram(prog)
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { fail('shader link failed'); return false }
+        const makeTexture = (wrap) => {
+          const t = gl.createTexture()
+          gl.bindTexture(gl.TEXTURE_2D, t)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+          return t
+        }
+        sheet = makeTexture(gl.CLAMP_TO_EDGE)
+        height = makeTexture(gl.REPEAT)
+        quad = gl.createBuffer()
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
+        u = {
+          aPos: gl.getAttribLocation(prog, 'a_pos'),
+          sheet: gl.getUniformLocation(prog, 'u_sheet'),
+          height: gl.getUniformLocation(prog, 'u_height'),
+          sheetSize: gl.getUniformLocation(prog, 'u_sheetSize'),
+          viewSize: gl.getUniformLocation(prog, 'u_viewSize'),
+          center: gl.getUniformLocation(prog, 'u_center'),
+          cam: gl.getUniformLocation(prog, 'u_cam'),
+          depth: gl.getUniformLocation(prog, 'u_depth'),
+          ref: gl.getUniformLocation(prog, 'u_ref'),
+          rise: gl.getUniformLocation(prog, 'u_rise'),
+          steps: gl.getUniformLocation(prog, 'u_steps'),
+          holeOn: gl.getUniformLocation(prog, 'u_holeOn'),
+          diagWrap: gl.getUniformLocation(prog, 'u_diagWrap'),
+          holeFeather: gl.getUniformLocation(prog, 'u_holeFeather'),
+          holeHi: gl.getUniformLocation(prog, 'u_holeHi'),
+          drop: gl.getUniformLocation(prog, 'u_drop'),
+          deepShift: gl.getUniformLocation(prog, 'u_deepShift'),
+          deepScale: gl.getUniformLocation(prog, 'u_deepScale'),
+        }
+        return true
+      }
+
+      const draw3d = (now) => {
+        if (gl === null || prog === null || u === null || sheet === null || height === null) return
+        if (!sheetReady || !heightReady || !uniformsReady) return
+        const dt = last > 0 ? Math.min(0.1, (now - last) / 1000) : 0
+        last = now
+        if (!paused) {
+          ox = (ox + vx * dt) % tw
+          oy = (oy + vy * dt) % th
+          if (ox < 0) ox += tw
+          if (oy < 0) oy += th
+        }
+        const sx = Math.floor(ox)
+        const sy = Math.floor(oy)
+        if (lastCamX === sx && lastCamY === sy && now - lastDrawAt < 200) return
+        lastCamX = sx
+        lastCamY = sy
+        lastDrawAt = now
+        gl.viewport(0, 0, w, h)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.useProgram(prog)
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+        gl.enableVertexAttribArray(u.aPos)
+        gl.vertexAttribPointer(u.aPos, 2, gl.FLOAT, false, 0, 0)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, sheet)
+        gl.uniform1i(u.sheet, 0)
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, height)
+        gl.uniform1i(u.height, 1)
+        gl.uniform2f(u.sheetSize, sheetW, sheetH)
+        gl.uniform2f(u.viewSize, viewW, viewH)
+        gl.uniform2f(u.center, viewW * 0.5, viewH * 0.5)
+        gl.uniform2f(u.cam, sx, sy)
+        if (u.diagWrap !== null) gl.uniform1f(u.diagWrap, 0)
+        gl.uniform1f(u.depth, uniforms.depth)
+        gl.uniform1f(u.ref, uniforms.ref)
+        gl.uniform1f(u.rise, uniforms.rise)
+        gl.uniform1f(u.steps, uniforms.steps)
+        gl.uniform1f(u.holeOn, uniforms.holeOn)
+        gl.uniform1f(u.holeHi, uniforms.holeHi)
+        gl.uniform1f(u.holeFeather, uniforms.holeFeather)
+        gl.uniform1f(u.drop, uniforms.drop)
+        gl.uniform1f(u.deepScale, uniforms.deepScale)
+        gl.uniform2f(u.deepShift, uniforms.deepShiftX, uniforms.deepShiftY)
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      }
+
+      /* With animation off the tick loop is not running, so uploads must paint the
+         first frame themselves; otherwise a static 3D view stays transparent. */
+      const redraw = () => {
+        if (canvas === null) return
+        if (mode === '3d') draw3d(nowMs())
+        else paint()
+      }
+
       const tick = () => {
         timer = null
         if (!running) return
-        paint()
+        const now = nowMs()
+        if (mode === '3d') draw3d(now)
+        else paint()
         frames += 1
         timer = setTimeout(tick, 16)
       }
@@ -5047,14 +5206,23 @@ function apply(ctx) {
           canvas = m.canvas
           w = m.w
           h = m.h
+          viewW = m.viewW || w
+          viewH = m.viewH || h
           tw = m.tw
           th = m.th
-          canvas.width = w
-          canvas.height = h
-          ctx = canvas.getContext('2d', { alpha: true })
-          if (ctx === null) {
-            self.postMessage({ type: 'failed', why: '2d context' })
-            return
+          if (typeof m.ox === 'number' && isFinite(m.ox)) ox = m.ox
+          if (typeof m.oy === 'number' && isFinite(m.oy)) oy = m.oy
+          mode = m.mode === '3d' ? '3d' : '2d'
+          if (mode === '3d') {
+            if (!init3d(m)) { running = false; return }
+          } else {
+            canvas.width = w
+            canvas.height = h
+            ctx = canvas.getContext('2d', { alpha: true })
+            if (ctx === null) {
+              fail('2d context')
+              return
+            }
           }
           running = true
           last = 0
@@ -5062,19 +5230,64 @@ function apply(ctx) {
           return
         }
         if (m.type === 'bitmap') {
-          bmp = m.bitmap
           tw = m.tw
           th = m.th
+          sheetW = m.tw
+          sheetH = m.th
+          if (mode === '3d' && gl !== null && sheet !== null) {
+            gl.bindTexture(gl.TEXTURE_2D, sheet)
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+            if (m.pixels) {
+              gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, m.pixels.w, m.pixels.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(m.pixels.bytes))
+            } else {
+              gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, m.bitmap)
+              try { m.bitmap.close() } catch (err) {}
+            }
+            sheetReady = true
+            lastCamX = null
+            /* With animation off nothing else will schedule the first frame. */
+            if (!running) redraw()
+          } else {
+            if (bmp !== null && bmp !== m.bitmap) {
+              try { bmp.close() } catch (err) {}
+            }
+            bmp = m.bitmap
+            if (!running) redraw()
+          }
+          return
+        }
+        if (m.type === 'height') {
+          if (mode === '3d' && gl !== null && height !== null) {
+            gl.bindTexture(gl.TEXTURE_2D, height)
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, m.w, m.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(m.bytes))
+            heightReady = true
+            lastCamX = null
+            if (!running) redraw()
+          }
+          return
+        }
+        if (m.type === 'uniforms') {
+          uniforms = m.uniforms || {}
+          uniformsReady = true
+          lastCamX = null
+          if (!running) redraw()
           return
         }
         if (m.type === 'size') {
           w = m.w
           h = m.h
+          viewW = m.viewW || w
+          viewH = m.viewH || h
           if (canvas !== null) {
             canvas.width = w
             canvas.height = h
           }
+          if (mode === '3d') lastCamX = null
           last = 0
+          if (!running) redraw()
           return
         }
         if (m.type === 'motion') {
@@ -5098,6 +5311,9 @@ function apply(ctx) {
               clearTimeout(timer)
               timer = null
             }
+            /* The textures may all have arrived while the initial tick was still
+               "running"; stopping without one last pass would leave an empty canvas. */
+            redraw()
           }
           return
         }
@@ -5111,7 +5327,7 @@ function apply(ctx) {
           return
         }
         if (m.type === 'stats') {
-          self.postMessage({ type: 'stats', frames: frames, ox: ox, oy: oy, paused: paused, running: running, tw: tw, th: th })
+          self.postMessage({ type: 'stats', mode: mode, frames: frames, ox: ox, oy: oy, paused: paused, running: running, tw: tw, th: th, gl: gl !== null })
           return
         }
         if (m.type === 'stop') {
@@ -5130,7 +5346,9 @@ function apply(ctx) {
     let contourWorker = null
     let contourWorkerCv = null
     let contourWorkerUrl = null
-    let contourWorkerFailed = false
+    let contourWorkerFailed2d = false
+    let contourWorkerFailed3d = false
+    let contourWorkerMode = ''
     let contourWorkerToken = 0
     let contourWorkerSizeSig = ''
     let contourWorkerBitmapSig = ''
@@ -5169,16 +5387,23 @@ function apply(ctx) {
         contourWorkerCv.parentNode.removeChild(contourWorkerCv)
       }
       contourWorkerCv = null
+      contourWorkerMode = ''
       contourWorkerSizeSig = ''
       contourWorkerBitmapSig = ''
       if (contourLineCv !== null && contourLineCv.style != null) contourLineCv.style.display = ''
     }
 
     const contourWorkerFail = (why) => {
-      if (contourWorkerFailed) return
-      contourWorkerFailed = true
+      const mode = contourWorkerMode
+      if (mode === '3d') {
+        if (contourWorkerFailed3d) return
+        contourWorkerFailed3d = true
+      } else {
+        if (contourWorkerFailed2d) return
+        contourWorkerFailed2d = true
+      }
       contourWorkerStop()
-      dbg('worker 2D unavailable: ' + why)
+      dbg('worker ' + (mode || '2d') + ' unavailable: ' + why)
       contourSwitchSig = ''
       contourApplySwitches()
       if (contourWrap !== null) contourBlit()
@@ -5191,13 +5416,56 @@ function apply(ctx) {
       if (sig === contourWorkerBitmapSig) return
       contourWorkerBitmapSig = sig
       const token = ++contourWorkerToken
+      if (contourWorkerMode === '3d') {
+        try {
+          const ctx = cv.getContext('2d')
+          const img = ctx.getImageData(0, 0, cv.width, cv.height)
+          if (token !== contourWorkerToken || contourWorker === null) return
+          contourWorker.postMessage({
+            type: 'bitmap', tw: cv.width, th: cv.height,
+            pixels: { w: img.width, h: img.height, bytes: img.data },
+          }, [img.data.buffer])
+          if (typeof contourWorkerSetHeight === 'function') contourWorkerSetHeight()
+        } catch (e) {
+          contourWorkerFail('sheet pixels')
+        }
+        return
+      }
       createImageBitmap(cv).then((bmp) => {
         if (token !== contourWorkerToken || contourWorker === null) {
           try { bmp.close() } catch (e) {}
           return
         }
         contourWorker.postMessage({ type: 'bitmap', bitmap: bmp, tw: cv.width, th: cv.height }, [bmp])
+        if (contourWorkerMode === '3d' && typeof contourWorkerSetHeight === 'function') contourWorkerSetHeight()
       }).catch(() => contourWorkerFail('bitmap'))
+    }
+
+    /* The 3D worker needs the smoothed height map and the hole band, exactly like the
+       main-thread upload. Sent only when the sheet rebuilds, never per frame. */
+    const contourWorkerSetHeight = () => {
+      if (contourWorker === null || contourWorkerMode !== '3d' || contourField === null || contourTex === null) return
+      const map = contourHeightMap(contourField)
+      const fl = contourField
+      const hasHoles = fl.holeLo !== null && fl.holeHi !== null && fl.holeHi > fl.holeLo
+      const hSpan = (fl.mx - fl.mn) || 1
+      contourWorker.postMessage({ type: 'height', w: map.w, h: map.h, bytes: map.bytes })
+      contourWorker.postMessage({
+        type: 'uniforms',
+        uniforms: {
+          depth: CONTOUR_3D_DEPTH,
+          ref: CONTOUR_3D_REF,
+          rise: CONTOUR_3D_RISE,
+          steps: CONTOUR_3D_STEPS,
+          holeOn: hasHoles ? 1 : 0,
+          holeHi: hasHoles ? (fl.holeHi - fl.mn) / hSpan : 1,
+          holeFeather: CONTOUR_HOLLOW_FEATHER,
+          drop: CONTOUR_3D_HOLE_DROP,
+          deepScale: CONTOUR_3D_HOLE_SCALE,
+          deepShiftX: CONTOUR_3D_HOLE_SHIFT_X,
+          deepShiftY: CONTOUR_3D_HOLE_SHIFT_Y,
+        },
+      })
     }
 
     const contourWorkerSync = () => {
@@ -5212,7 +5480,11 @@ function apply(ctx) {
         const sig = devW + 'x' + devH
         if (sig !== contourWorkerSizeSig) {
           contourWorkerSizeSig = sig
-          contourWorker.postMessage({ type: 'size', w: devW, h: devH })
+          contourWorker.postMessage({
+            type: 'size', w: devW, h: devH,
+            viewW: Math.max(1, Math.round(contourView.w * contourView.dpr)),
+            viewH: Math.max(1, Math.round(contourView.h * contourView.dpr)),
+          })
         }
       }
       contourWorker.postMessage({
@@ -5232,11 +5504,21 @@ function apply(ctx) {
     }
 
     const contourWorkerStart = () => {
-      if (contourWorkerFailed || !contourWorkerSupported()) return false
-      if (isContourView3D()) return false
+      const mode = isContourView3D() ? '3d' : '2d'
+      if (mode === '3d' ? contourWorkerFailed3d : contourWorkerFailed2d) {
+        /* The failed mode must not leave the other mode's canvas on screen. */
+        if (contourWorker !== null && contourWorkerMode !== mode) contourWorkerStop()
+        return false
+      }
+      if (!contourWorkerSupported()) return false
       if (contourWorker !== null) {
-        contourWorkerSync()
-        return true
+        if (contourWorkerMode === mode) {
+          contourWorkerSync()
+          return true
+        }
+        /* A view flip changes the context kind (2d vs webgl), so the old canvas
+           cannot be reused: stop it and build the new mode below. */
+        contourWorkerStop()
       }
       if (contourWrap === null || contourTex === null || contourTex.ready !== true || contourView === null) return false
       try {
@@ -5256,6 +5538,7 @@ function apply(ctx) {
         contourWorker = w
         contourWorkerCv = cv
         contourWorkerUrl = url
+        contourWorkerMode = mode
         /* A worker replaces the 3D layer as well: a live GL canvas on top would
            hide the worker's picture forever. */
         if (typeof contourGlDispose === 'function') contourGlDispose()
@@ -5265,11 +5548,21 @@ function apply(ctx) {
           if (m.type === 'failed') contourWorkerFail(m.why || 'worker')
           else if (m.type === 'stats' && typeof window !== 'undefined') window.__CONTOUR_WORKER_STATS__ = m
         }
-        w.onerror = () => contourWorkerFail('worker error')
-        w.postMessage({
-          type: 'init', canvas: off, w: devW, h: devH,
+        w.onerror = (ev) => contourWorkerFail('worker error: ' + (ev && ev.message ? ev.message : 'unknown') + ' @' + (ev && ev.lineno ? ev.lineno : '?') + ':' + (ev && ev.colno ? ev.colno : '?'))
+        const init = {
+          type: 'init', canvas: off, mode: mode, w: devW, h: devH,
+          viewW: Math.max(1, Math.round(contourView.w * contourView.dpr)),
+          viewH: Math.max(1, Math.round(contourView.h * contourView.dpr)),
           tw: contourTex.cv.width, th: contourTex.cv.height,
-        }, [off])
+          ox: contourOffsetX, oy: contourOffsetY,
+        }
+        if (mode === '3d') {
+          init.vert = CONTOUR_GL_VERT
+          init.frag = contourGlFragSource(false)
+          init.fragAA = contourGlFragSource(true)
+          init.soft = CONTOUR_SOFT_GL.source
+        }
+        w.postMessage(init, [off])
         contourWorkerSizeSig = devW + 'x' + devH
         if (contourLineCv !== null && contourLineCv.style != null) contourLineCv.style.display = 'none'
         contourWorkerSetBitmap()
@@ -5502,11 +5795,11 @@ function apply(ctx) {
       contourApplyHollow()
       /* The worker owns a canvas of its own; leaving 2D must remove it (and its
          GL-free layer) before the 3D mount, entering 2D must take over from 3D. */
-      if (isContourView3D()) {
-        if (typeof contourWorkerStop === 'function') contourWorkerStop()
-      } else if (typeof contourWorkerStart === 'function' && contourWorkerStart()) {
+      if (typeof contourWorkerStart === 'function' && contourWorkerStart()) {
         if (typeof contourStopLoop === 'function') contourStopLoop()
         if (typeof contourWorkerSync === 'function') contourWorkerSync()
+      } else if (isContourView3D()) {
+        if (typeof contourWorkerStop === 'function') contourWorkerStop()
       }
       /* Both directions, keyed on the request the last draw was made for: entering
          3D needs that one draw to mount the layer, leaving it needs one to drop it.
