@@ -1069,6 +1069,9 @@ function apply(ctx) {
        repaint once (the frame the user sees must be current, not whatever was on screen
        when the window was minimised). */
     const onContourVisibility = () => {
+      if (typeof contourWorkerSync === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+        contourWorkerSync()
+      }
       if (docHidden()) return
       if (typeof contourSyncHook === 'function') contourSyncHook()
       if (contourWrap !== null) {
@@ -3529,6 +3532,9 @@ function apply(ctx) {
       /* A chunked render is in flight: the sheet canvas holds a partial picture.
          Keep the last complete frame (the surface, or the preserved GL buffer). */
       if (contourTex.ready === false) return
+      /* The worker owns the flat layer: the main thread must not paint a second
+         copy (or hide the worker's canvas with a stale surface). */
+      if (typeof contourWorker !== 'undefined' && contourWorker !== null && !isContourView3D()) return
       /* 3D view: the shader does the moving, so nothing here has to touch the flat
          sheet. When the GPU says no, this returns false and the flat path below
          draws instead -- the sheet is always on screen, one way or the other. */
@@ -4805,6 +4811,11 @@ function apply(ctx) {
       contourRenderCache(() => {
         contourPaintSurface()
         if (contourWrap !== null) contourBlit()
+        if (typeof contourWorkerStart === 'function' && contourWorkerStart()) {
+          if (typeof contourStopLoop === 'function') contourStopLoop()
+          if (typeof contourWorkerSetBitmap === 'function') contourWorkerSetBitmap()
+          if (typeof contourWorkerSync === 'function') contourWorkerSync()
+        }
       })
       // Keep the scroll offset inside the (possibly new) texture period.
       contourOffsetX = ((contourOffsetX % t.twDev) + t.twDev) % t.twDev
@@ -4869,6 +4880,9 @@ function apply(ctx) {
           contourLineCv.style.width = w + 'px'
           contourLineCv.style.height = h + 'px'
         }
+      }
+      if (typeof contourWorkerSync === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+        contourWorkerSync()
       }
       return changed
     }
@@ -4962,7 +4976,318 @@ function apply(ctx) {
       }
     }
 
+    /* ---- off-main-thread 2D renderer --------------------------------------
+       The flat path used to move the sheet from the frame loop: one JS callback
+       per frame wrote a transform, and a busy main thread (streaming, a panel,
+       another app) delayed that callback even though the GPU was idle. This
+       worker owns a second canvas and advances the tile offsets itself, so the
+       page's main thread can be blocked without freezing the background.
+
+       Seamlessness is structural, not a reset trick: the sheet is a whole
+       period, the offset is kept in [0, period), and drawImage tiles from
+       -floor(offset). Crossing a period therefore changes the offset by exactly
+       one tile, which paints the same picture.
+
+       The worker uses Canvas2D at DEVICE resolution and integer source offsets,
+       matching the old surface path's 1:1 strokes. If any capability is missing,
+       contourWorkerStart() returns false and the existing main-thread path runs
+       unchanged. */
+    const contourWorkerMain = function () {
+      let canvas = null
+      let ctx = null
+      let bmp = null
+      let tw = 1
+      let th = 1
+      let w = 1
+      let h = 1
+      let vx = 0
+      let vy = 0
+      let ox = 0
+      let oy = 0
+      let paused = false
+      let running = false
+      let last = 0
+      let timer = null
+      let frames = 0
+
+      const paint = () => {
+        if (ctx === null || bmp === null) return
+        const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+          ? performance.now() : Date.now()
+        const dt = last > 0 ? Math.min(0.1, (now - last) / 1000) : 0
+        last = now
+        if (!paused) {
+          ox = (ox + vx * dt) % tw
+          oy = (oy + vy * dt) % th
+          if (ox < 0) ox += tw
+          if (oy < 0) oy += th
+        }
+        const sx = Math.floor(ox)
+        const sy = Math.floor(oy)
+        ctx.clearRect(0, 0, w, h)
+        ctx.imageSmoothingEnabled = false
+        for (let y = -sy; y < h; y += th) {
+          for (let x = -sx; x < w; x += tw) {
+            ctx.drawImage(bmp, x, y)
+          }
+        }
+      }
+
+      const tick = () => {
+        timer = null
+        if (!running) return
+        paint()
+        frames += 1
+        timer = setTimeout(tick, 16)
+      }
+
+      self.onmessage = (e) => {
+        const m = e.data || {}
+        if (m.type === 'init') {
+          canvas = m.canvas
+          w = m.w
+          h = m.h
+          tw = m.tw
+          th = m.th
+          canvas.width = w
+          canvas.height = h
+          ctx = canvas.getContext('2d', { alpha: true })
+          if (ctx === null) {
+            self.postMessage({ type: 'failed', why: '2d context' })
+            return
+          }
+          running = true
+          last = 0
+          tick()
+          return
+        }
+        if (m.type === 'bitmap') {
+          bmp = m.bitmap
+          tw = m.tw
+          th = m.th
+          return
+        }
+        if (m.type === 'size') {
+          w = m.w
+          h = m.h
+          if (canvas !== null) {
+            canvas.width = w
+            canvas.height = h
+          }
+          last = 0
+          return
+        }
+        if (m.type === 'motion') {
+          vx = m.vx
+          vy = m.vy
+          return
+        }
+        if (m.type === 'pause') {
+          paused = m.paused === true
+          return
+        }
+        if (m.type === 'run') {
+          const on = m.on === true
+          if (on && !running) {
+            running = true
+            last = 0
+            if (timer === null) tick()
+          } else if (!on && running) {
+            running = false
+            if (timer !== null) {
+              clearTimeout(timer)
+              timer = null
+            }
+          }
+          return
+        }
+        if (m.type === 'offset') {
+          ox = m.ox
+          oy = m.oy
+          return
+        }
+        if (m.type === 'snapshot') {
+          self.postMessage({ type: 'offset', ox: ox, oy: oy })
+          return
+        }
+        if (m.type === 'stats') {
+          self.postMessage({ type: 'stats', frames: frames, ox: ox, oy: oy, paused: paused, running: running, tw: tw, th: th })
+          return
+        }
+        if (m.type === 'stop') {
+          running = false
+          if (timer !== null) clearTimeout(timer)
+          timer = null
+          if (bmp !== null) {
+            try { bmp.close() } catch (err) {}
+          }
+          bmp = null
+          self.close()
+        }
+      }
+    }
+
+    let contourWorker = null
+    let contourWorkerCv = null
+    let contourWorkerUrl = null
+    let contourWorkerFailed = false
+    let contourWorkerToken = 0
+    let contourWorkerSizeSig = ''
+    let contourWorkerBitmapSig = ''
+
+    const contourWorkerSupported = () => {
+      /* Harnesses that drive a virtual clock run the main-thread path: a worker's
+         16ms timer loop would consume the whole virtual budget before the page's
+         own timers run. Production leaves this unset. */
+      if (typeof window !== 'undefined' && window.__CONTOUR_NO_WORKER__ === true) return false
+      try {
+        return typeof Worker === 'function'
+          && typeof OffscreenCanvas === 'function'
+          && typeof HTMLCanvasElement !== 'undefined'
+          && typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function'
+          && typeof Blob === 'function'
+          && typeof URL !== 'undefined'
+          && typeof URL.createObjectURL === 'function'
+          && typeof createImageBitmap === 'function'
+      } catch (e) {
+        return false
+      }
+    }
+
+    const contourWorkerStop = () => {
+      contourWorkerToken += 1
+      if (contourWorker !== null) {
+        try { contourWorker.postMessage({ type: 'stop' }) } catch (e) {}
+        try { contourWorker.terminate() } catch (e) {}
+        contourWorker = null
+      }
+      if (contourWorkerUrl !== null) {
+        try { URL.revokeObjectURL(contourWorkerUrl) } catch (e) {}
+        contourWorkerUrl = null
+      }
+      if (contourWorkerCv !== null && contourWorkerCv.parentNode) {
+        contourWorkerCv.parentNode.removeChild(contourWorkerCv)
+      }
+      contourWorkerCv = null
+      contourWorkerSizeSig = ''
+      contourWorkerBitmapSig = ''
+      if (contourLineCv !== null && contourLineCv.style != null) contourLineCv.style.display = ''
+    }
+
+    const contourWorkerFail = (why) => {
+      if (contourWorkerFailed) return
+      contourWorkerFailed = true
+      contourWorkerStop()
+      dbg('worker 2D unavailable: ' + why)
+      contourSwitchSig = ''
+      contourApplySwitches()
+      if (contourWrap !== null) contourBlit()
+    }
+
+    const contourWorkerSetBitmap = () => {
+      if (contourWorker === null || contourTex === null || contourTex.ready !== true) return
+      const cv = contourTex.cv
+      const sig = contourSheetGen + ':' + cv.width + 'x' + cv.height
+      if (sig === contourWorkerBitmapSig) return
+      contourWorkerBitmapSig = sig
+      const token = ++contourWorkerToken
+      createImageBitmap(cv).then((bmp) => {
+        if (token !== contourWorkerToken || contourWorker === null) {
+          try { bmp.close() } catch (e) {}
+          return
+        }
+        contourWorker.postMessage({ type: 'bitmap', bitmap: bmp, tw: cv.width, th: cv.height }, [bmp])
+      }).catch(() => contourWorkerFail('bitmap'))
+    }
+
+    const contourWorkerSync = () => {
+      if (contourWorker === null) return
+      if (contourView !== null) {
+        const devW = Math.max(1, Math.round(contourView.w * contourView.dpr))
+        const devH = Math.max(1, Math.round(contourView.h * contourView.dpr))
+        if (contourWorkerCv !== null && contourWorkerCv.style != null) {
+          contourWorkerCv.style.width = contourView.w + 'px'
+          contourWorkerCv.style.height = contourView.h + 'px'
+        }
+        const sig = devW + 'x' + devH
+        if (sig !== contourWorkerSizeSig) {
+          contourWorkerSizeSig = sig
+          contourWorker.postMessage({ type: 'size', w: devW, h: devH })
+        }
+      }
+      contourWorker.postMessage({
+        type: 'motion',
+        vx: contourVelX * contourSpeedPx * contourDpr,
+        vy: contourVelY * contourSpeedPx * contourDpr,
+      })
+      const on = !docHidden()
+        && !contourLoaderActive
+        && !contourResizing
+        && isContourAnimOn()
+        && !prefersReducedMotion()
+        && isContourOn()
+        && isEnabled()
+      contourWorker.postMessage({ type: 'run', on: on })
+      contourWorker.postMessage({ type: 'pause', paused: contourScrollPaused === true })
+    }
+
+    const contourWorkerStart = () => {
+      if (contourWorkerFailed || !contourWorkerSupported()) return false
+      if (isContourView3D()) return false
+      if (contourWorker !== null) {
+        contourWorkerSync()
+        return true
+      }
+      if (contourWrap === null || contourTex === null || contourTex.ready !== true || contourView === null) return false
+      try {
+        const cv = document.createElement('canvas')
+        cv.setAttribute('data-endfield-contour-worker', '')
+        cv.setAttribute('aria-hidden', 'true')
+        const devW = Math.max(1, Math.round(contourView.w * contourView.dpr))
+        const devH = Math.max(1, Math.round(contourView.h * contourView.dpr))
+        cv.width = devW
+        cv.height = devH
+        cv.style.width = contourView.w + 'px'
+        cv.style.height = contourView.h + 'px'
+        contourWrap.appendChild(cv)
+        const off = cv.transferControlToOffscreen()
+        const url = URL.createObjectURL(new Blob(['(' + contourWorkerMain.toString() + ')()'], { type: 'text/javascript' }))
+        const w = new Worker(url)
+        contourWorker = w
+        contourWorkerCv = cv
+        contourWorkerUrl = url
+        /* A worker replaces the 3D layer as well: a live GL canvas on top would
+           hide the worker's picture forever. */
+        if (typeof contourGlDispose === 'function') contourGlDispose()
+        contourGlAsked = false
+        w.onmessage = (e) => {
+          const m = e.data || {}
+          if (m.type === 'failed') contourWorkerFail(m.why || 'worker')
+          else if (m.type === 'stats' && typeof window !== 'undefined') window.__CONTOUR_WORKER_STATS__ = m
+        }
+        w.onerror = () => contourWorkerFail('worker error')
+        w.postMessage({
+          type: 'init', canvas: off, w: devW, h: devH,
+          tw: contourTex.cv.width, th: contourTex.cv.height,
+        }, [off])
+        contourWorkerSizeSig = devW + 'x' + devH
+        if (contourLineCv !== null && contourLineCv.style != null) contourLineCv.style.display = 'none'
+        contourWorkerSetBitmap()
+        contourWorkerSync()
+        if (typeof window !== 'undefined' && window.__CONTOUR_DEBUG__ === true) {
+          window.__contourWorkerProbe = () => {
+            if (contourWorker !== null) contourWorker.postMessage({ type: 'stats' })
+          }
+        }
+        return true
+      } catch (e) {
+        contourWorkerFail(String(e))
+        return false
+      }
+    }
+
     const contourStartLoop = () => {
+      if (typeof contourWorker !== 'undefined' && contourWorker !== null) return
       if (contourRaf !== null) return
       if (typeof requestAnimationFrame !== 'function') return
       if (!contourWantsScroll()) return
@@ -4982,6 +5307,9 @@ function apply(ctx) {
       contourVelX = d[0]
       contourVelY = d[1]
       contourSpeedPx = CONTOUR_SPEEDS[contourSpeedIndex()]
+      if (typeof contourWorkerSync === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+        contourWorkerSync()
+      }
     }
 
     /* Density change: same field, new levels. Re-extract + re-render + one blit;
@@ -4994,6 +5322,9 @@ function apply(ctx) {
       contourRenderCache(() => {
         contourPaintSurface()
         contourBlit()
+        if (typeof contourWorkerSetBitmap === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+          contourWorkerSetBitmap()
+        }
       })
     }
 
@@ -5068,6 +5399,7 @@ function apply(ctx) {
     }
 
     const contourTeardown = () => {
+      if (typeof contourWorkerStop === 'function') contourWorkerStop()
       contourStopLoop()
       /* Cancel a chunked render in flight: the canvas and the layer are going away,
          and a queued slice must not stroke into a detached canvas. */
@@ -5124,8 +5456,16 @@ function apply(ctx) {
       if (sig === contourSwitchSig) return
       contourSwitchSig = sig
       contourRefreshMotion()
-      if (scroll) contourStartLoop()
-      else {
+      /* The worker is the preferred flat renderer. When it starts, the main loop
+         must stop: two loops would paint the same sheet twice and, worse, keep the
+         main thread doing the work this change exists to remove. */
+      const usingWorker = typeof contourWorkerStart === 'function' && contourWorkerStart()
+      if (usingWorker) {
+        contourStopLoop()
+        if (typeof contourWorkerSync === 'function') contourWorkerSync()
+      } else if (scroll) {
+        contourStartLoop()
+      } else {
         contourStopLoop()
         /* Scroll just switched off: one final blit keeps the sheet a complete
            picture (it already is one -- the loop never leaves it half-drawn --
@@ -5160,6 +5500,14 @@ function apply(ctx) {
       /* Carving is part of the sheet, so it has to be rebuilt BEFORE the flip is
          drawn or the first frame of 3D shows the flat terrain. */
       contourApplyHollow()
+      /* The worker owns a canvas of its own; leaving 2D must remove it (and its
+         GL-free layer) before the 3D mount, entering 2D must take over from 3D. */
+      if (isContourView3D()) {
+        if (typeof contourWorkerStop === 'function') contourWorkerStop()
+      } else if (typeof contourWorkerStart === 'function' && contourWorkerStart()) {
+        if (typeof contourStopLoop === 'function') contourStopLoop()
+        if (typeof contourWorkerSync === 'function') contourWorkerSync()
+      }
       /* Both directions, keyed on the request the last draw was made for: entering
          3D needs that one draw to mount the layer, leaving it needs one to drop it.
          Nothing else guarantees a repaint (with the movement paused nothing ticks),
@@ -5421,9 +5769,14 @@ function apply(ctx) {
       if (contourScrollPaused) return
       contourScrollPaused = true
       contourSwitchSig = ''
-      /* The loop can be idle for another reason; start it so even a frozen picture is
-         committed every frame of the scroll. */
-      if (contourRaf === null) contourStartLoop()
+      /* The worker keeps drawing the frozen picture without the main thread. The
+         old loop can be idle for another reason; start it so even a frozen picture
+         is committed every frame of the scroll. */
+      if (typeof contourWorkerSync === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+        contourWorkerSync()
+      } else if (contourRaf === null) {
+        contourStartLoop()
+      }
     }
     const contourResumeAfterScroll = () => {
       if (!contourScrollPaused) return
@@ -5459,6 +5812,9 @@ function apply(ctx) {
         contourSwitchSig = ''
         contourStopLoop()
       }
+      if (typeof contourWorkerSync === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+        contourWorkerSync()
+      }
     }
     const contourResumeAfterLoader = () => {
       contourLoaderActive = false
@@ -5479,6 +5835,9 @@ function apply(ctx) {
       contourRenderCache(() => {
         contourPaintSurface()
         contourBlit()
+        if (typeof contourWorkerSetBitmap === 'function' && typeof contourWorker !== 'undefined' && contourWorker !== null) {
+          contourWorkerSetBitmap()
+        }
       })
     }
 

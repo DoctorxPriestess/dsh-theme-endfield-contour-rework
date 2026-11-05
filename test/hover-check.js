@@ -175,7 +175,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   </style></head><body>
   <div class="panel"><button class="zGbnIq_secondaryButton" id="edit">编辑</button></div>
   <script>window.__ModuleLoader__={load:(m)=>{window.__MOD__=m}}</script>
-  <script>window.__CONTOUR_SYNC_BUILD__=true</script>
+  <script>window.__CONTOUR_SYNC_BUILD__=true;window.__CONTOUR_NO_WORKER__=true</script>
 <script src="./client.js"></script>
   <script>
     let applied=[], scheme='dark', last=null
