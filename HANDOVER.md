@@ -7,7 +7,7 @@
 
 ## 1. 一句话状态
 
-**1.7.0 已打包，待装入 desktop profile 并重启生效**：2D 与 3D 等高线都改为
+**1.7.0 已打包并装入 desktop profile，重启 DSH 后生效**：2D 与 3D 等高线都改为
 Worker + OffscreenCanvas 离主线程渲染，主线程忙时背景仍然连续；2D/3D 各自保留主线程回退。
 固定种子、动画关闭的像素 A/B 中，2D 和 3D 的 Worker 截图与主线程截图 **SHA-256 完全相同**
 （1920×1233）。主线程忙循环 1.5s 时 3D Worker 帧数 6 → 114（+108），无异常。关键修复是
@@ -23,11 +23,11 @@ Worker + OffscreenCanvas 离主线程渲染，主线程忙时背景仍然连续�
 | 项 | 值 |
 |---|---|
 | 源码目录 | `D:\AI Misc\dsh-theme-endfield-contour-rework` |
-| 分支 / 修复提交 | `feat/offscreen-render` / 1.7.0 离主线程渲染（`main` 待合并） |
-| 已安装版本 | **1.7.0**（打包/安装后需重启 DSH 才生效；2D/3D Worker + 主线程回退） |
+| 分支 / 修复提交 | `main` / `e3e38d7`（1.7.0 离主线程渲染） |
+| 已安装版本 | **1.7.0**（desktop profile 已指向 1.7.0 tgz；**需重启 DSH 才生效**） |
 | 安装包 | `…\.dsh\backups\local-build\dsh-theme-endfield-contour-rework-1.7.0.tgz` |
 | 版本号 | `package.json` **1.7.0**（已升版） |
-| 1.7.0 安装前快照 | 安装前用 `undo_snapshot` 生成（见 §12） |
+| 1.7.0 安装前快照 | `20261106-041318-0b87`（6 个文件，安装前手动快照） |
 | 当前动画设置 | `contourAnim: "1"`（镜像与 `cordis.patch.yml` 均已恢复；重启后生效） |
 | 远端 | `origin`（GitHub, HTTPS）落后本地提交，**未推送** |
 | 未跟踪文件 | `.dsh-ops/`（工具审计目录，可忽略；`WORKLOG.md` 为代理日志） |
